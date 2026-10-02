@@ -650,6 +650,8 @@ pub struct App {
     /// Whether "Connection lost" was announced, so the way back is announced
     /// too while the startup connection stays silent.
     announced_offline: bool,
+    /// "Connecting" is spoken once per offline episode, not on every retry.
+    announced_connecting: bool,
 }
 
 /// A message that flashes after a jump to it, as WhatsApp does.
@@ -1183,6 +1185,7 @@ impl App {
             app_lock,
             announcer: Default::default(),
             announced_offline: false,
+            announced_connecting: false,
         };
         // A hand-edited speed snaps to a supported one, so a speed control
         // always shows the speed that plays.
@@ -1364,6 +1367,9 @@ impl App {
         self.recording = None;
         self.image_preview = None;
         self.video_expanded = false;
+        // The offline episode announced was the previous account's link.
+        self.announced_offline = false;
+        self.announced_connecting = false;
         // Messages and typing spoken for the previous account are not
         // left readable in the tree.
         self.announcer.forget_private();
@@ -3238,8 +3244,9 @@ impl App {
         } else if live
             && matches!(status, LinkStatus::Connecting | LinkStatus::Starting)
             && self.announced_offline
-            && !matches!(self.link, LinkStatus::Connecting | LinkStatus::Starting)
+            && !self.announced_connecting
         {
+            self.announced_connecting = true;
             self.announcer.say(
                 crate::announcer::Category::Status,
                 crate::i18n::gettext(self.locale, "Connecting"),
@@ -3256,11 +3263,15 @@ impl App {
                     }
                 }
                 // The toast announces itself, which covers "Connected".
-                if matches!(self.link, LinkStatus::Disconnected { .. }) {
+                // A retry passes through Connecting, so the episode flag counts too.
+                if (live && self.announced_offline)
+                    || matches!(self.link, LinkStatus::Disconnected { .. })
+                {
                     self.toast("Back online");
                 }
                 if live {
                     self.announced_offline = false;
+                    self.announced_connecting = false;
                     self.dialog = match self.dialog.take() {
                         Some(Dialog::PairWithPhone) => None,
                         other => other,
@@ -7484,6 +7495,39 @@ mod tests {
     }
 
     #[test]
+    fn connecting_is_announced_once_per_offline_episode() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut app, _events) = App::headless(AppDirs::under(root.path()), Settings::default());
+        let ctx = egui::Context::default();
+        let mut spoken = Vec::new();
+        app.link = LinkStatus::Connected;
+        for status in [
+            LinkStatus::Disconnected {
+                reason: "fixture".into(),
+            },
+            LinkStatus::Connecting,
+            LinkStatus::Disconnected {
+                reason: "fixture".into(),
+            },
+            LinkStatus::Connecting,
+            LinkStatus::Connected,
+        ] {
+            let before: Vec<String> = app.announcer.spoken().map(String::from).into();
+            app.handle_link(status, true);
+            app.announcer.show(&ctx, true);
+            // A slot that changed this frame holds what was just spoken.
+            for (old, new) in before.iter().zip(app.announcer.spoken()) {
+                if old != new {
+                    spoken.push(new.trim_end_matches('\u{200B}').to_string());
+                }
+            }
+        }
+        assert_eq!(spoken.iter().filter(|t| *t == "Connection lost").count(), 1);
+        assert_eq!(spoken.iter().filter(|t| *t == "Connecting").count(), 1);
+        assert!(spoken.last().unwrap().starts_with("Back online"));
+    }
+
+    #[test]
     fn startup_connection_is_not_announced() {
         let root = tempfile::tempdir().unwrap();
         let (mut app, _events) = App::headless(AppDirs::under(root.path()), Settings::default());
@@ -8269,6 +8313,21 @@ mod tests {
         let spoken = app.announcer.spoken().join(" ");
         assert!(!spoken.contains("Studio"), "{spoken}");
         assert!(!spoken.contains("Contact saved"), "{spoken}");
+    }
+
+    /// Another account on screen has its own link: the previous account's
+    /// offline episode is over for the announcements.
+    #[test]
+    fn switching_accounts_ends_the_announced_offline_episode() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _commands) = two_accounts(directory.path());
+        let ctx = egui::Context::default();
+        app.announced_offline = true;
+        app.announced_connecting = true;
+        app.apply(Action::SwitchAccount(AccountId::parse("2").unwrap()), &ctx);
+        assert_eq!(app.account().id.as_str(), "2");
+        assert!(!app.announced_offline);
+        assert!(!app.announced_connecting);
     }
 
     /// A message spoken for one account is not left readable in the tree
