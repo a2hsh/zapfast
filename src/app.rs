@@ -647,6 +647,9 @@ pub struct App {
     pub app_lock: crate::app_lock::AppLock,
     /// Spoken announcements for screen readers, emitted every frame.
     pub announcer: crate::announcer::Announcer,
+    /// Whether "Connection lost" was announced, so the way back is announced
+    /// too while the startup connection stays silent.
+    announced_offline: bool,
 }
 
 /// A message that flashes after a jump to it, as WhatsApp does.
@@ -1179,6 +1182,7 @@ impl App {
             badge: None,
             app_lock,
             announcer: Default::default(),
+            announced_offline: false,
         };
         // A hand-edited speed snaps to a supported one, so a speed control
         // always shows the speed that plays.
@@ -2951,6 +2955,12 @@ impl App {
                 if self.syncing && !syncing {
                     self.toast("History loaded");
                 }
+                if live && !self.syncing && syncing {
+                    self.announcer.say(
+                        crate::announcer::Category::Status,
+                        crate::i18n::gettext(self.locale, "Loading chat history"),
+                    );
+                }
                 self.syncing = syncing;
                 if !syncing {
                     self.sync_percent = None;
@@ -3213,6 +3223,28 @@ impl App {
 
     /// Updates one account's link state, discarding its drafts when it is unlinked.
     fn handle_link(&mut self, status: LinkStatus, live: bool) {
+        // Only a drop after being connected is news; the startup sequence
+        // (Starting, Connecting, Connected) stays silent. An account that is
+        // not on screen is never announced.
+        if live
+            && matches!(status, LinkStatus::Disconnected { .. })
+            && matches!(self.link, LinkStatus::Connected)
+        {
+            self.announced_offline = true;
+            self.announcer.say(
+                crate::announcer::Category::Status,
+                crate::i18n::gettext(self.locale, "Connection lost"),
+            );
+        } else if live
+            && matches!(status, LinkStatus::Connecting | LinkStatus::Starting)
+            && self.announced_offline
+            && !matches!(self.link, LinkStatus::Connecting | LinkStatus::Starting)
+        {
+            self.announcer.say(
+                crate::announcer::Category::Status,
+                crate::i18n::gettext(self.locale, "Connecting"),
+            );
+        }
         match &status {
             LinkStatus::Connected => {
                 for conversation in self.conversations.values_mut() {
@@ -3223,10 +3255,12 @@ impl App {
                         }
                     }
                 }
+                // The toast announces itself, which covers "Connected".
                 if matches!(self.link, LinkStatus::Disconnected { .. }) {
                     self.toast("Back online");
                 }
                 if live {
+                    self.announced_offline = false;
                     self.dialog = match self.dialog.take() {
                         Some(Dialog::PairWithPhone) => None,
                         other => other,
@@ -6304,9 +6338,32 @@ impl App {
         }
     }
 
+    /// What a screen reader hears for a toast. One raised by an account that
+    /// is not on screen shows over another account's chats, so it is said
+    /// with its account's name first: "Studio: History loaded".
+    fn toast_said(&self, message: &str) -> String {
+        if !self.events_hidden {
+            return message.to_owned();
+        }
+        let account = self.account().display_label(self.locale);
+        let template = crate::i18n::gettext(self.locale, "{}: {}");
+        let mut parts = template.splitn(3, "{}");
+        format!(
+            "{}{}{}{}{}",
+            parts.next().unwrap_or_default(),
+            account,
+            parts.next().unwrap_or_default(),
+            message,
+            parts.next().unwrap_or_default(),
+        )
+    }
+
     pub fn toast(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        let said = self.toast_said(&message);
+        self.announcer.say(crate::announcer::Category::Toast, said);
         self.toasts.push(Toast {
-            message: message.into(),
+            message,
             kind: ToastKind::Info,
             created: Instant::now(),
         });
@@ -6329,6 +6386,8 @@ impl App {
 
     pub fn toast_error(&mut self, message: impl Into<String>) {
         let message = message.into();
+        let said = self.toast_said(&message);
+        self.announcer.say(crate::announcer::Category::Error, said);
         log::warn!("an operation failed; details are shown in the window");
         // Errors stay until dismissed: a repeat moves to the end instead of
         // stacking, and only the newest few are kept.
@@ -7394,6 +7453,46 @@ mod tests {
     use super::*;
     use crate::model::{ChatKind, Content, Dialog, Media, MediaState, ToastKind};
 
+    #[test]
+    fn toasts_errors_and_connection_changes_are_announced() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut app, _events) = App::headless(AppDirs::under(root.path()), Settings::default());
+        app.toast("Copied");
+        app.toast_error("Could not send");
+        let ctx = egui::Context::default();
+        app.announcer.show(&ctx, true);
+        // Errors are read first.
+        assert_eq!(app.announcer.spoken()[0], "Could not send. Copied");
+
+        app.link = LinkStatus::Connected;
+        app.handle_link(
+            LinkStatus::Disconnected {
+                reason: "fixture".into(),
+            },
+            true,
+        );
+        app.announcer.show(&ctx, true);
+        assert!(app.announcer.spoken().contains(&"Connection lost"));
+        app.handle_link(LinkStatus::Connected, true);
+        app.announcer.show(&ctx, true);
+        assert!(
+            app.announcer
+                .spoken()
+                .iter()
+                .any(|text| text.starts_with("Back online"))
+        );
+    }
+
+    #[test]
+    fn startup_connection_is_not_announced() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut app, _events) = App::headless(AppDirs::under(root.path()), Settings::default());
+        app.handle_link(LinkStatus::Connecting, true);
+        app.handle_link(LinkStatus::Connected, true);
+        app.announcer.show(&egui::Context::default(), true);
+        assert_eq!(app.announcer.spoken(), ["", ""]);
+    }
+
     fn app() -> App {
         let root = std::env::temp_dir().join(format!("zapfast-app-{}", std::process::id()));
         App::headless(AppDirs::under(&root), Settings::default()).0
@@ -8094,6 +8193,82 @@ mod tests {
                 .any(|command| matches!(command, Command::MarkRead { .. })),
             "no read receipt for a chat nobody is looking at"
         );
+    }
+
+    /// A hidden account's toasts are spoken with its name first, since they
+    /// show over the chats of the account on screen: a message of its own,
+    /// and its way back online after a drop that was never announced.
+    #[test]
+    fn a_hidden_accounts_toasts_name_the_account() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _commands) = two_accounts(directory.path());
+        app.accounts[1].me_name = Some("Studio".into());
+        app.accounts[1].link = LinkStatus::Disconnected {
+            reason: "fixture".into(),
+        };
+        app.active = 1;
+        app.events_hidden = true;
+        app.apply_backend_event(Event::Info("Contact saved".into()), false);
+        app.apply_backend_event(Event::Link(LinkStatus::Connected), false);
+        app.events_hidden = false;
+        app.active = 0;
+        app.announcer.show(&egui::Context::default(), true);
+        let spoken = app.announcer.spoken().join(" ");
+        assert!(spoken.contains("Studio: Contact saved"), "{spoken}");
+        assert!(spoken.contains("Studio: Back online"), "{spoken}");
+        assert!(!spoken.contains("Connection lost"), "{spoken}");
+        // The toasts show as upstream shows them.
+        assert!(
+            app.toasts
+                .iter()
+                .any(|toast| toast.message == "Contact saved")
+        );
+    }
+
+    /// eframe draws no frame for a minimized, covered or hidden window, so
+    /// nothing is spoken then. On return, what happened meanwhile is not read
+    /// out in one burst: only what is still on screen, an unclosed error.
+    #[test]
+    fn announcements_go_stale_with_their_toasts_while_nothing_is_drawn() {
+        use fastframe_shell::Resident;
+        let root = tempfile::tempdir().unwrap();
+        let (mut app, _events) = App::headless(AppDirs::under(root.path()), Settings::default());
+        let ctx = egui::Context::default();
+        app.window_hidden = true;
+        app.toast("Copied");
+        app.toast_error("Could not send");
+        app.headless_frame(&ctx);
+        app.announcer.age(INFO_TOAST_LIFETIME);
+        app.window_hidden = false;
+        app.announcer.show(&ctx, true);
+        assert_eq!(app.announcer.spoken()[0], "Could not send");
+        assert!(
+            app.announcer
+                .spoken()
+                .iter()
+                .all(|text| !text.contains("Copied")),
+            "{:?}",
+            app.announcer.spoken()
+        );
+    }
+
+    /// The lock screen draws no toasts, so a toast, which can name a hidden
+    /// account or a contact, is not spoken behind it either.
+    #[test]
+    fn a_toast_is_not_spoken_while_the_app_is_locked() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _commands) = two_accounts(directory.path());
+        app.accounts[1].me_name = Some("Studio".into());
+        app.active = 1;
+        app.events_hidden = true;
+        app.apply_backend_event(Event::Info("Contact saved".into()), false);
+        app.events_hidden = false;
+        app.active = 0;
+        // What ui::announce passes on a locked frame.
+        app.announcer.show(&egui::Context::default(), false);
+        let spoken = app.announcer.spoken().join(" ");
+        assert!(!spoken.contains("Studio"), "{spoken}");
+        assert!(!spoken.contains("Contact saved"), "{spoken}");
     }
 
     /// A message spoken for one account is not left readable in the tree

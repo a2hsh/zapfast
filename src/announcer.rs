@@ -1,7 +1,16 @@
 //! Spoken announcements for screen readers: two hidden live-region nodes
 //! take turns, so a repeated message is still a change worth reading.
 
+use std::time::{Duration, Instant};
+
 use egui::accesskit::{Live, Role};
+
+/// How long an announcement waits to be spoken: as long as an info toast
+/// stays on screen. eframe draws no frame for a minimized, covered or
+/// hidden window, so nothing is spoken then; what is older than this when
+/// a frame comes is stale and dropped. An error waits, as its toast stays
+/// on screen until it is closed.
+const FRESH: Duration = crate::app::INFO_TOAST_LIFETIME;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Category {
@@ -11,22 +20,34 @@ pub enum Category {
     Typing,
     /// One of our messages was sent or could not be.
     Sent,
-    /// Confirmations, connection and history state.
+    /// Connection and history state.
     Status,
+    /// A confirmation shown as a toast.
+    Toast,
     /// Errors: read before anything else waiting.
     Error,
 }
 
+/// Whether a `category` item said at `at` is still worth speaking `now`.
+fn fresh(category: Category, at: Instant, now: Instant) -> bool {
+    category == Category::Error || now.saturating_duration_since(at) < FRESH
+}
+
 impl Category {
-    /// Categories that would reveal who wrote or what, hidden while locked.
+    /// Categories hidden while locked: messages and typing reveal who wrote
+    /// or what, and toasts, errors included, are not drawn on the lock
+    /// screen and can name a contact or an account.
     fn private(self) -> bool {
-        matches!(self, Self::Message | Self::Typing)
+        matches!(
+            self,
+            Self::Message | Self::Typing | Self::Toast | Self::Error
+        )
     }
 }
 
 #[derive(Default)]
 pub struct Announcer {
-    queue: Vec<(Category, String)>,
+    queue: Vec<(Category, String, Instant)>,
     /// Per slot: the text, whether it is assertive, whether it came from a
     /// private category.
     slots: [(String, bool, bool); 2],
@@ -41,7 +62,11 @@ impl Announcer {
     pub fn say(&mut self, category: Category, text: impl Into<String>) {
         let text = text.into();
         if !text.trim().is_empty() {
-            self.queue.push((category, text));
+            let now = Instant::now();
+            // While no frame speaks them, stale items must not pile up.
+            self.queue
+                .retain(|(category, _, at)| fresh(*category, *at, now));
+            self.queue.push((category, text, now));
         }
     }
 
@@ -49,7 +74,7 @@ impl Announcer {
     /// that hold some, so it is no longer readable in the tree: behind the
     /// lock screen, or once another account is on screen.
     pub fn forget_private(&mut self) {
-        self.queue.retain(|(category, _)| !category.private());
+        self.queue.retain(|(category, _, _)| !category.private());
         for slot in &mut self.slots {
             if slot.2 {
                 *slot = Default::default();
@@ -59,9 +84,13 @@ impl Announcer {
 
     /// Emits both announcer nodes; call once per frame.
     pub fn show(&mut self, ctx: &egui::Context, private_allowed: bool) {
+        let now = Instant::now();
         let items: Vec<_> = std::mem::take(&mut self.queue)
             .into_iter()
-            .filter(|(category, _)| private_allowed || !category.private())
+            .filter(|(category, _, at)| {
+                fresh(*category, *at, now) && (private_allowed || !category.private())
+            })
+            .map(|(category, text, _)| (category, text))
             .collect();
         if !private_allowed {
             // Text spoken before the lock must not stay readable in the tree
@@ -69,6 +98,9 @@ impl Announcer {
             self.forget_private();
         }
         if !items.is_empty() {
+            // Errors first, each category in the order it was said.
+            let mut items = items;
+            items.sort_by_key(|(category, _)| *category != Category::Error);
             let private = items.iter().any(|(category, _)| category.private());
             let assertive = items
                 .iter()
@@ -128,6 +160,38 @@ mod tests {
         output
     }
 
+    impl Announcer {
+        /// Makes everything waiting look `by` older.
+        pub(crate) fn age(&mut self, by: Duration) {
+            for (_, _, at) in &mut self.queue {
+                *at = at.checked_sub(by).unwrap_or(*at);
+            }
+        }
+    }
+
+    #[test]
+    fn stale_announcements_are_dropped_but_errors_wait() {
+        let mut announcer = Announcer::default();
+        announcer.say(Category::Status, "Connection lost");
+        announcer.say(Category::Toast, "Copied");
+        announcer.say(Category::Error, "Could not send");
+        announcer.age(FRESH + Duration::from_millis(1));
+        announcer.say(Category::Status, "Back online");
+        frame(&mut announcer, true);
+        assert_eq!(announcer.spoken()[0], "Could not send. Back online");
+    }
+
+    #[test]
+    fn stale_items_do_not_pile_up_while_no_frame_speaks() {
+        let mut announcer = Announcer::default();
+        for _ in 0..100 {
+            announcer.say(Category::Toast, "Copied");
+            announcer.age(FRESH);
+        }
+        announcer.say(Category::Toast, "Copied");
+        assert_eq!(announcer.queue.len(), 1);
+    }
+
     #[test]
     fn alternates_slots_and_repeats_identical_text() {
         let mut announcer = Announcer::default();
@@ -159,7 +223,7 @@ mod tests {
             .find(|(id, _)| *id == announcer_id(0).accesskit_id())
             .map(|(_, node)| node)
             .unwrap();
-        assert_eq!(node.value(), Some("Copied. Could not send"));
+        assert_eq!(node.value(), Some("Could not send. Copied"));
         assert_eq!(node.live(), Some(egui::accesskit::Live::Assertive));
     }
 
@@ -168,6 +232,8 @@ mod tests {
         let mut announcer = Announcer::default();
         announcer.say(Category::Message, "Ada: secret");
         announcer.say(Category::Typing, "Ada is typing");
+        announcer.say(Category::Toast, "Studio: Contact saved");
+        announcer.say(Category::Error, "Could not send to Ada");
         announcer.say(Category::Status, "Connection lost");
         frame(&mut announcer, false);
         assert_eq!(announcer.spoken()[0], "Connection lost");

@@ -458,3 +458,23 @@ archived chats stay quiet while they remain archived. You can change both settin
 
 Press `Ctrl+/` or click the keyboard button under the composer to list all
 shortcuts.
+
+## Keyboard and screen readers
+
+AccessKit exposes the interface to desktop accessibility services. Custom
+buttons, chat rows, settings switches and message text include readable
+labels. Windows NVDA navigation still needs platform verification; keyboard
+and screen-reader support is not complete.
+
+ZapFast announces confirmations, errors, connection changes and history
+loading through the screen reader without moving focus.
+
+In the chat view, Tab cycles through the message input, send/voice button,
+the plus menu, emoji, profile, sidebar toggle, New chat, Settings, search,
+and chat filters, then returns to the input. Shift+Tab reverses that order;
+hidden controls are skipped. Messages, reactions and chat rows are not stops
+in this cycle; Alt+Up/Down switches conversations. Menus, dialogs and Settings
+keep their own Tab navigation. Every focus border is a single one-pixel inset
+outline following the control's shape, including circular voice buttons.
+Text fields stay outlined while active; other outlines hide when you use the
+mouse. Focus stays below menus, dialogs, and toasts.
