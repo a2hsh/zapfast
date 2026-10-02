@@ -5633,6 +5633,183 @@ mod tests {
             .collect()
     }
 
+    /// With our read receipts off, WhatsApp shows no read ticks in a
+    /// one-to-one chat (#458): the label reads the ticks the bubble shows,
+    /// delivered, not read.
+    #[test]
+    fn an_own_read_message_reads_delivered_while_receipts_are_off() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = app();
+        app.attach(&ctx);
+        let chat = app.open_chat.clone().unwrap();
+        let last = app
+            .conversations
+            .get_mut(&chat)
+            .unwrap()
+            .messages
+            .last_mut()
+            .unwrap();
+        last.from_me = true;
+        last.status = crate::model::Delivery::Read;
+        last.content = crate::model::Content::text("Receipts fixture");
+        render(&mut app, &ctx);
+        let label = |app: &mut App| {
+            accessible_nodes(app, &ctx, Vec::new())
+                .into_iter()
+                .map(|(text, _, _)| text)
+                .find(|text| text.starts_with("You, Receipts fixture"))
+                .expect("the message's label")
+        };
+        let read = label(&mut app);
+        assert!(read.contains(", read"), "{read}");
+        app.account_receipts_off = true;
+        let delivered = label(&mut app);
+        assert!(delivered.contains(", delivered"), "{delivered}");
+        assert!(!delivered.contains(", read"), "{delivered}");
+    }
+
+    #[test]
+    fn every_message_row_reads_as_one_labelled_node() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        let labels = accessible_labels(&mut app, &ctx);
+        let chat = app.current_chat().unwrap().clone();
+        let last = app.conversations[&chat.id].messages.last().unwrap().clone();
+        let time = crate::util::clock(last.timestamp);
+        let row = labels
+            .iter()
+            .find(|label| label.contains(&time) && label.contains(&last.summary()))
+            .unwrap_or_else(|| {
+                panic!("no row label with the last message's time and text: {labels:?}")
+            });
+        assert!(!last.from_me || row.starts_with("You, "), "{row}");
+    }
+
+    /// An album is one row (#286), and so one item: its label counts the
+    /// pictures, reads the caption and its last member's footer, star and
+    /// pin marks included, after the notice of the pin drawn above it.
+    #[test]
+    fn an_album_reads_as_one_row_with_its_notices_and_marks() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = app();
+        app.attach(&ctx);
+        let chat = app.open_chat.clone().unwrap();
+        let messages = &mut app.conversations.get_mut(&chat).unwrap().messages;
+        let count = messages.len();
+        let at = messages[count - 4].timestamp + 60;
+        for (index, message) in messages[count - 3..].iter_mut().enumerate() {
+            message.from_me = false;
+            message.sender = "album@s.whatsapp.net".into();
+            message.timestamp = at;
+            message.reactions.clear();
+            message.quoted = None;
+            message.edited = false;
+            message.forwarded = false;
+            message.content = crate::model::Content::Image {
+                motion: None,
+                caption: (index == 0).then(|| "Album fixture caption".to_owned()),
+                media: crate::model::Media {
+                    mime: "image/jpeg".into(),
+                    size: 1,
+                    width: Some(640),
+                    height: Some(480),
+                    album: Some("album-fixture".into()),
+                    path: None,
+                    state: crate::model::MediaState::Idle,
+                },
+            };
+        }
+        let last = messages[count - 1].id.clone();
+        app.stars
+            .entry(chat.clone())
+            .or_default()
+            .insert(last.clone());
+        app.pins
+            .entry(chat.clone())
+            .or_default()
+            .insert(last.clone());
+        app.chat_pins.insert(
+            chat.clone(),
+            vec![crate::archive::Pinned {
+                chat: chat.clone(),
+                id: last,
+                pinned_at: at - 30,
+                expires_at: at + 7 * 24 * 60 * 60,
+                text: String::new(),
+                from_me: false,
+                sent_at: at,
+                pinner: crate::archive::Pinner {
+                    by_me: true,
+                    sender: String::new(),
+                },
+            }],
+        );
+        render(&mut app, &ctx);
+        let labels: Vec<String> = accessible_nodes(&mut app, &ctx, Vec::new())
+            .into_iter()
+            .map(|(text, _, _)| text)
+            .filter(|text| text.contains(", 3 photos, "))
+            .collect();
+        let [row] = labels.as_slice() else {
+            panic!("the album is not one labelled row: {labels:?}");
+        };
+        assert!(row.contains("You pinned a message, "), "{row}");
+        assert!(row.contains("3 photos, Album fixture caption, "), "{row}");
+        assert!(row.contains(", starred, pinned"), "{row}");
+    }
+
+    /// A reply reads the quoted sender's name as its quote block draws it:
+    /// "You" for our own message, a saved contact name before the name the
+    /// quote carries.
+    #[test]
+    fn a_reply_reads_the_quoted_sender_as_its_quote_draws_it() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = app();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let chat = app.open_chat.clone().unwrap();
+        let reply_of = |app: &mut App| -> String {
+            accessible_nodes(app, &ctx, Vec::new())
+                .into_iter()
+                .map(|(text, _, _)| text)
+                .find(|text| text.starts_with("You, Listened, agreed on all three points., "))
+                .expect("the reply's label")
+        };
+        fn quoted<'a>(app: &'a mut App, chat: &str) -> &'a mut crate::model::Quoted {
+            app.conversations
+                .get_mut(chat)
+                .unwrap()
+                .messages
+                .iter_mut()
+                .find(|message| message.id == "ada-reply")
+                .unwrap()
+                .quoted
+                .as_mut()
+                .unwrap()
+        }
+        let ada = quoted(&mut app, &chat).sender.clone();
+        app.contacts.insert(
+            ada.clone(),
+            Contact {
+                id: ada,
+                full_name: Some("Ada King".to_owned()),
+                first_name: None,
+                push_name: None,
+            },
+        );
+        let label = reply_of(&mut app);
+        assert!(label.contains(", replying to Ada King: "), "{label}");
+        let quote = quoted(&mut app, &chat);
+        quote.sender = ME.to_owned();
+        quote.sender_name = Some("Abdulaziz".to_owned());
+        let label = reply_of(&mut app);
+        assert!(label.contains(", replying to You: "), "{label}");
+    }
+
     #[test]
     fn announcer_nodes_are_in_every_frame() {
         let mut app = app();
