@@ -27,7 +27,9 @@ impl Category {
 #[derive(Default)]
 pub struct Announcer {
     queue: Vec<(Category, String)>,
-    slots: [(String, bool); 2],
+    /// Per slot: the text, whether it is assertive, whether it came from a
+    /// private category.
+    slots: [(String, bool, bool); 2],
     next: usize,
 }
 
@@ -43,13 +45,31 @@ impl Announcer {
         }
     }
 
+    /// Drops the private text waiting to be spoken and empties the slots
+    /// that hold some, so it is no longer readable in the tree: behind the
+    /// lock screen, or once another account is on screen.
+    pub fn forget_private(&mut self) {
+        self.queue.retain(|(category, _)| !category.private());
+        for slot in &mut self.slots {
+            if slot.2 {
+                *slot = Default::default();
+            }
+        }
+    }
+
     /// Emits both announcer nodes; call once per frame.
     pub fn show(&mut self, ctx: &egui::Context, private_allowed: bool) {
         let items: Vec<_> = std::mem::take(&mut self.queue)
             .into_iter()
             .filter(|(category, _)| private_allowed || !category.private())
             .collect();
+        if !private_allowed {
+            // Text spoken before the lock must not stay readable in the tree
+            // behind the lock screen, nor come back after unlocking.
+            self.forget_private();
+        }
         if !items.is_empty() {
+            let private = items.iter().any(|(category, _)| category.private());
             let assertive = items
                 .iter()
                 .any(|(category, _)| *category == Category::Error);
@@ -65,10 +85,10 @@ impl Announcer {
             if self.slots[slot].0 == text {
                 text.push('\u{200B}');
             }
-            self.slots[slot] = (text, assertive);
+            self.slots[slot] = (text, assertive, private);
         }
         let ppp = f64::from(ctx.pixels_per_point());
-        for (slot, (text, assertive)) in self.slots.iter().enumerate() {
+        for (slot, (text, assertive, _)) in self.slots.iter().enumerate() {
             ctx.accesskit_node_builder(announcer_id(slot), |node| {
                 node.set_role(Role::Label);
                 node.set_value(text.clone());
@@ -165,5 +185,34 @@ mod tests {
                     .any(|(id, _)| *id == announcer_id(slot).accesskit_id())
             );
         }
+    }
+
+    #[test]
+    fn locking_clears_text_spoken_before_it() {
+        let mut announcer = Announcer::default();
+        announcer.say(Category::Message, "Ada: secret");
+        frame(&mut announcer, true);
+        assert_eq!(announcer.spoken()[0], "Ada: secret");
+        let output = frame(&mut announcer, false);
+        let tree = output.platform_output.accesskit_update.unwrap();
+        assert!(
+            tree.nodes
+                .iter()
+                .all(|(_, node)| node.value() != Some("Ada: secret"))
+        );
+        assert!(
+            announcer
+                .spoken()
+                .iter()
+                .all(|text| !text.contains("secret"))
+        );
+        // Unlocking does not bring it back.
+        frame(&mut announcer, true);
+        assert!(
+            announcer
+                .spoken()
+                .iter()
+                .all(|text| !text.contains("secret"))
+        );
     }
 }

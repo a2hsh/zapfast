@@ -1360,6 +1360,9 @@ impl App {
         self.recording = None;
         self.image_preview = None;
         self.video_expanded = false;
+        // Messages and typing spoken for the previous account are not
+        // left readable in the tree.
+        self.announcer.forget_private();
     }
 
     fn add_account(&mut self) {
@@ -6496,6 +6499,8 @@ impl App {
             return;
         }
         self.app_lock.lock();
+        // Nothing private stays readable in the tree behind the lock screen.
+        self.announcer.forget_private();
         self.window_focused = false;
         self.flush_open_draft();
         self.recording = None;
@@ -8088,6 +8093,27 @@ mod tests {
             !std::iter::from_fn(|| commands.try_recv().ok())
                 .any(|command| matches!(command, Command::MarkRead { .. })),
             "no read receipt for a chat nobody is looking at"
+        );
+    }
+
+    /// A message spoken for one account is not left readable in the tree
+    /// once another account is on screen.
+    #[test]
+    fn switching_accounts_empties_the_spoken_messages() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _commands) = two_accounts(directory.path());
+        let ctx = egui::Context::default();
+        app.announcer
+            .say(crate::announcer::Category::Message, "Ada: Hello");
+        app.announcer.show(&ctx, true);
+        assert!(app.announcer.spoken().contains(&"Ada: Hello"));
+        app.apply(Action::SwitchAccount(AccountId::parse("2").unwrap()), &ctx);
+        app.announcer.show(&ctx, true);
+        assert!(
+            !app.announcer
+                .spoken()
+                .iter()
+                .any(|slot| slot.contains("Hello"))
         );
     }
 
