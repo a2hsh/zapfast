@@ -5,7 +5,7 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 use crate::i18n::{Locale, gettext, ngettext};
-use crate::model::{Content, Delivery, Reaction};
+use crate::model::{Content, Delivery, OnceMedia, Reaction};
 
 /// Everything read for one message, in reading order.
 pub struct MessageLabel<'a> {
@@ -35,6 +35,20 @@ pub struct MessageLabel<'a> {
     pub reactions: &'a [(String, usize)],
 }
 
+/// Fills each `{}` of a translated template with the next value in a single
+/// pass, so a value that itself contains `{}` is never filled again.
+fn fill(template: &str, values: &[&str]) -> String {
+    let mut out = String::new();
+    let mut values = values.iter();
+    for (index, piece) in template.split("{}").enumerate() {
+        if index > 0 {
+            out.push_str(values.next().copied().unwrap_or_default());
+        }
+        out.push_str(piece);
+    }
+    out
+}
+
 /// Joins the parts a screen reader announces for a message with ", ".
 pub fn message_label(locale: Locale, label: &MessageLabel<'_>) -> String {
     let mut parts: Vec<String> = Vec::new();
@@ -52,12 +66,7 @@ pub fn message_label(locale: Locale, label: &MessageLabel<'_>) -> String {
         parts.push(status.to_owned());
     }
     if let Some((name, text)) = label.reply_to {
-        parts.push(
-            gettext(locale, "replying to {}: {}")
-                .into_owned()
-                .replacen("{}", name, 1)
-                .replacen("{}", text, 1),
-        );
+        parts.push(fill(&gettext(locale, "replying to {}: {}"), &[name, text]));
     }
     if label.forwarded {
         parts.push(gettext(locale, "forwarded").into_owned());
@@ -78,11 +87,7 @@ pub fn message_label(locale: Locale, label: &MessageLabel<'_>) -> String {
             .map(|(emoji, count)| format!("{emoji} {count}"))
             .collect::<Vec<_>>()
             .join(", ");
-        parts.push(
-            gettext(locale, "reactions: {}")
-                .into_owned()
-                .replacen("{}", &list, 1),
-        );
+        parts.push(fill(&gettext(locale, "reactions: {}"), &[&list]));
     }
     parts.retain(|part| !part.is_empty());
     parts.join(", ")
@@ -176,19 +181,37 @@ pub fn content_description(locale: Locale, content: &Content, text: &str) -> Str
         ]),
         Content::Poll {
             question, options, ..
-        } => ngettext(
-            locale,
-            "Poll: {}, {} option",
-            "Poll: {}, {} options",
-            options.len() as u32,
-        )
-        .replacen("{}", question, 1)
-        .replacen("{}", &options.len().to_string(), 1),
-        // Placeholders and ended live locations already have a plain summary.
-        Content::LiveLocation { .. }
-        | Content::Revoked
-        | Content::Unsupported { .. }
-        | Content::PhoneOnly { .. } => content.summary(),
+        } => fill(
+            &ngettext(
+                locale,
+                "Poll: {}, {} option",
+                "Poll: {}, {} options",
+                options.len() as u32,
+            ),
+            &[question, &options.len().to_string()],
+        ),
+        Content::LiveLocation { .. } => gettext(locale, "Live location ended").into_owned(),
+        Content::Revoked => gettext(locale, "This message was deleted").into_owned(),
+        Content::Unsupported { what } => {
+            fill(&gettext(locale, "Unsupported message ({})"), &[what])
+        }
+        Content::PhoneOnly {
+            live_location: true,
+            ..
+        } => gettext(locale, "Live location").into_owned(),
+        Content::PhoneOnly {
+            once: Some(kind), ..
+        } => match kind {
+            OnceMedia::Photo => gettext(locale, "View once photo"),
+            OnceMedia::Video => gettext(locale, "View once video"),
+            OnceMedia::Voice => gettext(locale, "View once voice message"),
+            OnceMedia::Audio => gettext(locale, "View once audio"),
+        }
+        .into_owned(),
+        Content::PhoneOnly {
+            view_once: true, ..
+        } => gettext(locale, "View once message").into_owned(),
+        Content::PhoneOnly { .. } => gettext(locale, "Message on your phone").into_owned(),
         // Only the message knows which way the call went: a row reads its
         // own through [`call_description`]. Without it, the call reads as
         // one made to this account.
@@ -456,6 +479,103 @@ mod tests {
             preview: None,
         };
         assert_eq!(content_description(en, &text, "hello"), "hello");
+    }
+
+    #[test]
+    fn placeholder_text_goes_through_gettext() {
+        use crate::model::OnceMedia;
+        let en = Locale::default();
+        let de = Locale::German;
+        // English wording matches the model's plain summaries.
+        let cases = [
+            Content::Revoked,
+            Content::Unsupported {
+                what: "poll".into(),
+            },
+            Content::LiveLocation {
+                latitude: 0.0,
+                longitude: 0.0,
+                accuracy_m: None,
+                speed_mps: None,
+                heading_deg: None,
+                sequence: 0,
+                ended: true,
+                updated: 0,
+                newer_on_phone: false,
+            },
+            Content::PhoneOnly {
+                view_once: false,
+                live_location: true,
+                once: None,
+            },
+            Content::PhoneOnly {
+                view_once: true,
+                live_location: false,
+                once: Some(OnceMedia::Photo),
+            },
+            Content::PhoneOnly {
+                view_once: true,
+                live_location: false,
+                once: Some(OnceMedia::Video),
+            },
+            Content::PhoneOnly {
+                view_once: true,
+                live_location: false,
+                once: Some(OnceMedia::Voice),
+            },
+            Content::PhoneOnly {
+                view_once: true,
+                live_location: false,
+                once: Some(OnceMedia::Audio),
+            },
+            Content::PhoneOnly {
+                view_once: true,
+                live_location: false,
+                once: None,
+            },
+            Content::PhoneOnly {
+                view_once: false,
+                live_location: false,
+                once: None,
+            },
+        ];
+        for content in &cases {
+            assert_eq!(content_description(en, content, ""), content.summary());
+        }
+        // The arm goes through the catalog: an untranslated string falls
+        // back to the English msgid, a translated one would differ.
+        assert_eq!(
+            content_description(de, &Content::Revoked, ""),
+            gettext(de, "This message was deleted")
+        );
+        assert_eq!(gettext(de, "Unread"), "Ungelesen");
+        let unread = MessageLabel {
+            unread: true,
+            ..base()
+        };
+        assert!(message_label(de, &unread).starts_with("Ungelesen, "));
+    }
+
+    #[test]
+    fn braces_in_user_text_are_not_filled_again() {
+        let en = Locale::default();
+        let poll = Content::Poll {
+            question: "Use {} here?".into(),
+            options: vec!["a".into(), "b".into()],
+            state: Default::default(),
+        };
+        assert_eq!(
+            content_description(en, &poll, ""),
+            "Poll: Use {} here?, 2 options"
+        );
+        let reply = MessageLabel {
+            reply_to: Some(("A{}B", "hi {}")),
+            ..base()
+        };
+        assert_eq!(
+            message_label(en, &reply),
+            "Ahmed, see you at 5, 10:32 PM, replying to A{}B: hi {}"
+        );
     }
 
     #[test]
