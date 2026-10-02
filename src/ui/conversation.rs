@@ -3212,105 +3212,130 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat, under: f32) {
                                 ui.unique_id()
                             },
                         );
-                        let sender = if message.from_me {
-                            crate::i18n::gettext(view.locale, "You").into_owned()
-                        } else {
-                            (view.names_or)(&message.sender, message.sender_name.as_deref())
-                        };
-                        // The same text the bubble draws as its body or caption.
-                        let text = match &message.content {
-                            Content::Text { text, .. } | Content::Interactive { text, .. } => {
-                                Some(text)
-                            }
-                            Content::Image { caption, .. }
-                            | Content::Video { caption, .. }
-                            | Content::Document { caption, .. } => caption.as_ref(),
-                            _ => None,
-                        };
-                        let text = text.map_or_else(String::new, |text| {
-                            markup::plain(text, &mentions_of(&view, message))
-                        });
-                        // An album row reads as its bubble draws it: the
-                        // items, every member's quote and reactions, and the
-                        // footer of its last member.
-                        let members = album.unwrap_or(std::slice::from_ref(message));
-                        let last = members.last().unwrap_or(message);
-                        // A call reads the title its bubble draws, which
-                        // depends on who placed it.
-                        let body = if let Some(members) = album {
-                            album_label(&view, members)
-                        } else {
-                            match super::calls::Entry::of(message) {
-                                Some(entry) => crate::a11y::call_description(view.locale, &entry),
-                                None => crate::a11y::content_description(
+                        // Built only while a screen reader is attached; the
+                        // probe returns None when AccessKit is off, so idle
+                        // frames pay nothing for the label.
+                        if ui.ctx().accesskit_node_builder(row.inner, |_| ()).is_some() {
+                            let sender = if message.from_me {
+                                crate::i18n::gettext(view.locale, "You").into_owned()
+                            } else {
+                                (view.names_or)(&message.sender, message.sender_name.as_deref())
+                            };
+                            // The same text the bubble draws as its body or caption.
+                            let text = match &message.content {
+                                Content::Text { text, .. } | Content::Interactive { text, .. } => {
+                                    Some(text)
+                                }
+                                Content::Image { caption, .. }
+                                | Content::Video { caption, .. }
+                                | Content::Document { caption, .. } => caption.as_ref(),
+                                _ => None,
+                            };
+                            let text = text.map_or_else(String::new, |text| {
+                                markup::plain(text, &mentions_of(&view, message))
+                            });
+                            // An album row reads as its bubble draws it: the
+                            // items, every member's quote and reactions, and the
+                            // footer of its last member.
+                            let members = album.unwrap_or(std::slice::from_ref(message));
+                            let last = members.last().unwrap_or(message);
+                            // A call reads the title its bubble draws, which
+                            // depends on who placed it.
+                            let body = if let Some(members) = album {
+                                album_label(&view, members)
+                            } else {
+                                match super::calls::Entry::of(message) {
+                                    Some(entry) => {
+                                        crate::a11y::call_description(view.locale, &entry)
+                                    }
+                                    None => crate::a11y::content_description(
+                                        view.locale,
+                                        &message.content,
+                                        &text,
+                                    ),
+                                }
+                            };
+                            let day = new_day
+                                .then(|| crate::util::day_label(view.locale, message.timestamp));
+                            // The pin notices this row drew above the message.
+                            let pin_notices: Vec<String> = notices[notices_before..placed]
+                                .iter()
+                                .map(|notice| {
+                                    pin_notice_label(view.locale, notice, &|id, hint| {
+                                        crate::a11y::without_push_marker(&(view.names_or)(id, hint))
+                                            .to_owned()
+                                    })
+                                })
+                                .collect();
+                            let unread = divider.as_ref().is_some_and(|(id, ..)| row_contains(id));
+                            let quoted = members.iter().find_map(|member| member.quoted.as_ref());
+                            let reply = quoted.map(|quoted| {
+                                (
+                                    quoted_sender_name(
+                                        &view,
+                                        quoted,
+                                        &crate::i18n::gettext(view.locale, "You"),
+                                    ),
+                                    markup::plain(
+                                        &quoted.summary_in(view.locale),
+                                        &quote_mentions(&view, quoted),
+                                    ),
+                                )
+                            });
+                            let all_reactions: Vec<_> = members
+                                .iter()
+                                .flat_map(|member| member.reactions.iter().cloned())
+                                .collect();
+                            let reactions = crate::a11y::reaction_counts(&all_reactions);
+                            // The ticks the bubble shows: a read receipt hidden
+                            // while ours are off reads as delivered, as drawn.
+                            let status = last
+                                .from_me
+                                .then(|| {
+                                    crate::a11y::status_word(
+                                        view.locale,
+                                        shown_delivery(&view, last),
+                                    )
+                                })
+                                .flatten();
+                            let time = crate::util::clock(last.timestamp);
+                            // Whether the file is there to open, still coming, or why not;
+                            // in an album, the first item that is not there yet.
+                            let attachment = members.iter().find_map(|member| {
+                                crate::a11y::attachment_state(
                                     view.locale,
-                                    &message.content,
-                                    &text,
-                                ),
-                            }
-                        };
-                        let day =
-                            new_day.then(|| crate::util::day_label(view.locale, message.timestamp));
-                        // The pin notices this row drew above the message.
-                        let pin_notices: Vec<String> = notices[notices_before..placed]
-                            .iter()
-                            .map(|notice| pin_notice_label(view.locale, notice, view.names_or))
-                            .collect();
-                        let unread = divider.as_ref().is_some_and(|(id, ..)| row_contains(id));
-                        let quoted = members.iter().find_map(|member| member.quoted.as_ref());
-                        let reply = quoted.map(|quoted| {
-                            (
-                                quoted_sender_name(
-                                    &view,
-                                    quoted,
-                                    &crate::i18n::gettext(view.locale, "You"),
-                                ),
-                                markup::plain(
-                                    &quoted.summary_in(view.locale),
-                                    &quote_mentions(&view, quoted),
-                                ),
-                            )
-                        });
-                        let all_reactions: Vec<_> = members
-                            .iter()
-                            .flat_map(|member| member.reactions.iter().cloned())
-                            .collect();
-                        let reactions = crate::a11y::reaction_counts(&all_reactions);
-                        // The ticks the bubble shows: a read receipt hidden
-                        // while ours are off reads as delivered, as drawn.
-                        let status = last
-                            .from_me
-                            .then(|| {
-                                crate::a11y::status_word(view.locale, shown_delivery(&view, last))
-                            })
-                            .flatten();
-                        let time = crate::util::clock(last.timestamp);
-                        let label = crate::a11y::message_label(
-                            view.locale,
-                            &crate::a11y::MessageLabel {
-                                day: day.as_deref(),
-                                notices: &pin_notices,
-                                unread,
-                                sender: &sender,
-                                body: &body,
-                                time: &time,
-                                status: status.as_deref(),
-                                reply_to: reply
-                                    .as_ref()
-                                    .map(|(name, text)| (name.as_str(), text.as_str())),
-                                forwarded: message.forwarded,
-                                edited: last.edited,
-                                starred: view.starred.is_some_and(|ids| ids.contains(&last.id)),
-                                pinned: view.pins.is_some_and(|ids| ids.contains(&last.id)),
-                                reactions: &reactions,
-                            },
-                        );
-                        let points = ui.ctx().pixels_per_point();
-                        ui.ctx().accesskit_node_builder(row.inner, |node| {
-                            node.set_role(egui::accesskit::Role::Group);
-                            node.set_label(label);
-                            node.set_bounds(rect_to_accesskit(row.response.rect, points));
-                        });
+                                    &member.content,
+                                    download_starts_by_itself(&member.content, view.auto_download),
+                                )
+                            });
+                            let label = crate::a11y::message_label(
+                                view.locale,
+                                &crate::a11y::MessageLabel {
+                                    day: day.as_deref(),
+                                    notices: &pin_notices,
+                                    unread,
+                                    sender: &sender,
+                                    body: &body,
+                                    time: &time,
+                                    status: status.as_deref(),
+                                    reply_to: reply
+                                        .as_ref()
+                                        .map(|(name, text)| (name.as_str(), text.as_str())),
+                                    forwarded: message.forwarded,
+                                    edited: last.edited,
+                                    starred: view.starred.is_some_and(|ids| ids.contains(&last.id)),
+                                    pinned: view.pins.is_some_and(|ids| ids.contains(&last.id)),
+                                    reactions: &reactions,
+                                    attachment: attachment.as_deref(),
+                                },
+                            );
+                            let points = ui.ctx().pixels_per_point();
+                            ui.ctx().accesskit_node_builder(row.inner, |node| {
+                                node.set_role(egui::accesskit::Role::Group);
+                                node.set_label(label);
+                                node.set_bounds(rect_to_accesskit(row.response.rect, points));
+                            });
+                        }
                         let measured = ui.cursor().top() - before;
                         if visible_day.is_none()
                             && before + measured > viewport.top()
@@ -8796,6 +8821,18 @@ fn motion_clip(
     }
 }
 
+/// Whether this content downloads on its own once drawn, as the bubbles decide
+/// with `auto_download_allowed`: stickers always load, other media and
+/// documents follow the setting, and nothing over the size limit starts.
+fn download_starts_by_itself(content: &Content, auto_download: bool) -> bool {
+    match content {
+        Content::Sticker { media, .. } => auto_download_allowed(media, true, auto_download),
+        other => other
+            .media()
+            .is_some_and(|media| auto_download_allowed(media, false, auto_download)),
+    }
+}
+
 /// Stickers always download when visible, while other media follows the setting.
 /// Every automatic download still respects the shared size limit.
 fn auto_download_allowed(media: &Media, sticker: bool, auto_download: bool) -> bool {
@@ -9503,8 +9540,7 @@ fn attachment(
     let auto = ui.is_rect_visible(response.rect)
         && media.path.is_none()
         && matches!(media.state, MediaState::Idle)
-        && view.auto_download
-        && media.is_within_download_limit();
+        && auto_download_allowed(media, false, view.auto_download);
     if auto {
         actions.push(Action::Download {
             manual: false,
@@ -11059,6 +11095,35 @@ mod tests {
         assert!(!auto_download_allowed(&sticker, false, false));
         sticker.size = crate::model::ATTACHMENT_DOWNLOAD_LIMIT + 1;
         assert!(!auto_download_allowed(&sticker, true, false));
+    }
+
+    /// A document reads as not downloaded only when its card will not fetch
+    /// it by itself: with auto-download on and within the size limit it will.
+    #[test]
+    fn a_document_reads_as_not_downloaded_only_when_its_card_waits() {
+        let document = |size: u64| Content::Document {
+            media: Media {
+                mime: "application/pdf".into(),
+                size,
+                ..media(None, None)
+            },
+            file_name: "Notes.pdf".into(),
+            caption: None,
+            pages: None,
+        };
+        let state = |content: &Content, auto_download: bool| {
+            crate::a11y::attachment_state(
+                crate::i18n::Locale::English,
+                content,
+                download_starts_by_itself(content, auto_download),
+            )
+        };
+        let within = document(482_113);
+        let over = document(crate::model::ATTACHMENT_DOWNLOAD_LIMIT + 1);
+        assert_eq!(state(&within, true), None);
+        assert_eq!(state(&within, false).as_deref(), Some("not downloaded"));
+        assert_eq!(state(&over, true).as_deref(), Some("not downloaded"));
+        assert_eq!(state(&over, false).as_deref(), Some("not downloaded"));
     }
 
     /// The typing dots animate at the display's rate, not a fixed timer.
