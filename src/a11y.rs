@@ -30,6 +30,9 @@ pub struct MessageLabel<'a> {
     pub pinned: bool,
     /// (emoji, count), in display order.
     pub reactions: &'a [(String, usize)],
+    /// `attachment_state(..)`; read last, so a message that cannot be opened
+    /// yet ends with why.
+    pub attachment: Option<&'a str>,
 }
 
 /// Fills each `{}` of a translated template with the next value in a single
@@ -46,6 +49,28 @@ fn fill(template: &str, values: &[&str]) -> String {
     out
 }
 
+/// One spoken line: whitespace runs (newlines included) become single spaces,
+/// and the glyphs `markup::plain` draws for quotes and list items are dropped,
+/// so a screen reader never reads them or a stray gap before a comma.
+fn spoken(text: &str) -> String {
+    let words: Vec<&str> = text
+        .split_whitespace()
+        .map(|word| word.trim_start_matches('\u{258E}'))
+        .filter(|word| !word.is_empty() && *word != "\u{2022}")
+        .collect();
+    words.join(" ")
+}
+
+/// A name as a screen reader says it: without the "~" that marks a name
+/// known only from the person's own profile, nor the space after it. The
+/// screen keeps the marker; read aloud it is only "tilde".
+pub(crate) fn without_push_marker(name: &str) -> &str {
+    match name.strip_prefix('~') {
+        Some(rest) => rest.strip_prefix(' ').unwrap_or(rest),
+        None => name,
+    }
+}
+
 /// Joins the parts a screen reader announces for a message with ", ".
 pub fn message_label(locale: Locale, label: &MessageLabel<'_>) -> String {
     let mut parts: Vec<String> = Vec::new();
@@ -56,14 +81,17 @@ pub fn message_label(locale: Locale, label: &MessageLabel<'_>) -> String {
     if label.unread {
         parts.push(gettext(locale, "Unread").into_owned());
     }
-    parts.push(label.sender.to_owned());
-    parts.push(label.body.to_owned());
+    parts.push(spoken(without_push_marker(label.sender)));
+    parts.push(spoken(label.body));
     parts.push(label.time.to_owned());
     if let Some(status) = label.status {
         parts.push(status.to_owned());
     }
     if let Some((name, text)) = label.reply_to {
-        parts.push(fill(&gettext(locale, "replying to {}: {}"), &[name, text]));
+        parts.push(fill(
+            &gettext(locale, "replying to {}: {}"),
+            &[&spoken(without_push_marker(name)), &spoken(text)],
+        ));
     }
     if label.forwarded {
         parts.push(gettext(locale, "forwarded").into_owned());
@@ -85,6 +113,9 @@ pub fn message_label(locale: Locale, label: &MessageLabel<'_>) -> String {
             .collect::<Vec<_>>()
             .join(", ");
         parts.push(fill(&gettext(locale, "reactions: {}"), &[&list]));
+    }
+    if let Some(attachment) = label.attachment {
+        parts.push(spoken(attachment));
     }
     parts.retain(|part| !part.is_empty());
     parts.join(", ")
@@ -382,7 +413,51 @@ mod tests {
             starred: false,
             pinned: false,
             reactions: &[],
+            attachment: None,
         }
+    }
+
+    #[test]
+    fn the_attachment_state_ends_the_message_label() {
+        let en = Locale::default();
+        let reactions = [("\u{1f44d}".to_owned(), 2)];
+        let label = MessageLabel {
+            body: "Document, report.pdf",
+            edited: true,
+            reactions: &reactions,
+            attachment: Some("not downloaded"),
+            ..base()
+        };
+        assert_eq!(
+            message_label(en, &label),
+            "Ahmed, Document, report.pdf, 10:32 PM, edited, reactions: \u{1f44d} 2, not downloaded"
+        );
+        let failed = MessageLabel {
+            attachment: Some("This attachment is larger than the 64 MiB download limit"),
+            ..base()
+        };
+        assert_eq!(
+            message_label(en, &failed),
+            "Ahmed, see you at 5, 10:32 PM, This attachment is larger than the 64 MiB download limit"
+        );
+        assert_eq!(message_label(en, &base()), "Ahmed, see you at 5, 10:32 PM");
+    }
+
+    #[test]
+    fn body_quote_and_sender_read_as_one_clean_line() {
+        let en = Locale::default();
+        let label = MessageLabel {
+            sender: " Ahmed\n",
+            body: "first line\n\n\u{2022}  second   line \n",
+            reply_to: Some(("Sara ", "\u{258E} quoted\nline  ")),
+            ..base()
+        };
+        let text = message_label(en, &label);
+        assert_eq!(
+            text,
+            "Ahmed, first line second line, 10:32 PM, replying to Sara: quoted line"
+        );
+        assert!(!text.contains(" ,") && !text.contains('\n'), "{text:?}");
     }
 
     #[test]
