@@ -877,3 +877,7 @@ shortcuts.
 ZapFast announces confirmations, errors, connection changes and history loading
 through the screen reader without moving focus. While the app is locked, only
 connection and history changes are announced.
+
+Each message is exposed as one item that reads its sender, text, time and
+delivery status, then any quote, forward, edit and reactions; the first
+message of a day starts with the day and the first unread one with Unread.

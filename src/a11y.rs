@@ -1,9 +1,6 @@
 //! Spoken labels for screen readers: the text NVDA reads for a message, built
 //! from plain data so it can be tested without a UI.
 
-// Task 5 wires these into the message list; until then only tests use them.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use crate::i18n::{Locale, gettext, ngettext};
 use crate::model::{Content, Delivery, OnceMedia, Reaction};
 
