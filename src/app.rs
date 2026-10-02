@@ -645,6 +645,8 @@ pub struct App {
     /// The app lock: whether the window shows only the lock screen, the
     /// inactivity count, and the Settings password form.
     pub app_lock: crate::app_lock::AppLock,
+    /// Spoken announcements for screen readers, emitted every frame.
+    pub announcer: crate::announcer::Announcer,
 }
 
 /// A message that flashes after a jump to it, as WhatsApp does.
@@ -1176,6 +1178,7 @@ impl App {
             notifications: Default::default(),
             badge: None,
             app_lock,
+            announcer: Default::default(),
         };
         // A hand-edited speed snaps to a supported one, so a speed control
         // always shows the speed that plays.
