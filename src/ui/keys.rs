@@ -496,7 +496,7 @@ fn message_keys(app: &App, ctx: &egui::Context, chat: &str, id: &str) -> Vec<Act
                 actions.push(Action::FocusComposer);
             }
         } else if take_plain(input, Key::E) {
-            actions.push(view::open_reaction_picker_action(chat, id));
+            actions.push(view::open_reaction_picker_action(chat, id, true));
         } else if take_plain(input, Key::C) {
             let names = |mention: &str| app.mention_name(mention);
             actions.extend(view::copy_key_action(message, &names));

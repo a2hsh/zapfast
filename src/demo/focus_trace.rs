@@ -1151,3 +1151,34 @@ fn the_cropper_follows_focus_as_it_was_asked_for() {
         }
     }
 }
+
+/// The pickers take focus in the first pass that shows them, never by way
+/// of the window, and keep their own way back: the reaction picker to its
+/// message, the emoji picker to the message field its emoji go to.
+#[test]
+fn the_pickers_open_without_a_window_frame() {
+    let mut trace = Trace::new(app());
+    focus_stop(&mut trace, Stop::Messages);
+    let row = trace.last().clone();
+    let press = tap(&mut trace, "E", egui::Key::E, egui::Modifiers::NONE);
+    assert!(trace.app.reaction_target.is_some());
+    trace.assert_clean(press, "the reaction picker");
+    assert_eq!(trace.last().name, "TextInput \"Search emoji\"");
+    escape_back_to_the_list(&mut trace, &row, "the reaction picker");
+
+    let mut trace = Trace::new(app());
+    focus_stop(&mut trace, Stop::Emoji);
+    assert!(trace.last().name.contains("Emoji"), "{}", trace.last().name);
+    let press = tap(&mut trace, "Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    assert!(trace.app.picker.is_some());
+    trace.assert_clean(press, "the emoji picker");
+    assert_eq!(trace.last().name, "TextInput \"Search emoji\"");
+    let from = tap(
+        &mut trace,
+        "Escape",
+        egui::Key::Escape,
+        egui::Modifiers::NONE,
+    );
+    trace.assert_clean(from, "the emoji picker, closed");
+    assert_eq!(trace.last().egui, Some(egui::Id::new("composer-text")));
+}
