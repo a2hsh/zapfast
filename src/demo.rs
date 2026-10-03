@@ -6592,17 +6592,15 @@ mod tests {
         );
     }
 
-    /// Opened with the pointer, a read-only chat still opens at its newest
-    /// message, with no ring: its list's focus is invisible until the
-    /// keyboard is used.
-    #[test]
-    fn a_read_only_chat_opened_with_the_pointer_opens_at_its_newest_message() {
-        let mut app = app();
-        let ctx = egui::Context::default();
-        app.attach(&ctx);
-        render(&mut app, &ctx);
-        let channel = channel(&app);
-        // Long enough to scroll.
+    /// Opens the read-only demo channel, filled long enough to scroll, by
+    /// clicking its row in the chat list, after the keyboard had been used
+    /// in the message list, as a mixed keyboard and mouse user does.
+    fn open_channel_with_the_pointer(app: &mut App, ctx: &egui::Context) -> String {
+        let channel = channel(app);
+        // Channels are listed under their own filter.
+        app.chat_filter = crate::model::ChatFilter::Channels;
+        render(app, ctx);
+        press_key(app, ctx, egui::Key::Num2, messages_shortcut());
         let conversation = app.conversations.get_mut(&channel).unwrap();
         let template = conversation.messages.last().unwrap().clone();
         conversation.messages = (0..60)
@@ -6613,13 +6611,43 @@ mod tests {
                 ..template.clone()
             })
             .collect();
-        app.actions
-            .push(crate::model::Action::OpenChat(channel.clone()));
-        render(&mut app, &ctx);
-        render(&mut app, &ctx);
-        assert_eq!(
+        let row = ctx
+            .data(|data| {
+                data.get_temp::<egui::Id>(crate::ui::chats::chat_row_id(&channel).with("widget"))
+            })
+            .and_then(|id| ctx.read_response(id))
+            .expect("the channel's row is drawn");
+        let at = row.rect.center();
+        let pointer = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame_with(
+            app,
+            ctx,
+            vec![egui::Event::PointerMoved(at), pointer(true), pointer(false)],
+        );
+        render(app, ctx);
+        render(app, ctx);
+        assert_eq!(app.open_chat.as_deref(), Some(channel.as_str()));
+        channel
+    }
+
+    /// Opened with the pointer, a read-only chat opens as it did before the
+    /// list existed: at its newest message, pinned there for new posts, with
+    /// nothing focused and no ring.
+    #[test]
+    fn a_read_only_chat_opened_with_the_pointer_opens_at_its_newest_message() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        let channel = open_channel_with_the_pointer(&mut app, &ctx);
+        assert_ne!(
             ctx.memory(|memory| memory.focused()),
-            Some(crate::ui::conversation::messages_list_id(&channel))
+            Some(crate::ui::conversation::messages_list_id(&channel)),
+            "the pointer does not focus the list"
         );
         assert!(app.at_bottom, "at the newest message");
         assert!(
@@ -6627,6 +6655,63 @@ mod tests {
             "still pinned there, as any chat opened with the pointer"
         );
         assert_eq!(ring(&ctx), None);
+        // A new post keeps the view at the newest message.
+        let conversation = app.conversations.get_mut(&channel).unwrap();
+        let mut post = conversation.messages.last().unwrap().clone();
+        post.id = "channel-new".into();
+        post.timestamp += 60;
+        post.content = crate::model::Content::text("A new announcement\nover\nseveral lines");
+        conversation.messages.push(post);
+        render(&mut app, &ctx);
+        assert!(app.at_bottom, "still at the newest message");
+    }
+
+    /// In a read-only chat opened with the pointer, PgUp still eases the
+    /// view up a page, as before the list existed: no current message
+    /// moves and no ring appears.
+    #[test]
+    fn page_keys_in_a_pointer_opened_channel_still_scroll() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        let channel = open_channel_with_the_pointer(&mut app, &ctx);
+        let offset = |ctx: &egui::Context| {
+            ctx.data(|data| {
+                data.get_temp::<(f32, f32)>(crate::ui::conversation::scroll_metrics_id(&channel))
+            })
+            .unwrap()
+            .0
+        };
+        let before = offset(&ctx);
+        press_key(&mut app, &ctx, egui::Key::PageUp, egui::Modifiers::NONE);
+        assert!(offset(&ctx) < before, "PgUp scrolled the view up");
+        assert_eq!(app.message_cursor.get(&channel), None, "no cursor moved");
+        assert!(!app.reveal_cursor);
+        assert_ne!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::conversation::messages_list_id(&channel))
+        );
+        assert_eq!(ring(&ctx), None);
+    }
+
+    /// In background mode a new window reuses the app. A message list that
+    /// had focus in the window that closed must not keep the new window's
+    /// message field from taking focus.
+    #[test]
+    fn a_new_window_focuses_the_message_field_after_the_list_had_focus() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Num2, messages_shortcut());
+        assert!(app.messages_focused);
+        let reopened = egui::Context::default();
+        app.attach(&reopened);
+        render(&mut app, &reopened);
+        assert_eq!(
+            reopened.memory(|memory| memory.focused()),
+            Some(egui::Id::new("composer-text"))
+        );
     }
 
     #[test]
