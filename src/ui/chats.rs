@@ -699,12 +699,36 @@ impl ListPass {
             data.get_temp::<bool>(theme::keyboard_focus_id())
                 .unwrap_or(false)
         });
+        let focused = response.has_focus();
         // Arriving in the list by keyboard shows where its current chat is.
         if response.gained_focus() && keyboard && app.scroll_chat_into_view.is_none() {
             app.scroll_chat_into_view.clone_from(&cursor);
         }
-        let focused = response.has_focus();
-        app.chats_focused = focused;
+        if focused && cursor.is_some() && cursor != app.chat_cursor {
+            // The current chat left the list while the reader is in it
+            // (archived, read under Unread, locked, deleted): the chat it
+            // fell back to is current from now on, and the list takes the
+            // reader to it, so it is laid out and named as the active
+            // descendant rather than the list having none. Without focus
+            // nothing moves: the list stays as the pointer left it.
+            app.scroll_chat_into_view.clone_from(&cursor);
+            app.chat_cursor.clone_from(&cursor);
+        }
+        // Emptied while the reader is in it, the list keeps focus, with
+        // nothing to say but that.
+        let before = ui.ctx().data(|data| data.get_temp::<usize>(id.with("len")));
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(id.with("len"), chats.len()));
+        if focused && chats.is_empty() && before.is_some_and(|len| len > 0) {
+            app.announcer.say(
+                crate::announcer::Category::Status,
+                crate::i18n::gettext(app.locale, "No chats"),
+            );
+        }
+        // egui's focus, not the response's: that one also asks for the
+        // window's focus, and the list keeps its place while the window is
+        // away.
+        app.chats_focused = ui.memory(|memory| memory.has_focus(id));
         Self {
             response,
             focused,
@@ -1149,8 +1173,14 @@ fn list(app: &mut App, ui: &mut egui::Ui) {
         return;
     }
     let chats: Vec<Chat> = app.visible_chats().into_iter().cloned().collect();
+    let label = if app.show_archived {
+        crate::i18n::gettext(app.locale, "Archived chats")
+    } else {
+        crate::i18n::gettext(app.locale, "Chats")
+    };
     if chats.is_empty() {
-        app.open_chat_menu = None;
+        // Still the list, with no items, so a reader in it keeps focus.
+        ListPass::begin(app, ui, focus, &label, &chats).finish(ui.ctx());
         // The favorites title is translated, so it is bound here: the tuple
         // below borrows it for this frame, and every other arm stays a literal.
         let favorites_title;
@@ -1183,11 +1213,6 @@ fn list(app: &mut App, ui: &mut egui::Ui) {
     ui.spacing_mut().item_spacing.y = 0.0;
     let row_height = theme::ROW_HEIGHT;
     let total = chats.len();
-    let label = if app.show_archived {
-        crate::i18n::gettext(app.locale, "Archived chats")
-    } else {
-        crate::i18n::gettext(app.locale, "Chats")
-    };
     let mut pass = ListPass::begin(app, ui, focus, &label, &chats);
     ListPass::page(ui, row_height);
     let mut scroll_area = egui::ScrollArea::vertical()
@@ -1339,9 +1364,11 @@ fn locked_entry(app: &mut App, ui: &mut egui::Ui) {
 /// The authenticated folder, including archived chats and local title search.
 fn locked_list(app: &mut App, ui: &mut egui::Ui, focus: bool) {
     let palette = app.palette;
-    let chats = app.visible_chats();
+    let chats: Vec<Chat> = app.visible_chats().into_iter().cloned().collect();
+    let label = crate::i18n::gettext(app.locale, "Locked chats");
     if chats.is_empty() {
-        app.open_chat_menu = None;
+        // Still the list, with no items, so a reader in it keeps focus.
+        ListPass::begin(app, ui, focus, &label, &chats).finish(ui.ctx());
         widgets::empty_state(
             ui,
             &palette,
@@ -1351,9 +1378,7 @@ fn locked_list(app: &mut App, ui: &mut egui::Ui, focus: bool) {
         );
         return;
     }
-    let chats: Vec<Chat> = chats.into_iter().cloned().collect();
     ui.spacing_mut().item_spacing.y = 0.0;
-    let label = crate::i18n::gettext(app.locale, "Locked chats");
     let mut pass = ListPass::begin(app, ui, focus, &label, &chats);
     ListPass::page(ui, theme::ROW_HEIGHT);
     let mut scroll_area = egui::ScrollArea::vertical()
@@ -1418,8 +1443,10 @@ fn results(app: &mut App, ui: &mut egui::Ui, focus: bool) {
         && !chats
             .iter()
             .any(|chat| app.me.as_deref() == Some(chat.id.as_str()));
+    let label = crate::i18n::gettext(app.locale, "Search results");
     if chats.is_empty() && hits.is_empty() && contacts.is_empty() && !offer_self {
-        app.open_chat_menu = None;
+        // Still the list, with no items, so a reader in it keeps focus.
+        ListPass::begin(app, ui, focus, &label, &chats).finish(ui.ctx());
         widgets::empty_state(
             ui,
             &palette,
@@ -1431,21 +1458,15 @@ fn results(app: &mut App, ui: &mut egui::Ui, focus: bool) {
     }
     ui.spacing_mut().item_spacing.y = 0.0;
     // The matching chats are their own list; message and contact results
-    // stay rows of their own below it. Without matching chats there is no
-    // list to enter.
-    let mut pass = (!chats.is_empty()).then(|| {
-        let label = crate::i18n::gettext(app.locale, "Search results");
-        ListPass::begin(app, ui, focus, &label, &chats)
-    });
-    if pass.is_none() {
-        app.open_chat_menu = None;
-    }
+    // stay rows of their own below it. Without matching chats the list is
+    // empty, and still there for a reader in it.
+    let mut pass = ListPass::begin(app, ui, focus, &label, &chats);
     ListPass::page(ui, theme::ROW_HEIGHT);
     egui::ScrollArea::vertical()
         .id_salt("search-results")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            if let Some(pass) = &mut pass {
+            if !chats.is_empty() {
                 section(ui, &palette, "Chats");
                 for (index, chat) in chats.iter().enumerate() {
                     let reveal = ui.is_enabled()
@@ -1474,9 +1495,7 @@ fn results(app: &mut App, ui: &mut egui::Ui, focus: bool) {
             }
             ui.add_space(8.0);
         });
-    if let Some(pass) = pass {
-        pass.finish(ui.ctx());
-    }
+    pass.finish(ui.ctx());
 }
 
 fn section(ui: &mut egui::Ui, palette: &Palette, label: &str) {
@@ -1693,7 +1712,7 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat, slot: Option<Slot>) -> egu
             slot.index,
             slot.len,
             rect,
-            Some(app.open_chat.as_deref() == Some(chat.id.as_str())),
+            app.open_chat.as_deref() == Some(chat.id.as_str()),
         );
     }
     if ui.is_rect_visible(rect) {
@@ -2266,7 +2285,7 @@ fn compact_row(
             slot.index,
             slot.len,
             rect,
-            Some(selected),
+            selected,
         );
     }
     if ui.is_rect_visible(rect) {

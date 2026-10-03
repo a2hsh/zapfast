@@ -32,6 +32,11 @@ struct Frame {
     /// What a reader says of the effective node: a change while it keeps
     /// focus is read out again.
     spoken: String,
+    /// What this frame's update says of the node the reader was on in the
+    /// frame before, empty when it is gone. A screen reader takes a change
+    /// to it in the update that moves focus away before the focus change,
+    /// and reads that node out again first.
+    left: String,
     /// How many nodes the frame's update carries.
     nodes: usize,
     /// egui's focused widget after the frame.
@@ -173,7 +178,13 @@ impl Trace {
             .accesskit_update
             .expect("accessibility tree");
         let effective = effective(&tree);
+        let left = self
+            .frames
+            .last()
+            .map(|before| spoken(&tree, before.effective))
+            .unwrap_or_default();
         self.frames.push(Frame {
+            left,
             nodes: tree.nodes.len(),
             step: step.to_owned(),
             action: self.action,
@@ -1588,6 +1599,44 @@ fn escape_with_the_pointer_closes_the_chat_as_before() {
         data.get_temp::<bool>(crate::theme::keyboard_focus_id())
             .unwrap_or(false)
     }));
+}
+
+/// Enter on a chat row opens the chat and moves to its message field. The
+/// row says "open" only once focus has left it: never while the reader is
+/// on it, nor in the update that moves focus away, which a screen reader
+/// reads before the focus change, so the row is not read out again. Back on
+/// the row with Alt+1, it says "open".
+#[test]
+fn opening_a_chat_from_its_row_never_reads_the_row_again() {
+    let mut trace = Trace::new(app());
+    focus_stop(&mut trace, Stop::ChatList);
+    trace.press("Down", egui::Key::ArrowDown, egui::Modifiers::NONE);
+    let row = trace.last().clone();
+    assert!(!row.spoken.contains(", open"), "{}", row.spoken);
+    let from = trace.mark();
+    trace.press("Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    assert_eq!(trace.last().egui, Some(egui::Id::new("composer-text")));
+    trace.assert_clean(from, "a chat opened from its row");
+    for (index, frame) in trace.frames.iter().enumerate().skip(from) {
+        let before = &trace.frames[index - 1];
+        let renamed = (frame.effective == row.effective && frame.spoken != row.spoken)
+            || (before.effective == row.effective
+                && frame.effective != row.effective
+                && frame.left != row.spoken);
+        assert!(
+            !renamed,
+            "frame #{index}: the row changed while focus was on it or leaving it: {:?}\n{}",
+            frame.left,
+            trace.dump(from - 1)
+        );
+    }
+    trace.press("Alt+1", egui::Key::Num1, alt());
+    assert_eq!(trace.last().effective, row.effective, "back on the row");
+    assert!(
+        trace.last().spoken.contains(", open"),
+        "{}",
+        trace.last().spoken
+    );
 }
 
 /// The chat list scrolls under the arrows: the reader hears each chat once.

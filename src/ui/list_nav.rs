@@ -130,8 +130,12 @@ pub fn set_active(ctx: &egui::Context, container: egui::Id, row: Option<egui::Id
     });
 }
 
-/// Turns a row Ui's node into a ListBoxOption at `index` of `len`. `selected`
-/// is for lists with a selection; messages pass `None`.
+/// Turns a row's node into a ListBoxOption at `index` of `len`. Only the
+/// `selected` item, such as the open chat, carries a selection state; every
+/// other item carries none, neither selected nor toggled. A row that said
+/// "not selected", or that kept the toggle state egui gives a selectable
+/// widget, would have a screen reader say "not selected" or "not checked"
+/// on every arrow press. Messages are never selected.
 pub fn mark_row(
     ctx: &egui::Context,
     row: egui::Id,
@@ -139,7 +143,7 @@ pub fn mark_row(
     index: usize,
     len: usize,
     rect: egui::Rect,
-    selected: Option<bool>,
+    selected: bool,
 ) {
     let ppp = ctx.pixels_per_point();
     ctx.accesskit_node_builder(row, |node| {
@@ -148,8 +152,11 @@ pub fn mark_row(
         node.set_position_in_set(index);
         node.set_size_of_set(len);
         node.set_bounds(bounds(rect, ppp));
-        if let Some(selected) = selected {
-            node.set_selected(selected);
+        node.clear_toggled();
+        if selected {
+            node.set_selected(true);
+        } else {
+            node.clear_selected();
         }
     });
 }
@@ -220,21 +227,92 @@ fn keyboard(ctx: &egui::Context) -> bool {
     })
 }
 
-/// Whether keyboard focus is on one of the items of the popup `popup` (true),
-/// on a widget elsewhere (false), or on nothing drawn (None, as between two
-/// items while Tab moves on).
-fn focus_in(ctx: &egui::Context, popup: egui::Id) -> Option<bool> {
-    ctx.memory(|memory| memory.focused())
+/// Marks `row` as a row that opens a submenu, so a keyboard-opened menu can
+/// open it with Right as well as Enter. Registered each frame it is drawn.
+pub fn mark_submenu_row(ctx: &egui::Context, row: egui::Id) {
+    let frame = ctx.cumulative_frame_nr();
+    ctx.data_mut(|data| data.insert_temp(row.with("submenu-row"), frame));
+}
+
+/// Whether `row` was registered with [`mark_submenu_row`] this frame or the
+/// one before.
+pub(crate) fn is_submenu_row(ctx: &egui::Context, row: egui::Id) -> bool {
+    let frame = ctx.cumulative_frame_nr();
+    ctx.data(|data| data.get_temp::<u64>(row.with("submenu-row")))
+        .is_some_and(|registered| registered + 1 >= frame)
+}
+
+/// The popup `popup` and the submenus open in it, outermost first. Each is
+/// a layer of its own, named by its id.
+fn menu_layers(ctx: &egui::Context, popup: egui::Id) -> Vec<egui::Id> {
+    use egui::containers::menu::MenuState;
+    let mut layers = vec![popup];
+    // Menus nest a few levels at most; the bound guards a broken chain.
+    while layers.len() < 8 {
+        let last = layers[layers.len() - 1];
+        match MenuState::from_id(ctx, last, |state| state.open_item) {
+            Some(open) => layers.push(open),
+            None => break,
+        }
+    }
+    layers
+}
+
+/// The items the last frame drew on the popup layer `layer`, in order: its
+/// enabled focusable widgets, without the layer's own background. Empty
+/// until a frame has drawn the items, which a popup's first, measuring pass
+/// does not.
+fn layer_items(ctx: &egui::Context, layer: egui::Id) -> Vec<egui::Id> {
+    let background = layer.with("move");
+    ctx.viewport(|viewport| {
+        viewport
+            .prev_pass
+            .widgets
+            .layers()
+            .find(|(layer_id, _)| layer_id.id == layer)
+            .map(|(_, widgets)| {
+                widgets
+                    .iter()
+                    .filter(|widget| {
+                        widget.enabled && widget.sense.is_focusable() && widget.id != background
+                    })
+                    .map(|widget| widget.id)
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
+
+/// Where keyboard focus is relative to a menu.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MenuFocus {
+    /// On nothing drawn, as between two items while Tab moves on.
+    Nowhere,
+    /// On a widget outside the menu and its submenus.
+    Elsewhere,
+    /// On an item of the menu or of one of its open submenus.
+    In,
+}
+
+fn menu_focus(ctx: &egui::Context, layers: &[egui::Id]) -> MenuFocus {
+    match ctx
+        .memory(|memory| memory.focused())
         .and_then(|id| ctx.read_response(id))
-        .map(|response| response.layer_id.id == popup)
+    {
+        None => MenuFocus::Nowhere,
+        Some(response) if layers.contains(&response.layer_id.id) => MenuFocus::In,
+        Some(_) => MenuFocus::Elsewhere,
+    }
 }
 
 /// The context menu of a list's current item, as the list's keys open it
 /// (Shift+F10), or a phone number's menu, which Space or Enter on the number
 /// opens in the message list. Opened that way, focus goes to its first item,
 /// Tab stays among its items, Up and Down walk them in order, focus leaving
-/// closes it, and Escape or a chosen item returns focus to the list. A menu
-/// opened with the pointer is left as it was.
+/// closes it, and Escape or a chosen item returns focus to the list. A
+/// submenu opens with Right or Enter on its row, with focus on its first
+/// item, and Left or Escape closes it and returns to its row. A menu opened
+/// with the pointer is left as it was.
 ///
 /// [`KeyMenu::begin`] runs before the popup is shown, [`KeyMenu::finish`]
 /// after it.
@@ -260,28 +338,146 @@ impl KeyMenu {
             ctx.data_mut(|data| data.insert_temp(pending, true));
         }
         let state = ctx.data(|data| data.get_temp::<bool>(pending));
-        if state == Some(false) && was_open && !hold && focus_in(ctx, popup) == Some(true) {
-            // Up and Down walk the items in order and wrap, as Tab does, as
-            // in any desktop menu. egui's own arrow moves go to the nearest
-            // widget on screen, which can be one under the menu.
-            let step = ctx.input_mut(|input| {
-                if super::keys::take_plain(input, egui::Key::ArrowDown) {
-                    Some(egui::FocusDirection::Next)
-                } else if super::keys::take_plain(input, egui::Key::ArrowUp) {
-                    Some(egui::FocusDirection::Previous)
-                } else {
-                    None
-                }
-            });
-            if let Some(step) = step {
-                ctx.memory_mut(|memory| memory.move_focus(step));
-            }
+        if state == Some(false) && was_open && !hold {
+            Self::keys(ctx, popup);
         }
         Self {
             popup,
             pending,
             state,
             was_open,
+        }
+    }
+
+    /// The keys that move within a menu the keys opened, taken before egui
+    /// sees them.
+    fn keys(ctx: &egui::Context, popup: egui::Id) {
+        use egui::containers::menu::{MenuState, SubMenu};
+        let layers = menu_layers(ctx, popup);
+        // egui drops focus on Escape before anything is drawn: the item
+        // focused at the end of the last frame says where Escape came from.
+        let escape = ctx.input(|input| input.key_pressed(egui::Key::Escape));
+        let Some(focused) = ctx.memory(|memory| memory.focused()).or_else(|| {
+            escape
+                .then(|| ctx.data(|data| data.get_temp::<egui::Id>(popup.with("last-focus"))))
+                .flatten()
+        }) else {
+            return;
+        };
+        let Some(depth) = ctx.read_response(focused).and_then(|response| {
+            layers
+                .iter()
+                .position(|layer| *layer == response.layer_id.id)
+        }) else {
+            return;
+        };
+        let opening = popup.with("submenu-opening");
+        // A submenu opened from its row: once a frame has drawn its items,
+        // the first takes focus.
+        if let Some(row) = ctx.data(|data| data.get_temp::<egui::Id>(opening)) {
+            let submenu = SubMenu::id_from_widget_id(row);
+            if focused != row {
+                ctx.data_mut(|data| data.remove::<egui::Id>(opening));
+            } else if layers.contains(&submenu)
+                && let Some(&first) = layer_items(ctx, submenu).first()
+            {
+                ctx.memory_mut(|memory| memory.request_focus(first));
+                ctx.data_mut(|data| data.remove::<egui::Id>(opening));
+                return;
+            }
+        }
+        let submenu_row = is_submenu_row(ctx, focused);
+        let (down, up, right, enter, back) = ctx.input_mut(|input| {
+            let down = super::keys::take_plain(input, egui::Key::ArrowDown);
+            let up = !down && super::keys::take_plain(input, egui::Key::ArrowUp);
+            // Right is left alone elsewhere: it moves along a row of
+            // reactions.
+            let right = submenu_row && super::keys::take_plain(input, egui::Key::ArrowRight);
+            // Left, and Escape inside a submenu, close that submenu only:
+            // taken here, before the whole menu would close on Escape.
+            let back = depth > 0
+                && (super::keys::take_plain(input, egui::Key::ArrowLeft)
+                    || super::keys::take_plain(input, egui::Key::Escape));
+            let enter = input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key {
+                        key: egui::Key::Enter,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if modifiers.is_none()
+                )
+            });
+            (down, up, right, enter, back)
+        });
+        if right || back {
+            // egui already read the arrow, or Escape, as a move of its own
+            // at the start of the frame: a spatial move would take focus
+            // anywhere on screen.
+            ctx.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
+        }
+        if back {
+            // The submenu's row is in the layer that opened it.
+            MenuState::from_id(ctx, layers[depth - 1], |state| state.open_item = None);
+            let row = ctx.data(|data| data.get_temp::<egui::Id>(layers[depth].with("row")));
+            if let Some(row) = row {
+                ctx.memory_mut(|memory| memory.request_focus(row));
+            }
+            return;
+        }
+        if (right || enter) && submenu_row {
+            if right {
+                // Activates the row as Enter does, which opens its submenu.
+                ctx.input_mut(|input| {
+                    input.events.push(egui::Event::Key {
+                        key: egui::Key::Enter,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                });
+            }
+            ctx.data_mut(|data| {
+                data.insert_temp(opening, focused);
+                data.insert_temp(SubMenu::id_from_widget_id(focused).with("row"), focused);
+            });
+            return;
+        }
+        if (down || up) && depth > 0 {
+            // A submenu's items wrap among themselves. Its layer is above
+            // the menu's, so egui's own order would walk on into the menu.
+            let items = layer_items(ctx, layers[depth]);
+            if let Some(index) = items.iter().position(|item| *item == focused) {
+                let next = if down {
+                    (index + 1) % items.len()
+                } else {
+                    (index + items.len() - 1) % items.len()
+                };
+                ctx.memory_mut(|memory| {
+                    memory.move_focus(egui::FocusDirection::None);
+                    memory.request_focus(items[next]);
+                });
+            }
+            return;
+        }
+        if down || up {
+            // Moving on from a row whose submenu is open closes the submenu
+            // first, so the arrows do not walk into it.
+            if layers.len() > depth + 1 {
+                MenuState::from_id(ctx, layers[depth], |state| state.open_item = None);
+            }
+            // Up and Down walk the items in order and wrap, as Tab does, as
+            // in any desktop menu. egui's own arrow moves go to the nearest
+            // widget on screen, which can be one under the menu.
+            ctx.memory_mut(|memory| {
+                memory.move_focus(if down {
+                    egui::FocusDirection::Next
+                } else {
+                    egui::FocusDirection::Previous
+                });
+            });
         }
     }
 
@@ -310,7 +506,18 @@ impl KeyMenu {
         let Some(focus_pending) = self.state else {
             return open;
         };
-        if open && !focus_pending && !hold && focus_in(ctx, self.popup) == Some(false) {
+        let focus = if open {
+            menu_focus(ctx, &menu_layers(ctx, self.popup))
+        } else {
+            MenuFocus::Nowhere
+        };
+        if focus == MenuFocus::In {
+            // Where Escape comes from next frame, after egui drops focus.
+            if let Some(focused) = ctx.memory(|memory| memory.focused()) {
+                ctx.data_mut(|data| data.insert_temp(self.popup.with("last-focus"), focused));
+            }
+        }
+        if open && !focus_pending && !hold && focus == MenuFocus::Elsewhere {
             // A shortcut (Ctrl+L, Ctrl+K, Alt+1, Alt+2) took focus out of
             // the menu: it closes, as a desktop menu does when focus leaves,
             // rather than staying open unseen and holding on to the arrows,
@@ -335,8 +542,9 @@ impl KeyMenu {
         } else if let Some(layer) = layer
             && !hold
         {
-            // Tab stays among the menu's items. Not beside the reaction
-            // picker, whose own layer must keep its focus.
+            // Tab stays among the menu's items, its submenus' included:
+            // they are layers above it. Not beside the reaction picker,
+            // whose own layer must keep its focus.
             ctx.memory_mut(|memory| memory.set_modal_layer(layer));
             // The first item, drawn in this pass, takes focus once. A
             // popup's first pass is drawn hidden and gives no widget focus:

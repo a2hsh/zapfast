@@ -7016,9 +7016,11 @@ mod tests {
             "{:?}",
             active.label()
         );
-        // Every other drawn row is an unselected item of the same list. The
-        // row hangs from a plain container (its scope), which AccessKit
-        // flattens, and that container from the list.
+        // Every other drawn row is an item of the same list with no selection
+        // state at all, neither selected nor toggled: a screen reader would
+        // say "not selected" or "not checked" on each. The row hangs from a
+        // plain container (its scope), which AccessKit flattens, and that
+        // container from the list.
         let options: Vec<_> = tree
             .nodes
             .iter()
@@ -7027,9 +7029,12 @@ mod tests {
             .collect();
         assert!(options.len() > 1, "several rows are drawn");
         for (id, option) in &options {
-            if option.position_in_set() != Some(open_index) {
-                assert_eq!(option.is_selected(), Some(false));
+            if option.position_in_set() == Some(open_index) {
+                assert_eq!(option.is_selected(), Some(true));
+            } else {
+                assert_eq!(option.is_selected(), None, "{:?}", option.label());
             }
+            assert_eq!(option.toggled(), None, "{:?}", option.label());
             let (scope, parent) = tree
                 .nodes
                 .iter()
@@ -7550,6 +7555,202 @@ mod tests {
         app.chat_filter = crate::model::ChatFilter::All;
         render(&mut app, &ctx);
         assert!(!egui::Popup::is_id_open(&ctx, chat_popup(&ctx, &open)));
+    }
+
+    /// The collapsed list's avatars carry the same states as full rows: only
+    /// the open chat a selection, and no row a toggle.
+    #[test]
+    fn non_open_chat_rows_carry_no_selection_or_toggle_state() {
+        let mut app = app();
+        app.sidebar_visible = false;
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        let tree = tree_after(&mut app, &ctx, None);
+        let ids = visible_ids(&app);
+        let open = app.open_chat.clone().unwrap();
+        let open_index = ids.iter().position(|id| *id == open);
+        // The list's items, not the message list's: each hangs from one of
+        // the list's (flattened) children.
+        let (list, _) = chat_list_nodes(&tree);
+        let options: Vec<_> = tree
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.role() == egui::accesskit::Role::ListBoxOption)
+            .filter(|(id, _)| {
+                tree.nodes.iter().any(|(scope, parent)| {
+                    list.children().contains(scope) && parent.children().contains(id)
+                })
+            })
+            .collect();
+        assert!(options.len() > 1, "several avatars are drawn");
+        assert!(
+            options
+                .iter()
+                .any(|(_, node)| node.position_in_set() == open_index)
+        );
+        for (_, option) in options {
+            if option.position_in_set() == open_index {
+                assert_eq!(option.is_selected(), Some(true));
+            } else {
+                assert_eq!(option.is_selected(), None);
+            }
+            assert_eq!(option.toggled(), None);
+            // The rail follows the full rows: only the open chat says open.
+            let label = option.label().unwrap_or_default();
+            assert_eq!(
+                label.ends_with(", open"),
+                option.position_in_set() == open_index,
+                "{label}"
+            );
+        }
+    }
+
+    fn focused_menu_layer(ctx: &egui::Context) -> Option<egui::Id> {
+        ctx.memory(|memory| memory.focused())
+            .and_then(|id| ctx.read_response(id))
+            .map(|response| response.layer_id.id)
+    }
+
+    #[test]
+    fn chat_menu_submenus_work_from_the_keyboard() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        let chat = app.chat_cursor.clone().unwrap();
+        press_key(&mut app, &ctx, egui::Key::F10, egui::Modifiers::SHIFT);
+        let popup = chat_popup(&ctx, &chat);
+        walk_menu_to(&mut app, &ctx, "Notification sound");
+        let row = ctx.memory(|memory| memory.focused()).unwrap();
+        assert!(crate::ui::list_nav::is_submenu_row(&ctx, row));
+        let submenu = egui::containers::menu::SubMenu::id_from_widget_id(row);
+        // Right opens the submenu, on its first item.
+        press_key(&mut app, &ctx, egui::Key::ArrowRight, egui::Modifiers::NONE);
+        assert_eq!(focused_menu_layer(&ctx), Some(submenu));
+        assert_eq!(focused_label(&mut app, &ctx).as_deref(), Some("Default"));
+        // Down stays in it.
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        assert_eq!(focused_menu_layer(&ctx), Some(submenu));
+        assert_eq!(focused_label(&mut app, &ctx).as_deref(), Some("Pidgin"));
+        // Left closes only the submenu, back on its row.
+        press_key(&mut app, &ctx, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(row));
+        assert!(egui::Popup::is_id_open(&ctx, popup), "the menu stays open");
+        // Enter opens it too, and Escape inside closes only the submenu.
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(focused_menu_layer(&ctx), Some(submenu));
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(row));
+        assert!(egui::Popup::is_id_open(&ctx, popup), "the menu stays open");
+        // An item chosen in the submenu applies, closes the menu and returns
+        // to the list.
+        press_key(&mut app, &ctx, egui::Key::ArrowRight, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        assert_eq!(focused_label(&mut app, &ctx).as_deref(), Some("Pidgin"));
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(
+            app.chat(&chat).unwrap().notification_sound,
+            Some(crate::settings::NotificationSound::Receive)
+        );
+        assert!(!egui::Popup::is_id_open(&ctx, popup));
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::chats::chats_list_id())
+        );
+        // Escape on the menu itself still closes it.
+        press_key(&mut app, &ctx, egui::Key::F10, egui::Modifiers::SHIFT);
+        assert!(egui::Popup::is_id_open(&ctx, popup));
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(!egui::Popup::is_id_open(&ctx, popup));
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::chats::chats_list_id())
+        );
+    }
+
+    /// Archived from the keyboard menu, far down a long list, the current
+    /// chat hands over to the open chat, far up: the list goes there, so a
+    /// reader always has a current chat.
+    #[test]
+    fn archiving_from_the_keyboard_menu_keeps_an_active_chat() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        let template = app.chats[0].clone();
+        for index in 0..300 {
+            let mut chat = template.clone();
+            chat.id = format!("4917900{index:05}@s.whatsapp.net");
+            chat.name = format!("Fixture {index:03}");
+            chat.last_activity = 1_000 + index;
+            chat.pinned = false;
+            chat.archived = false;
+            chat.locked = false;
+            app.chats.push(chat);
+        }
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        press_key(&mut app, &ctx, egui::Key::End, egui::Modifiers::NONE);
+        let archived = app.chat_cursor.clone().unwrap();
+        let open = app.open_chat.clone().unwrap();
+        assert_ne!(archived, open);
+        press_key(&mut app, &ctx, egui::Key::F10, egui::Modifiers::SHIFT);
+        walk_menu_to(&mut app, &ctx, "Archive");
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert!(app.chat(&archived).unwrap().archived);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::chats::chats_list_id())
+        );
+        let ids = visible_ids(&app);
+        let mut active = None;
+        for _ in 0..2 {
+            let tree = tree_after(&mut app, &ctx, None);
+            active = chat_list_nodes(&tree).1;
+            if active.is_some() {
+                break;
+            }
+        }
+        let active = active.expect("the list names a current chat");
+        assert_eq!(
+            active.position_in_set(),
+            ids.iter().position(|id| *id == open)
+        );
+        assert_eq!(app.chat_cursor.as_ref(), Some(&open));
+    }
+
+    /// Emptied while focused (the last archived chat unarchived), the list
+    /// keeps focus and says it has no chats.
+    #[test]
+    fn emptying_the_focused_chat_list_announces_and_keeps_focus() {
+        let mut app = app();
+        app.show_archived = true;
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        let list = crate::ui::chats::chats_list_id();
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        for id in visible_ids(&app) {
+            app.actions
+                .push(crate::model::Action::SetArchived(id, false));
+        }
+        render(&mut app, &ctx);
+        assert!(visible_ids(&app).is_empty());
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        assert!(
+            app.announcer.spoken().contains(&"No chats"),
+            "{:?}",
+            app.announcer.spoken()
+        );
+        let tree = tree_after(&mut app, &ctx, None);
+        let (node, active) = chat_list_nodes(&tree);
+        assert_eq!(node.label(), Some("Archived chats"));
+        assert_eq!(node.size_of_set(), Some(0));
+        assert!(active.is_none());
+        assert_eq!(tree.focus, list.accesskit_id());
     }
 
     #[test]

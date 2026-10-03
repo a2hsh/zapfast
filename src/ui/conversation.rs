@@ -3514,7 +3514,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat, under: f32) {
                                 row_of(&starts, index),
                                 total,
                                 row.response.rect,
-                                None,
+                                false,
                             );
                         }
                         // Laid out this pass, so its node is in this pass's
