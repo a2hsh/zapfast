@@ -6781,6 +6781,158 @@ mod tests {
         assert_eq!(ring(&ctx), None);
     }
 
+    /// The message field's focus request, declined in a read-only chat
+    /// opened with the pointer, is dropped: a later Tab moves focus as it
+    /// always did and leaves the view where the reader scrolled it.
+    #[test]
+    fn tab_after_a_pointer_opened_channel_does_not_scroll_it() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        let channel = open_channel_with_the_pointer(&mut app, &ctx);
+        assert!(!app.focus_composer, "the declined request is dropped");
+        let offset = |ctx: &egui::Context| {
+            ctx.data(|data| {
+                data.get_temp::<(f32, f32)>(crate::ui::conversation::scroll_metrics_id(&channel))
+            })
+            .unwrap()
+            .0
+        };
+        // Read further up, and let the eased scroll finish.
+        press_key(&mut app, &ctx, egui::Key::PageUp, egui::Modifiers::NONE);
+        for _ in 0..30 {
+            render(&mut app, &ctx);
+        }
+        let before = offset(&ctx);
+        assert!(!app.at_bottom, "scrolled up to read");
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        assert_eq!(offset(&ctx), before, "Tab left the view where it was");
+        let list = crate::ui::conversation::messages_list_id(&channel);
+        assert_ne!(ctx.memory(|memory| memory.focused()), Some(list));
+        let first = crate::ui::focus::stops(&ctx)[0].1;
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(first),
+            "Tab reached the first stop, as before the list existed"
+        );
+    }
+
+    /// Alt+Down is keyboard navigation even straight after launch, before
+    /// any Tab: into a chat without a message field it lands on the chat's
+    /// message list, not on nothing.
+    #[test]
+    fn switching_chats_by_keyboard_from_the_field_focuses_a_read_only_chats_list() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(egui::Id::new("composer-text"))
+        );
+        assert!(
+            !ctx.data(|data| data
+                .get_temp::<bool>(crate::theme::keyboard_focus_id())
+                .unwrap_or(false)),
+            "launch state: no keyboard navigation yet"
+        );
+        let channel = channel(&app);
+        // The open chat is not a channel, so the first channel is next.
+        app.chat_filter = crate::model::ChatFilter::Channels;
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::ALT);
+        assert_eq!(app.open_chat.as_deref(), Some(channel.as_str()));
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::conversation::messages_list_id(&channel))
+        );
+    }
+
+    /// Ctrl+2 (Command+2 on macOS), upstream's shortcut for the second chat
+    /// in the list, works from the focused message list as from the message
+    /// field, and lands where Alt+Down lands: the new chat's message field.
+    /// A numbered chat without a message field, such as a channel, lands on
+    /// its message list instead.
+    #[test]
+    fn a_numbered_chat_shortcut_works_from_the_message_list() {
+        let digits = [
+            egui::Key::Num1,
+            egui::Key::Num2,
+            egui::Key::Num3,
+            egui::Key::Num4,
+            egui::Key::Num5,
+            egui::Key::Num6,
+            egui::Key::Num7,
+            egui::Key::Num8,
+            egui::Key::Num9,
+        ];
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        focus_messages(&mut app, &ctx);
+        let chat = app.open_chat.clone().unwrap();
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::conversation::messages_list_id(&chat))
+        );
+        let second = app.visible_chats()[1].id.clone();
+        assert_ne!(second, chat);
+        assert!(
+            app.chat(&second).unwrap().can_send(),
+            "the second chat has a message field"
+        );
+        press_key(&mut app, &ctx, egui::Key::Num2, egui::Modifiers::COMMAND);
+        render(&mut app, &ctx);
+        assert_eq!(app.open_chat.as_ref(), Some(&second));
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(egui::Id::new("composer-text"))
+        );
+        let (index, read_only) = app
+            .visible_chats()
+            .iter()
+            .take(digits.len())
+            .enumerate()
+            .find(|(_, chat)| !chat.can_send())
+            .map(|(index, chat)| (index, chat.id.clone()))
+            .expect("a chat without a message field among the first nine");
+        focus_messages(&mut app, &ctx);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::conversation::messages_list_id(&second))
+        );
+        press_key(&mut app, &ctx, digits[index], egui::Modifiers::COMMAND);
+        render(&mut app, &ctx);
+        assert_eq!(app.open_chat.as_ref(), Some(&read_only));
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::conversation::messages_list_id(&read_only))
+        );
+    }
+
+    /// A list focus deferred past a hidden pass belongs to its chat: drawn
+    /// for another chat, it is dropped, and that chat's field keeps focus.
+    #[test]
+    fn a_deferred_list_focus_is_dropped_for_another_chat() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let chat = app.open_chat.clone().unwrap();
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(egui::Id::new("composer-text"))
+        );
+        app.list_focus_deferred = Some("15550009999@s.whatsapp.net".into());
+        render(&mut app, &ctx);
+        assert!(app.list_focus_deferred.is_none(), "dropped");
+        assert_ne!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::conversation::messages_list_id(&chat))
+        );
+    }
+
     /// In background mode a new window reuses the app. A message list that
     /// had focus in the window that closed must not keep the new window's
     /// message field from taking focus.
