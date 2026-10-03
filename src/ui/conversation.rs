@@ -4561,14 +4561,33 @@ fn call_menu(
     let palette = view.palette;
     let chat = &view.chat.id;
     if group || view.chat.kind != crate::model::ChatKind::Direct {
-        ui.add_enabled_ui(false, |ui| {
-            widgets::menu_item(
+        let label = crate::i18n::gettext(view.locale, "Group calls happen on the phone");
+        let keys_menu = ui
+            .ctx()
+            .data(|data| data.get_temp::<bool>(keys_menu_id(ui.layer_id().id)))
+            .unwrap_or(false);
+        if keys_menu {
+            // Opened from the keys, the menu's one row takes focus, unavailable,
+            // so the reader hears why there is nothing to choose.
+            let row = widgets::menu_item_focusable(
                 ui,
                 &palette,
                 Some(Icon::Phone),
-                &crate::i18n::gettext(view.locale, "Group calls happen on the phone"),
+                &label,
+                &label,
+                false,
+                true,
             );
-        });
+            if !ui.is_sizing_pass() {
+                ui.ctx().data_mut(|data| {
+                    data.insert_temp(menu_first_item_id(chat, message), Some(row.id));
+                });
+            }
+        } else {
+            ui.add_enabled_ui(false, |ui| {
+                widgets::menu_item(ui, &palette, Some(Icon::Phone), &label);
+            });
+        }
         return;
     }
     let voice = widgets::menu_item_response(
@@ -6443,7 +6462,8 @@ fn context_menu(
     });
     // What else a pointer reaches in the bubble, above Copy, in a menu the
     // keys opened: a card's buttons, the quote, the sender. A disabled entry
-    // takes no focus, as its row in the bubble.
+    // takes no focus, as its row in the bubble, except the card row Space
+    // chose (below).
     let keys_menu = ui
         .ctx()
         .data(|data| data.get_temp::<bool>(keys_menu_id(ui.layer_id().id)))
@@ -6454,35 +6474,53 @@ fn context_menu(
         Vec::new()
     };
     // Space on a carousel card with no picture opened the menu for that
-    // card's buttons: its first usable one takes focus, not Reply.
+    // card's buttons: focus starts on its first usable button, not Reply,
+    // or on its first button when none is usable, a disabled row that then
+    // takes focus so its reason is read.
     let focus_card = ui
         .ctx()
         .data(|data| data.get_temp::<usize>(menu_card_id(chat, &message.id)));
-    let mut card_focused = false;
+    let focus_row = focus_card.and_then(|card| {
+        let of_card = |entry: &InnerEntry| entry.card == Some(card);
+        entries
+            .iter()
+            .position(|entry| of_card(entry) && entry.enabled)
+            .or_else(|| entries.iter().position(of_card))
+    });
     if !entries.is_empty() {
         widgets::menu_separator(ui, &palette);
-        for entry in entries {
-            let response = widgets::menu_item_response(
+        for (row, entry) in entries.into_iter().enumerate() {
+            // Hover text is out of a screen reader's reach, so an unavailable
+            // entry says why in its name, translated; the hover text stays
+            // as the bubble shows it.
+            let accessible = match entry.hint {
+                Some(hint) if !entry.enabled => crate::a11y::fill(
+                    &crate::i18n::gettext(view.locale, "{option}, unavailable: {reason}"),
+                    &[
+                        ("option", &entry.label),
+                        ("reason", &hint.said(view.locale)),
+                    ],
+                ),
+                _ => entry.label.clone(),
+            };
+            let focus_here = focus_row == Some(row);
+            let response = widgets::menu_item_focusable(
                 ui,
                 &palette,
                 Some(entry.icon),
                 &entry.label,
+                &accessible,
                 entry.enabled,
+                entry.enabled || focus_here,
             );
-            if focus_card.is_some()
-                && entry.card == focus_card
-                && entry.enabled
-                && !card_focused
-                && !ui.is_sizing_pass()
-            {
-                card_focused = true;
+            if focus_here && !ui.is_sizing_pass() {
                 ui.ctx().data_mut(|data| {
                     data.insert_temp(menu_first_item_id(chat, &message.id), Some(response.id));
                 });
             }
             let clicked = response.clicked();
             if let Some(hint) = entry.hint {
-                response.on_hover_text(hint);
+                response.on_hover_text(hint.shown());
             }
             if clicked && let Some(action) = entry.action {
                 actions.push(action);
@@ -6638,7 +6676,7 @@ struct InnerEntry {
     action: Option<Action>,
     enabled: bool,
     /// Why the entry is unavailable, shown on hover as in the bubble.
-    hint: Option<&'static str>,
+    hint: Option<ButtonBlocker>,
     /// The carousel card whose button it is, if any.
     card: Option<usize>,
 }
@@ -8892,7 +8930,7 @@ fn interactive_reason(
     view: &View<'_>,
     message: &Message,
     button: &crate::model::InteractiveButton,
-) -> &'static str {
+) -> ButtonBlocker {
     use crate::model::InteractiveAction;
     let sends = matches!(
         button.action,
@@ -8903,15 +8941,62 @@ fn interactive_reason(
             .interactive_pending
             .contains(&(message.chat.clone(), message.id.clone()))
     {
-        "Sending reply…"
+        ButtonBlocker::Sending
     } else if sends && !view.connected {
-        "Connect to WhatsApp to reply"
+        ButtonBlocker::Offline
     } else if sends && !view.chat.can_send() {
-        "This conversation is read-only"
+        ButtonBlocker::ReadOnly
     } else if sends && message.from_me {
-        "Reply options are for the recipient"
+        ButtonBlocker::OwnMessage
     } else {
-        "Open this option in WhatsApp Web or on your phone"
+        ButtonBlocker::Elsewhere
+    }
+}
+
+/// Why a card's button is unavailable. Each reason has its hover text and,
+/// in its own match arm, its translated words for a screen reader, so a new
+/// reason cannot go unspoken or untranslated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ButtonBlocker {
+    Sending,
+    Offline,
+    ReadOnly,
+    OwnMessage,
+    Elsewhere,
+}
+
+impl ButtonBlocker {
+    #[cfg(test)]
+    const ALL: [Self; 5] = [
+        Self::Sending,
+        Self::Offline,
+        Self::ReadOnly,
+        Self::OwnMessage,
+        Self::Elsewhere,
+    ];
+
+    /// As the bubble's hover text shows it.
+    fn shown(self) -> &'static str {
+        match self {
+            Self::Sending => "Sending reply…",
+            Self::Offline => "Connect to WhatsApp to reply",
+            Self::ReadOnly => "This conversation is read-only",
+            Self::OwnMessage => "Reply options are for the recipient",
+            Self::Elsewhere => "Open this option in WhatsApp Web or on your phone",
+        }
+    }
+
+    /// As the keyboard menu speaks it, translated.
+    fn said(self, locale: crate::i18n::Locale) -> String {
+        use crate::i18n::gettext;
+        match self {
+            Self::Sending => gettext(locale, "Sending reply…"),
+            Self::Offline => gettext(locale, "Connect to WhatsApp to reply"),
+            Self::ReadOnly => gettext(locale, "This conversation is read-only"),
+            Self::OwnMessage => gettext(locale, "Reply options are for the recipient"),
+            Self::Elsewhere => gettext(locale, "Open this option in WhatsApp Web or on your phone"),
+        }
+        .into_owned()
     }
 }
 
@@ -9073,7 +9158,7 @@ fn interactive_buttons(
             );
         }
         if !enabled {
-            let reason = interactive_reason(view, message, button);
+            let reason = interactive_reason(view, message, button).shown();
             response.on_hover_text(format!("{}\n{reason}", button.label));
         } else if let Some(url) = &button.url {
             if response
@@ -11117,6 +11202,43 @@ fn chat_of(chat: &ChatId) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each reason the keyboard menu speaks for an unavailable card button
+    /// goes through gettext as its own literal, so translators get it; no
+    /// catalog translates them yet, so the catalog template proves the
+    /// literal. The test walks the same table the menu reads.
+    #[test]
+    fn unavailable_reasons_are_spoken_through_gettext() {
+        let template = include_str!("../../assets/i18n/zapfast.pot");
+        let locale = crate::i18n::Locale::German;
+        for blocker in ButtonBlocker::ALL {
+            let shown = blocker.shown();
+            let spoken = blocker.said(locale);
+            assert_eq!(spoken, crate::i18n::gettext(locale, shown), "{blocker:?}");
+            assert!(
+                template.contains(&format!("msgid \"{shown}\"")),
+                "{blocker:?}: {shown:?} is not a gettext literal"
+            );
+        }
+        // The poll's reasons, spoken the same way, without the visual " · ".
+        for (reason, said) in [
+            ("Sending vote…", "Sending vote…"),
+            (
+                "Voting key unavailable · use your phone",
+                "Voting key unavailable, use your phone",
+            ),
+            ("Reconnect to vote", "Reconnect to vote"),
+            (
+                "Remove an answer first to choose another",
+                "Remove an answer first to choose another",
+            ),
+        ] {
+            let spoken = blocker_said(locale, reason);
+            assert_eq!(spoken, crate::i18n::gettext(locale, said));
+            assert!(!spoken.contains('·'), "{spoken}");
+            assert!(template.contains(&format!("msgid \"{said}\"")), "{said:?}");
+        }
+    }
 
     #[test]
     fn account_read_receipt_privacy_hides_read_ticks_only_in_outgoing_dms() {
