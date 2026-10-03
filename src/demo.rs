@@ -6749,6 +6749,224 @@ mod tests {
         assert_eq!(app.message_cursor.get(&chat), Some(&target));
     }
 
+    /// One frame with the window focused or not, as the platform reports it.
+    fn frame_with_window_focus(app: &mut App, ctx: &egui::Context, focused: bool) {
+        let mut input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1180.0, 780.0),
+            )),
+            ..Default::default()
+        };
+        input
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .unwrap()
+            .focused = Some(focused);
+        let mut output = ctx.run_ui(input, |ui| {
+            let ctx = ui.ctx().clone();
+            app.background_frame(&ctx);
+            app.frame_ui(ui);
+        });
+        output.textures_delta.clear();
+    }
+
+    /// Coming back to the window (Alt+Tab, a screen reader dialog) leaves a
+    /// reader in the message list where they were, not in the message field.
+    #[test]
+    fn returning_to_the_window_keeps_focus_in_the_message_list() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let chat = app.open_chat.clone().unwrap();
+        let list = crate::ui::conversation::messages_list_id(&chat);
+        press_key(&mut app, &ctx, egui::Key::Num2, messages_shortcut());
+        press_key(&mut app, &ctx, egui::Key::ArrowUp, egui::Modifiers::NONE);
+        let cursor = app.message_cursor.get(&chat).cloned();
+        frame_with_window_focus(&mut app, &ctx, false);
+        frame_with_window_focus(&mut app, &ctx, true);
+        render(&mut app, &ctx);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        assert_eq!(app.message_cursor.get(&chat).cloned(), cursor);
+    }
+
+    /// A notification for the open chat, clicked while the reader is in its
+    /// message list, moves the list to that message and keeps focus there.
+    #[test]
+    fn opening_a_message_in_the_open_chat_keeps_focus_in_its_list() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let chat = app.open_chat.clone().unwrap();
+        let list = crate::ui::conversation::messages_list_id(&chat);
+        press_key(&mut app, &ctx, egui::Key::Num2, messages_shortcut());
+        let target = app.conversations[&chat].messages[2].id.clone();
+        app.actions.push(crate::model::Action::OpenMessage {
+            chat: chat.clone(),
+            message: target.clone(),
+        });
+        render(&mut app, &ctx);
+        render(&mut app, &ctx);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        assert_eq!(app.message_cursor.get(&chat), Some(&target));
+        assert_eq!(
+            ring(&ctx),
+            bubble_rect(&ctx, &chat, &target),
+            "the ring is on the message opened"
+        );
+        assert!(ring(&ctx).is_some());
+    }
+
+    fn channel(app: &App) -> String {
+        let id = SAMPLES
+            .iter()
+            .find(|sample| sample.id.ends_with("@newsletter"))
+            .expect("channel sample")
+            .id
+            .to_owned();
+        assert!(!app.chat(&id).unwrap().can_send(), "a read-only chat");
+        id
+    }
+
+    /// A long read-only chat opened from the keyboard for the first time
+    /// shows its newest messages in the first frame it is drawn, never its
+    /// oldest (#357), and its message list has the focus.
+    #[test]
+    fn a_long_read_only_chat_opened_from_the_keyboard_shows_its_end_at_once() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Num2, messages_shortcut());
+        let channel = channel(&app);
+        let conversation = app.conversations.get_mut(&channel).unwrap();
+        let template = conversation.messages.last().unwrap().clone();
+        conversation.messages = (0..60)
+            .map(|index| crate::model::Message {
+                id: format!("channel-{index}"),
+                timestamp: template.timestamp - (60 - index) as i64 * 60,
+                content: crate::model::Content::text(format!("Announcement {index}")),
+                ..template.clone()
+            })
+            .collect();
+        app.actions
+            .push(crate::model::Action::OpenChat(channel.clone()));
+        // The first frame that draws any of the channel's messages.
+        let mut first = None;
+        for _ in 0..4 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1180.0, 780.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    let ctx = ui.ctx().clone();
+                    app.background_frame(&ctx);
+                    app.frame_ui(ui);
+                },
+            );
+            output.textures_delta.clear();
+            // The text the reader sees: drawn inside its clip rect.
+            let shown: Vec<String> = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text)
+                        if clipped.clip_rect.intersects(text.visual_bounding_rect()) =>
+                    {
+                        Some(text.galley.text().to_owned())
+                    }
+                    _ => None,
+                })
+                .filter(|text| text.starts_with("Announcement "))
+                .collect();
+            if !shown.is_empty() {
+                first = Some(shown);
+                break;
+            }
+        }
+        let shown = first.expect("the channel's messages are drawn");
+        assert!(
+            shown.iter().any(|text| text == "Announcement 59"),
+            "the newest message is in view at once: {shown:?}"
+        );
+        assert!(
+            !shown.iter().any(|text| text == "Announcement 0"),
+            "the oldest never flashes: {shown:?}"
+        );
+        render(&mut app, &ctx);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::conversation::messages_list_id(&channel))
+        );
+    }
+
+    /// A chat without a message field gives its message list the focus the
+    /// field would have had: switching chats from the list never lands on
+    /// nothing.
+    #[test]
+    fn switching_to_a_read_only_chat_from_the_list_focuses_its_list() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Num2, messages_shortcut());
+        let channel = channel(&app);
+        app.actions
+            .push(crate::model::Action::OpenChat(channel.clone()));
+        render(&mut app, &ctx);
+        let list = crate::ui::conversation::messages_list_id(&channel);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        let tree = tree_after(&mut app, &ctx, None);
+        assert_eq!(tree.focus, list.accesskit_id());
+        assert!(
+            tree.nodes.iter().any(|(id, _)| *id == tree.focus),
+            "focus names a node in the tree"
+        );
+    }
+
+    /// Opened with the pointer, a read-only chat still opens at its newest
+    /// message, with no ring: its list's focus is invisible until the
+    /// keyboard is used.
+    #[test]
+    fn a_read_only_chat_opened_with_the_pointer_opens_at_its_newest_message() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let channel = channel(&app);
+        // Long enough to scroll.
+        let conversation = app.conversations.get_mut(&channel).unwrap();
+        let template = conversation.messages.last().unwrap().clone();
+        conversation.messages = (0..60)
+            .map(|index| crate::model::Message {
+                id: format!("channel-{index}"),
+                timestamp: template.timestamp - (60 - index) as i64 * 60,
+                content: crate::model::Content::text(format!("Announcement {index}")),
+                ..template.clone()
+            })
+            .collect();
+        app.actions
+            .push(crate::model::Action::OpenChat(channel.clone()));
+        render(&mut app, &ctx);
+        render(&mut app, &ctx);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::conversation::messages_list_id(&channel))
+        );
+        assert!(app.at_bottom, "at the newest message");
+        assert!(
+            app.scroll_to_bottom,
+            "still pinned there, as any chat opened with the pointer"
+        );
+        assert_eq!(ring(&ctx), None);
+    }
+
     #[test]
     fn announcer_nodes_are_in_every_frame() {
         let mut app = app();
