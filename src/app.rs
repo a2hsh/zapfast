@@ -831,6 +831,14 @@ pub struct App {
     pub focus_settings_search: bool,
     /// The typing in the settings search, until its result count is spoken.
     settings_search_settle: Option<crate::announcer::Settle>,
+    /// The typing in the chat list's search, until its result count is
+    /// spoken.
+    search_settle: Option<crate::announcer::Settle>,
+    /// Whether the archive's message hits for the chat list's search are
+    /// still due: the count waits for them.
+    search_pending: bool,
+    /// The typing in the search pane, until its result count is spoken.
+    chat_search_settle: Option<crate::announcer::Settle>,
     /// What had focus when Settings opened, to have it again on leaving.
     settings_return_focus: Option<egui::Id>,
     /// What had focus on Settings when the wallpaper page opened from there.
@@ -1615,6 +1623,9 @@ impl App {
             settings_search: String::new(),
             focus_settings_search: false,
             settings_search_settle: None,
+            search_settle: None,
+            search_pending: false,
+            chat_search_settle: None,
             settings_return_focus: None,
             wallpaper_return_focus: None,
             return_focus: None,
@@ -1914,6 +1925,10 @@ impl App {
         self.wallpaper_return_focus = None;
         // The Settings search count waits for a page that just closed.
         self.settings_search_settle = None;
+        // The searches the counts wait for were the previous account's.
+        self.search_pending = false;
+        self.search_settle = None;
+        self.chat_search_settle = None;
     }
 
     fn add_account(&mut self) {
@@ -2272,12 +2287,18 @@ impl App {
     /// longer reading their chat.
     pub(crate) fn flush_announcements(&mut self, now: Instant) -> Option<Instant> {
         self.sent_queued = false;
-        let search_due = self.settings_search_settle.map(|settle| {
-            settle.deadline(crate::announcer::SEARCH_QUIET, crate::announcer::MAX_HOLD)
-        });
-        if search_due.is_some_and(|due| now >= due) {
+        let [settings_due, list_due, pane_due] = self.search_deadlines();
+        if settings_due.is_some_and(|due| now >= due) {
             self.settings_search_settle = None;
             self.announce_settings_matches();
+        }
+        if list_due.is_some_and(|due| now >= due) {
+            self.search_settle = None;
+            self.announce_chat_list_matches();
+        }
+        if pane_due.is_some_and(|due| now >= due) {
+            self.chat_search_settle = None;
+            self.announce_chat_search_matches();
         }
         let stale = self
             .message_hold
@@ -2317,14 +2338,99 @@ impl App {
             self.announcer
                 .say(crate::announcer::Category::Message, text);
         }
-        let search_due = self.settings_search_settle.map(|settle| {
-            settle.deadline(crate::announcer::SEARCH_QUIET, crate::announcer::MAX_HOLD)
-        });
         self.message_hold
             .deadline()
             .into_iter()
-            .chain(search_due)
+            .chain(self.search_deadlines().into_iter().flatten())
             .min()
+    }
+
+    /// When each search's result count is due: the Settings search, the chat
+    /// list's and the pane's. A search whose results the archive still owes
+    /// has none: its count waits for them, and the event that brings them
+    /// wakes the window, so no repaint is asked for meanwhile.
+    fn search_deadlines(&self) -> [Option<Instant>; 3] {
+        let due = |settle: Option<crate::announcer::Settle>, pending: bool| {
+            settle.filter(|_| !pending).map(|settle| {
+                settle.deadline(crate::announcer::SEARCH_QUIET, crate::announcer::MAX_HOLD)
+            })
+        };
+        [
+            due(self.settings_search_settle, false),
+            due(self.search_settle, self.search_pending),
+            due(self.chat_search_settle, self.chat_search_pending),
+        ]
+    }
+
+    /// Another letter of a search typed at `now`: the run of typing it
+    /// belongs to, or none once the search is empty.
+    fn touch_settle(
+        settle: Option<crate::announcer::Settle>,
+        searching: bool,
+        now: Instant,
+    ) -> Option<crate::announcer::Settle> {
+        searching.then(|| {
+            let mut settle = settle.unwrap_or_else(|| crate::announcer::Settle::new(now));
+            settle.touch(now);
+            settle
+        })
+    }
+
+    /// Says that Escape emptied a search field, in any of the three.
+    pub(crate) fn announce_search_cleared(&mut self) {
+        self.announcer.say(
+            crate::announcer::Category::Status,
+            crate::i18n::gettext(self.locale, "Search cleared"),
+        );
+    }
+
+    /// "5 results" or "No results".
+    fn results_count_text(&self, count: usize) -> String {
+        if count == 0 {
+            return crate::i18n::gettext(self.locale, "No results").into_owned();
+        }
+        let plural = u32::try_from(count).unwrap_or(u32::MAX);
+        crate::a11y::fill(
+            &crate::i18n::ngettext(self.locale, "{count} result", "{count} results", plural),
+            &[("count", &count.to_string())],
+        )
+    }
+
+    /// Speaks how many rows the chat list's search shows (chats, messages
+    /// and contacts together), while it shows them.
+    fn announce_chat_list_matches(&mut self) {
+        if !self.chat_results_shown() {
+            return;
+        }
+        let text = self.results_count_text(crate::ui::chats::result_count(self));
+        self.announcer.say(crate::announcer::Category::Status, text);
+    }
+
+    /// Speaks how many matches the search pane lists, while it shows. A list
+    /// cut at its newest matches says so, as the pane itself does.
+    fn announce_chat_search_matches(&mut self) {
+        if !self.chat_search_visible()
+            || (self.chat_search.trim().is_empty() && self.chat_search_day.is_none())
+        {
+            return;
+        }
+        let count = self.chat_search_hits.len();
+        let text = if self.chat_search_truncated {
+            let plural = u32::try_from(count).unwrap_or(u32::MAX);
+            let shown = count.to_string();
+            crate::a11y::fill(
+                &crate::i18n::ngettext(
+                    self.locale,
+                    "More than {count} result, showing the newest {count}",
+                    "More than {count} results, showing the newest {count}",
+                    plural,
+                ),
+                &[("count", &shown)],
+            )
+        } else {
+            self.results_count_text(count)
+        };
+        self.announcer.say(crate::announcer::Category::Status, text);
     }
 
     /// Filters the Settings page by `text`, typed at `now`. The number of
@@ -2335,15 +2441,55 @@ impl App {
             return;
         }
         self.settings_search = text;
-        self.settings_search_settle = if self.settings_search.trim().is_empty() {
-            None
+        self.settings_search_settle = Self::touch_settle(
+            self.settings_search_settle,
+            !self.settings_search.trim().is_empty(),
+            now,
+        );
+    }
+
+    /// Filters the chat list by `text`, typed at `now`. How many results it
+    /// shows is spoken once the typing settles and the archive has answered
+    /// with its message hits; see `flush_announcements`.
+    pub(crate) fn search_chats(&mut self, text: String, now: Instant) {
+        // Typing into an empty field starts a new run, even when the last
+        // one was emptied elsewhere (a chat opened from the results) before
+        // its count was due.
+        let fresh = self.search.trim().is_empty();
+        self.search = text;
+        self.search_selected = None;
+        let query = self.search.trim().to_owned();
+        // Editing the search away from the secret code hides the
+        // locked folder again, like leaving the phone's home screen.
+        if !self.chat_lock_authenticated() && !self.secret_code_matched() {
+            self.close_locked_folder();
+        }
+        if query.is_empty() || self.locked_folder_open() || self.secret_code_matched() {
+            self.search_hits.clear();
+            self.search_pending = false;
         } else {
-            let mut settle = self
-                .settings_search_settle
-                .unwrap_or_else(|| crate::announcer::Settle::new(now));
-            settle.touch(now);
-            Some(settle)
-        };
+            self.backend.send(Command::SearchMessages { query });
+            self.search_pending = true;
+        }
+        // Only a search that lists results is counted: never the locked
+        // folder's filter, nor the secret code, which must stay unremarked.
+        let settle = self.search_settle.filter(|_| !fresh);
+        self.search_settle = Self::touch_settle(settle, self.chat_results_shown(), now);
+    }
+
+    /// Searches the open chat for `query`, typed at `now`. How many matches
+    /// it lists is spoken once the typing settles and the archive has
+    /// answered; see `flush_announcements`.
+    pub(crate) fn search_chat(&mut self, query: String, now: Instant) {
+        self.chat_search = query;
+        self.request_chat_search();
+        self.touch_chat_search(now);
+    }
+
+    /// The pane's query or day changed at `now`: a new list to count.
+    fn touch_chat_search(&mut self, now: Instant) {
+        let searching = !self.chat_search.trim().is_empty() || self.chat_search_day.is_some();
+        self.chat_search_settle = Self::touch_settle(self.chat_search_settle, searching, now);
     }
 
     /// Speaks how many settings the search leaves, while Settings show.
@@ -3871,8 +4017,41 @@ impl App {
                     self.chat_search_selected = None;
                 }
             }
+            Event::SearchFailed { query } => {
+                // The search on screen could not run: its count is waited for
+                // no longer, and not said, since the hits listed are the
+                // previous search's. The error that follows says what
+                // happened.
+                if live && query == self.search.trim() {
+                    self.search_pending = false;
+                    self.search_settle = None;
+                }
+            }
+            Event::ChatSearchFailed {
+                chat,
+                query,
+                from,
+                until,
+            } => {
+                // As for the chat list's search, and only for the pane's
+                // search in force, as its hits are.
+                let (want_from, want_until) = self.chat_search_range();
+                if live
+                    && self.open_chat.as_deref() == Some(chat.as_str())
+                    && query == self.chat_search.trim()
+                    && from == want_from
+                    && until == want_until
+                {
+                    self.chat_search_pending = false;
+                    self.chat_search_settle = None;
+                }
+            }
             Event::SearchHits { query, messages } => {
                 if query == self.search.trim() {
+                    // The count waits for the search on screen.
+                    if live {
+                        self.search_pending = false;
+                    }
                     // Locked chats' messages stay out of plain search.
                     self.search_hits = messages
                         .into_iter()
@@ -5119,6 +5298,7 @@ impl App {
         self.chat_search_day = None;
         self.chat_search_calendar = false;
         self.focus_chat_search = false;
+        self.chat_search_settle = None;
     }
 
     /// The Unix-second range the day filter stands for, if a day is picked.
@@ -8714,10 +8894,7 @@ impl App {
                 // Escape took focus away from the field; it stays the place
                 // to type the next search.
                 self.focus_settings_search = true;
-                self.announcer.say(
-                    crate::announcer::Category::Status,
-                    crate::i18n::gettext(self.locale, "Search cleared"),
-                );
+                self.announce_search_cleared();
             }
             Action::FocusComposer => {
                 self.focus_search = false;
@@ -8980,21 +9157,7 @@ impl App {
                     self.announcer.say(crate::announcer::Category::Status, text);
                 }
             }
-            Action::Search(text) => {
-                self.search = text;
-                self.search_selected = None;
-                let query = self.search.trim().to_owned();
-                // Editing the search away from the secret code hides the
-                // locked folder again, like leaving the phone's home screen.
-                if !self.chat_lock_authenticated() && !self.secret_code_matched() {
-                    self.close_locked_folder();
-                }
-                if query.is_empty() || self.locked_folder_open() || self.secret_code_matched() {
-                    self.search_hits.clear();
-                } else {
-                    self.backend.send(Command::SearchMessages { query });
-                }
-            }
+            Action::Search(text) => self.search_chats(text, Instant::now()),
             Action::OpenChatSearch => self.open_chat_search(),
             Action::OpenInfo(chat) => self.open_info(chat),
             Action::CloseInfo => {
@@ -9019,9 +9182,14 @@ impl App {
                 self.close_chat_search();
                 self.refocus_composer(ctx);
             }
-            Action::ChatSearch(query) => {
-                self.chat_search = query;
-                self.request_chat_search();
+            Action::ChatSearch(query) => self.search_chat(query, Instant::now()),
+            Action::ClearChatSearch => {
+                // The day filter stays: only the typed query goes.
+                self.search_chat(String::new(), Instant::now());
+                // Escape took focus away from the field; it stays the place
+                // to type the next search.
+                self.focus_chat_search = true;
+                self.announce_search_cleared();
             }
             Action::SetChatSearchDay(day) => {
                 self.chat_search_day = day;
@@ -9030,6 +9198,7 @@ impl App {
                     self.chat_search_month = day;
                 }
                 self.request_chat_search();
+                self.touch_chat_search(Instant::now());
             }
             Action::ShowUpdate => {
                 self.show_update = self.update.is_some();
@@ -11583,6 +11752,148 @@ mod tests {
         assert_eq!(speak_at(&mut app, t0 + ms(1000)), None);
     }
 
+    /// The chat list's search counts every row it lists: chats, messages
+    /// and contacts. The message rows come from the archive, so the count
+    /// waits for them as well as for the typing to settle.
+    #[test]
+    fn the_chat_list_search_count_is_spoken_once_the_typing_settles() {
+        use crate::announcer::SEARCH_QUIET;
+        let (mut app, events, _root) = reading(ADA, "Ada");
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        for (index, text) in ["a", "a"].into_iter().enumerate() {
+            let at = t0 + ms(150) * index as u32;
+            app.search_chats(text.into(), at);
+            assert_eq!(speak_at(&mut app, at), None, "nothing while typing");
+        }
+        // Settled, but the archive has not answered yet: still nothing, and
+        // no repaint is asked for while waiting on it.
+        assert_eq!(speak_at(&mut app, t0 + ms(150) + SEARCH_QUIET), None);
+        assert_eq!(app.flush_announcements(t0 + ms(150) + SEARCH_QUIET), None);
+        let hits = (0..3).map(|index| message(ADA, &format!("m{index}"), 100));
+        events
+            .send(Event::SearchHits {
+                query: "a".into(),
+                messages: hits.collect(),
+            })
+            .unwrap();
+        app.handle_events();
+        // The Ada chat, Grace's contact and three messages.
+        assert_eq!(
+            speak_at(&mut app, t0 + ms(150) + SEARCH_QUIET).as_deref(),
+            Some("5 results")
+        );
+        assert_eq!(speak_at(&mut app, t0 + ms(5000)), None, "said once");
+
+        app.search_chats("zzz".into(), t0);
+        events
+            .send(Event::SearchHits {
+                query: "zzz".into(),
+                messages: Vec::new(),
+            })
+            .unwrap();
+        app.handle_events();
+        assert_eq!(
+            speak_at(&mut app, t0 + SEARCH_QUIET).as_deref(),
+            Some("No results")
+        );
+        // Emptied before it settles: nothing.
+        app.search_chats("grace".into(), t0);
+        app.search_chats(String::new(), t0 + ms(100));
+        assert_eq!(speak_at(&mut app, t0 + ms(1000)), None);
+    }
+
+    /// A search emptied elsewhere before its count was due, as opening a
+    /// chat from the results does, leaves nothing behind: the next search
+    /// waits for its own pause in typing.
+    #[test]
+    fn a_search_emptied_elsewhere_starts_its_count_over() {
+        use crate::announcer::{MAX_HOLD, SEARCH_QUIET};
+        let (mut app, events, _root) = reading(ADA, "Ada");
+        let t0 = Instant::now();
+        app.search_chats("a".into(), t0);
+        app.search.clear();
+        let later = t0 + MAX_HOLD * 4;
+        app.search_chats("g".into(), later);
+        events
+            .send(Event::SearchHits {
+                query: "g".into(),
+                messages: Vec::new(),
+            })
+            .unwrap();
+        app.handle_events();
+        assert_eq!(speak_at(&mut app, later), None, "still typing");
+        assert!(speak_at(&mut app, later + SEARCH_QUIET).is_some());
+    }
+
+    /// The search pane counts its matches once the typing settles and the
+    /// archive has answered; a cut list says so.
+    #[test]
+    fn the_chat_search_count_is_spoken_once_the_typing_settles() {
+        use crate::announcer::SEARCH_QUIET;
+        let (mut app, events, _root) = reading(ADA, "Ada");
+        app.chat_search_open = true;
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let answer = |query: &str, count: usize, truncated: bool| Event::ChatHits {
+            chat: ADA.into(),
+            query: query.into(),
+            from: None,
+            until: None,
+            messages: (0..count)
+                .map(|index| message(ADA, &format!("m{index}"), 100))
+                .collect(),
+            truncated,
+        };
+        for (index, text) in ["e", "en", "eng"].into_iter().enumerate() {
+            let at = t0 + ms(150) * index as u32;
+            app.search_chat(text.into(), at);
+            assert_eq!(speak_at(&mut app, at), None, "nothing while typing");
+        }
+        let settled = t0 + ms(300) + SEARCH_QUIET;
+        assert_eq!(speak_at(&mut app, settled), None, "the archive is due");
+        events.send(answer("eng", 2, false)).unwrap();
+        app.handle_events();
+        assert_eq!(speak_at(&mut app, settled).as_deref(), Some("2 results"));
+        assert_eq!(speak_at(&mut app, t0 + ms(5000)), None, "said once");
+
+        app.search_chat("e".into(), t0);
+        events.send(answer("e", 80, true)).unwrap();
+        app.handle_events();
+        assert_eq!(
+            speak_at(&mut app, t0 + SEARCH_QUIET).as_deref(),
+            Some("More than 80 results, showing the newest 80")
+        );
+        app.search_chat("zzz".into(), t0);
+        events.send(answer("zzz", 0, false)).unwrap();
+        app.handle_events();
+        assert_eq!(
+            speak_at(&mut app, t0 + SEARCH_QUIET).as_deref(),
+            Some("No results")
+        );
+        // A closed pane says nothing.
+        app.search_chat("eng".into(), t0);
+        events.send(answer("eng", 2, false)).unwrap();
+        app.handle_events();
+        app.chat_search_open = false;
+        assert_eq!(speak_at(&mut app, t0 + ms(1000)), None);
+    }
+
+    /// Escape in a non-empty pane field empties it, says so, and leaves the
+    /// field the place to type again.
+    #[test]
+    fn clearing_the_chat_search_says_so_and_keeps_the_field() {
+        let (mut app, _events, _root) = reading(ADA, "Ada");
+        let ctx = egui::Context::default();
+        app.chat_search_open = true;
+        app.apply(Action::ChatSearch("engine".into()), &ctx);
+        app.apply(Action::ClearChatSearch, &ctx);
+        assert!(app.chat_search.is_empty());
+        assert!(app.chat_search_open, "the pane stays");
+        assert!(app.focus_chat_search);
+        assert_eq!(speak(&mut app).as_deref(), Some("Search cleared"));
+    }
+
     #[test]
     fn a_steady_stream_is_counted_at_the_cap() {
         let (mut app, _events, _root) = reading(ADA, "Ada");
@@ -13558,6 +13869,76 @@ mod tests {
         assert!(app.settings_search_settle.is_none());
     }
 
+    /// The result counts waiting for a pause in typing belong to the
+    /// searches left behind with their account.
+    #[test]
+    fn switching_accounts_ends_the_search_count_waits() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _commands) = two_accounts(directory.path());
+        let ctx = egui::Context::default();
+        app.search_pending = true;
+        app.search_settle = Some(crate::announcer::Settle::new(Instant::now()));
+        app.chat_search_settle = Some(crate::announcer::Settle::new(Instant::now()));
+        app.apply(Action::SwitchAccount(AccountId::parse("2").unwrap()), &ctx);
+        assert!(!app.search_pending);
+        assert!(app.search_settle.is_none());
+        assert!(app.chat_search_settle.is_none());
+    }
+
+    /// A search the archive could not run answers with its failure rather
+    /// than hits: that search waits no longer, and its count, which would be
+    /// the previous search's hits, is not said. Another error, or an older
+    /// search's failure, ends no wait.
+    #[test]
+    fn a_failed_archive_search_ends_only_its_own_wait() {
+        let (mut app, events, _root) = reading(ADA, "Ada");
+        app.search_chats("ad".into(), Instant::now());
+        app.search_chats("ada".into(), Instant::now());
+        assert!(app.search_pending);
+        assert!(app.search_settle.is_some());
+        events
+            .send(Event::Error("Message not sent: timed out".into()))
+            .unwrap();
+        events
+            .send(Event::SearchFailed { query: "ad".into() })
+            .unwrap();
+        app.handle_events();
+        assert!(app.search_pending, "no answer to the search on screen");
+        events
+            .send(Event::SearchFailed {
+                query: "ada".into(),
+            })
+            .unwrap();
+        events
+            .send(Event::Error("Could not search: database is locked".into()))
+            .unwrap();
+        app.handle_events();
+        assert!(!app.search_pending);
+        assert_eq!(app.search_deadlines()[1], None, "no count is said");
+
+        // The same for the pane, for the query and day in force.
+        let ctx = egui::Context::default();
+        app.apply(Action::OpenChat(ADA.into()), &ctx);
+        app.apply(Action::OpenChatSearch, &ctx);
+        app.search_chat("engine".into(), Instant::now());
+        assert!(app.chat_search_pending);
+        let failed = |query: &str| Event::ChatSearchFailed {
+            chat: ADA.into(),
+            query: query.into(),
+            from: None,
+            until: None,
+        };
+        events
+            .send(Event::Error("Message not sent: timed out".into()))
+            .unwrap();
+        events.send(failed("eng")).unwrap();
+        app.handle_events();
+        assert!(app.chat_search_pending, "no answer to the pane's search");
+        events.send(failed("engine")).unwrap();
+        app.handle_events();
+        assert!(!app.chat_search_pending);
+        assert_eq!(app.search_deadlines()[2], None, "no count is said");
+    }
     #[test]
     fn leaving_an_account_before_it_is_linked_removes_it() {
         let directory = tempfile::tempdir().unwrap();

@@ -34,11 +34,12 @@ pub enum Stop {
     /// pin: Enter goes to the pin shown and shows the next.
     PinBanner,
     /// The search pane's controls in reading order. The arrows walk its
-    /// results from the field.
+    /// results from the field, and in the results list, its last stop.
     ChatSearchClose,
     ChatSearchDate,
     ChatSearchField,
     ChatSearchDay,
+    ChatSearchResults,
     /// The info panel's close or back button, then its buttons and tabs
     /// in reading order. Its members, pictures, documents and links are
     /// pointer and accessibility targets, like chat rows.

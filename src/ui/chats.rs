@@ -1493,18 +1493,30 @@ fn row_scroll_offset(
     }
 }
 
+/// Whether the search results offer the chat with ourselves: the search
+/// matches our own name or number, and none of the matching `chats` is it.
+fn offers_self_row<'a>(app: &App, mut chats: impl Iterator<Item = &'a Chat>) -> bool {
+    let needle = crate::util::search_key(app.search.trim());
+    !needle.is_empty()
+        && app.offers_self(&needle)
+        && !chats.any(|chat| app.me.as_deref() == Some(chat.id.as_str()))
+}
+
+/// How many rows the search results show: matching chats, message hits and
+/// contacts, with the chat with ourselves when it is offered.
+pub fn result_count(app: &App) -> usize {
+    let chats = app.visible_chats();
+    let offer_self = offers_self_row(app, chats.iter().copied());
+    chats.len() + app.search_hits.len() + app.matching_contacts().len() + usize::from(offer_self)
+}
+
 /// Search results grouped into chats, messages, and contacts.
 fn results(app: &mut App, ui: &mut egui::Ui, focus: bool) {
     let palette = app.palette;
     let chats: Vec<Chat> = app.visible_chats().into_iter().cloned().collect();
     let hits: Vec<Message> = app.search_hits.clone();
     let contacts: Vec<Contact> = app.matching_contacts().into_iter().cloned().collect();
-    let needle = crate::util::search_key(app.search.trim());
-    let offer_self = !needle.is_empty()
-        && app.offers_self(&needle)
-        && !chats
-            .iter()
-            .any(|chat| app.me.as_deref() == Some(chat.id.as_str()));
+    let offer_self = offers_self_row(app, chats.iter());
     let label = crate::i18n::gettext(app.locale, "Search results");
     if chats.is_empty() && hits.is_empty() && contacts.is_empty() && !offer_self {
         // Still the list, with no items, so a reader in it keeps focus.

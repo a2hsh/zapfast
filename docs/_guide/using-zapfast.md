@@ -859,7 +859,26 @@ chat and moves to its message input, or to its message list when it has
 none. Shift+F10 opens the chat's menu with focus on its first item, and
 Escape returns to the list. In the search field, Down moves into the search
 results on the first one, Up from the first returns to the field, and Enter
-in either opens a chat, as before.
+in either opens a chat, as before. Once you pause typing, the search says
+how many results it shows, chats, messages and contacts together, such as
+"5 results" or "No results".
+
+The chat's search pane (Ctrl+F) has a search field named for the chat,
+such as "Search messages with Ahmed", and lists its matches as a list
+named Search results; each reads who wrote it, the line that matched and
+when, with its position in the list. In the search field, Up and Down move
+the current result, which the screen reader reads while typing stays in
+the field, and Enter jumps to it; the message list's current message
+follows. Tab from the field reaches the list itself, where Up, Down, Home,
+End, PgUp and PgDn move and Enter jumps. Once you pause typing, the pane
+says how many matches it lists, or that it shows only the newest of more.
+The calendar button (Filter by date) opens the day filter with focus on the
+picked day or today when pressed with Enter or Space, or in any way while a
+screen reader runs: its days are buttons named
+by their date, Left and Right move a day and Up and Down a week, Enter
+picks one, and Escape closes it; either way focus returns to the button.
+Escape in a non-empty search field, in the chat list, the pane or
+Settings, empties it and says "Search cleared".
 
 On the Calls tab the call history is a list in the same place, named Calls,
 or Missed calls under the Missed chip, and the New call list is another, named
