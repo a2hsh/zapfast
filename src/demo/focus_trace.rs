@@ -227,6 +227,14 @@ impl Trace {
         self.settle(step, 4);
     }
 
+    /// The window loses or regains focus, as winit reports it.
+    fn window(&mut self, step: &str, focused: bool) {
+        self.action += 1;
+        self.window_focused = focused;
+        self.frame(step, vec![egui::Event::WindowFocused(focused)]);
+        self.settle(step, 4);
+    }
+
     fn mark(&self) -> usize {
         self.frames.len()
     }
@@ -540,4 +548,78 @@ fn a_deleted_current_message_leaves_the_cursor_on_the_next() {
         .expect("the app listens");
     trace.settle("deleted", 4);
     assert_eq!(trace.app.message_cursor.get(&chat), Some(&next));
+}
+
+/// Where focus can be when the window goes away, one stop or more in each
+/// section.
+const REFOCUS_STOPS: &[Stop] = &[Stop::Search, Stop::Messages, Stop::Composer];
+
+/// Leaving the window and coming back puts the reader where they were, in
+/// any section.
+#[test]
+fn coming_back_to_the_window_restores_focus() {
+    for &stop in REFOCUS_STOPS {
+        let mut trace = Trace::new(app());
+        focus_stop(&mut trace, stop);
+        let before = trace.last().egui;
+        let from = trace.mark();
+        trace.window("window lost", false);
+        trace.window("window back", true);
+        let scenario = format!("window refocus on {stop:?}");
+        trace.assert_unchanged(from, &scenario);
+        assert_eq!(trace.last().egui, before, "{scenario}");
+    }
+}
+
+/// With nothing focused, coming back to the window lands in the message
+/// field of the open chat.
+#[test]
+fn coming_back_to_the_window_with_nothing_focused_lands_in_the_field() {
+    let mut trace = Trace::new(app());
+    trace.ctx.memory_mut(|memory| {
+        if let Some(id) = memory.focused() {
+            memory.surrender_focus(id);
+        }
+    });
+    trace.settle("nothing focused", 3);
+    assert_eq!(trace.last().egui, None);
+    trace.window("window lost", false);
+    trace.window("window back", true);
+    assert_eq!(trace.last().egui, Some(egui::Id::new("composer-text")));
+}
+
+/// Unlocking counts as coming back to the window: the lock screen's field
+/// is gone, and the message field takes focus.
+#[test]
+fn unlocking_lands_in_the_message_field() {
+    let mut app = app();
+    app.settings.app_lock_hash = Some(crate::app_lock::verifier("fixture"));
+    let mut trace = Trace::new(app);
+    trace.app.lock_app();
+    trace.settle("locked", 3);
+    assert_eq!(
+        trace.last().egui,
+        Some(egui::Id::new(crate::ui::lock::PASSWORD_ID))
+    );
+    trace.app.app_lock.unlocked(true);
+    trace.settle("unlocked", 3);
+    assert_eq!(trace.last().egui, Some(egui::Id::new("composer-text")));
+}
+
+/// A notification for the open chat, clicked while the window is away,
+/// leaves a reader in its message list there.
+#[test]
+fn a_notification_clicked_while_away_keeps_the_message_list() {
+    let mut trace = Trace::new(app());
+    focus_stop(&mut trace, Stop::Messages);
+    let before = trace.last().egui;
+    let chat = trace.app.open_chat.clone().expect("the demo opens a chat");
+    let message = trace.app.conversations[&chat].messages[1].id.clone();
+    trace.window("window lost", false);
+    trace
+        .app
+        .actions
+        .push(Action::OpenMessage { chat, message });
+    trace.window("window back", true);
+    assert_eq!(trace.last().egui, before);
 }

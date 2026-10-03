@@ -5328,6 +5328,10 @@ impl App {
             && self.search.trim().is_empty()
             && !self.focus_search
             && !search_focused
+            // A reader in the message list stays there: coming back to the
+            // window (Alt+Tab, a screen reader dialog) must not lose their
+            // place. Still last frame's value here.
+            && !self.messages_focused
         {
             self.focus_composer = true;
         }
@@ -6285,13 +6289,17 @@ impl App {
                 // the pane, so the arrows can walk on to the next one.
                 let from_pane =
                     self.chat_search_visible() && self.open_chat.as_deref() == Some(chat.as_str());
+                // So does a reader in this chat's message list: the list
+                // follows to the message instead (`follow_message` below).
+                let from_list =
+                    self.messages_focused && self.open_chat.as_deref() == Some(chat.as_str());
                 self.open_chat(chat.clone());
                 // A locked chat stays shut outside its folder, even for a
                 // notification clicked before the chat was locked.
                 if self.open_chat.as_deref() != Some(chat.as_str()) {
                     return;
                 }
-                if from_pane {
+                if from_pane || from_list {
                     self.focus_composer = false;
                 }
                 // Keep the search result, not the chat end, in view.
@@ -9333,7 +9341,16 @@ impl App {
         {
             self.mark_read(&open);
         }
-        if regained_focus {
+        // Coming back to the window (Alt+Tab, a screen reader dialog) leaves
+        // the reader on whatever had focus, in any section: egui keeps it
+        // while the window is away. Only with nothing focused does the
+        // message field take it. Unlocking counts as coming back, and the
+        // lock screen's field, gone now, is nothing to return to.
+        if regained_focus
+            && ctx
+                .memory(|memory| memory.focused())
+                .is_none_or(|id| id == egui::Id::new(crate::ui::lock::PASSWORD_ID))
+        {
             self.refocus_composer(ctx);
         }
         self.window_focused = focused;
