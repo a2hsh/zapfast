@@ -2219,6 +2219,9 @@ impl App {
         self.hide_intent = false;
         self.wants_show = false;
         self.reopen = false;
+        // A new window starts with nothing focused: a message list that had
+        // focus in the last one does not hold it back from the composer.
+        self.messages_focused = false;
         self.refocus_composer(ctx);
         // Before the tray: muda keeps the first menu handler it is given, and
         // the tray installs one when it makes its item on the first window.

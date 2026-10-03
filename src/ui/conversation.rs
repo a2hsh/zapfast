@@ -2500,12 +2500,22 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat, under: f32) {
     let scroll_forced = std::mem::take(&mut app.scroll_to_bottom_forced);
     // The message list's one-shot requests, taken for the same reason.
     let list_id = messages_list_id(&chat.id);
+    // Whether focus last moved by keyboard. The list's focus takeover, its
+    // reveal and its hold on the pin below all wait for it, so the pointer
+    // sees the chat exactly as before the list existed.
+    let keyboard = ui.ctx().data(|data| {
+        data.get_temp::<bool>(theme::keyboard_focus_id())
+            .unwrap_or(false)
+    });
     // A chat that cannot send (a channel, a locked chat, a group we left)
     // draws no message field, so `composer` above left its focus request
-    // pending. The list is all there is to read: it takes focus instead, in
-    // this pass, which draws it. A reader switching chats from the list
-    // would otherwise land on nothing.
+    // pending. After keyboard navigation the list, all there is to read,
+    // takes that focus instead, in this pass, which draws it: a reader
+    // switching chats from the list would otherwise land on nothing. Opened
+    // with the pointer, focus stays where it was, so the page keys still
+    // scroll the view.
     let composer_fallback = app.focus_composer
+        && keyboard
         && !chat.can_send()
         && app.selection.is_none()
         && app.image_preview.is_none();
@@ -2716,13 +2726,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat, under: f32) {
     let list_response =
         super::list_nav::container(ui, list_id, list, list_label, total).tab_stop(Stop::Messages);
     let list_focused = list_response.has_focus();
-    // Both below only after keyboard navigation, as for a focused bubble: a
-    // chat without a message field opened with the pointer gives the list
-    // focus too, and must still open at its newest message.
-    let keyboard = ui.ctx().data(|data| {
-        data.get_temp::<bool>(theme::keyboard_focus_id())
-            .unwrap_or(false)
-    });
+    // Both below only after keyboard navigation, as for a focused bubble.
     // Arriving in the list shows where its current message is.
     if list_response.gained_focus() && keyboard {
         reveal = true;
