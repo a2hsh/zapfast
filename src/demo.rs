@@ -7152,19 +7152,39 @@ mod tests {
             "Right moved to {moved:?}"
         );
         assert!(
-            spoke(&app, "0:05 of 0:06") || spoke(&app, "0:05 of 0:05"),
+            // The clip is a little under 6 s long, so 5 s in reads 0:04 or 0:05.
+            app.announcer.spoken().iter().any(|text| {
+                [
+                    "0:04 of 0:05",
+                    "0:05 of 0:05",
+                    "0:04 of 0:06",
+                    "0:05 of 0:06",
+                ]
+                .contains(text)
+            }),
             "{:?}",
             app.announcer.spoken()
         );
         press_key(&mut app, &ctx, egui::Key::ArrowLeft, egui::Modifiers::NONE);
         assert!(app.player.status(&id).position < moved);
-        // Another message's keys do not seek this one.
+        // The clip is back near its start now. Another message's keys must
+        // not seek it: a wrong +5 s would jump it to the end.
         let chat = app.open_chat.clone().unwrap();
         app.message_cursor.insert(chat, "you-voice".into());
+        render(&mut app, &ctx);
         let before = app.player.status(&id).position;
+        assert!(before < std::time::Duration::from_secs(2), "{before:?}");
+        app.announcer = Default::default();
         press_key(&mut app, &ctx, egui::Key::ArrowRight, egui::Modifiers::NONE);
         // The clip keeps playing, but it does not jump.
-        assert!(app.player.status(&id).position < before + std::time::Duration::from_secs(2));
+        let after = app.player.status(&id).position;
+        assert!(after < std::time::Duration::from_secs(2), "{after:?}");
+        assert_ne!(
+            app.player.status(&id).state,
+            crate::audio::State::Idle,
+            "the playing clip was not replaced"
+        );
+        assert_eq!(app.announcer.spoken(), ["", ""], "nothing was seeked");
         assert!(!app.player.uses_device(), "played silently");
     }
 
