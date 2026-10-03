@@ -2491,7 +2491,19 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat, under: f32) {
     let scroll_forced = std::mem::take(&mut app.scroll_to_bottom_forced);
     // The message list's one-shot requests, taken for the same reason.
     let list_id = messages_list_id(&chat.id);
-    let focus_list = std::mem::take(&mut app.focus_messages);
+    // A chat that cannot send (a channel, a locked chat, a group we left)
+    // draws no message field, so `composer` above left its focus request
+    // pending. The list is all there is to read: it takes focus instead, in
+    // this pass, which draws it. A reader switching chats from the list
+    // would otherwise land on nothing.
+    let composer_fallback = app.focus_composer
+        && !chat.can_send()
+        && app.selection.is_none()
+        && app.image_preview.is_none();
+    if composer_fallback {
+        app.focus_composer = false;
+    }
+    let focus_list = std::mem::take(&mut app.focus_messages) || composer_fallback;
     let mut reveal = std::mem::take(&mut app.reveal_cursor);
     // Check out the conversation while drawing rows and collecting actions.
     let mut conversation = app.conversations.remove(&chat.id).unwrap_or_default();
@@ -2696,13 +2708,20 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat, under: f32) {
     let list_response =
         super::list_nav::container(ui, list_id, list, list_label, total).tab_stop(Stop::Messages);
     let list_focused = list_response.has_focus();
+    // Both below only after keyboard navigation, as for a focused bubble: a
+    // chat without a message field opened with the pointer gives the list
+    // focus too, and must still open at its newest message.
+    let keyboard = ui.ctx().data(|data| {
+        data.get_temp::<bool>(theme::keyboard_focus_id())
+            .unwrap_or(false)
+    });
     // Arriving in the list shows where its current message is.
-    if list_response.gained_focus() {
+    if list_response.gained_focus() && keyboard {
         reveal = true;
     }
     // A reader moving through the list keeps the view where they are: an
     // automatic pin to the newest message must not pull it away.
-    if list_focused {
+    if list_focused && keyboard {
         keyboard_navigation.set(true);
     }
     // Except on the newest message the keys took the view to the true
@@ -2710,6 +2729,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat, under: f32) {
     // own, which stands on the newest: there the pin holds as it does after
     // the return-to-bottom button, so new messages are followed.
     let hold_bottom = list_focused
+        && keyboard
         && app.message_cursor.get(&chat.id).is_none_or(|id| {
             app.cursor_followed
                 .as_ref()
@@ -3686,7 +3706,9 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat, under: f32) {
         // will request it again.
         app.scroll_anchor = None;
     }
-    app.messages_focused = list_focused;
+    // egui's focus, not the response's: that one also asks for the window's
+    // focus, and the list keeps its place while the window is away.
+    app.messages_focused = ui.memory(|memory| memory.has_focus(list_id));
     // A current message too far away to be laid out is reached as a jump is:
     // the anchor lays out every row and centres it. Its node exists only
     // from then on, so it becomes the active descendant then, not now. The
