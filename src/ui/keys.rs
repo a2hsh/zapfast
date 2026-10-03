@@ -546,14 +546,13 @@ fn message_keys(app: &mut App, ctx: &egui::Context, chat: &str, id: &str) -> Vec
     // playing.
     let seek = |seconds: f32| {
         let (position, total, voice) = clip?;
-        let fraction = seek_fraction(position, total, seconds)?;
+        let (reached, fraction) = seek_target(position, total, seconds)?;
         let message = id.to_owned();
         let action = if voice {
             Action::JumpVoice { message, fraction }
         } else {
             Action::SeekVideo { message, fraction }
         };
-        let reached = total.mul_f32(fraction);
         Some((action, reached, total))
     };
     let has_audio = !album && matches!(message.content, Content::Audio { .. });
@@ -717,8 +716,8 @@ fn message_keys(app: &mut App, ctx: &egui::Context, chat: &str, id: &str) -> Vec
         let text = crate::a11y::fill(
             &crate::i18n::gettext(app.locale, "{time} of {duration}"),
             &[
-                ("time", &crate::util::duration(reached.as_secs() as u32)),
-                ("duration", &crate::util::duration(total.as_secs() as u32)),
+                ("time", &crate::util::duration(whole_seconds(reached))),
+                ("duration", &crate::util::duration(whole_seconds(total))),
             ],
         );
         app.announcer.say(crate::announcer::Category::Status, text);
@@ -726,15 +725,29 @@ fn message_keys(app: &mut App, ctx: &egui::Context, chat: &str, id: &str) -> Vec
     actions
 }
 
-/// Where a jump of `seconds` from `position` lands in a clip of `total`
-/// length, as a fraction from 0 to 1. None while the length is unknown.
-fn seek_fraction(
+/// Where a jump of `seconds` (negative for back) from `position` lands in a
+/// clip of `total` length: the exact time, kept within the clip, and its
+/// fraction from 0 to 1. None while the length is unknown.
+fn seek_target(
     position: std::time::Duration,
     total: std::time::Duration,
     seconds: f32,
-) -> Option<f32> {
-    let total = total.as_secs_f32();
-    (total > 0.0).then(|| ((position.as_secs_f32() + seconds) / total).clamp(0.0, 1.0))
+) -> Option<(std::time::Duration, f32)> {
+    if total.is_zero() {
+        return None;
+    }
+    let jump = std::time::Duration::from_secs_f32(seconds.abs());
+    let target = if seconds >= 0.0 {
+        (position + jump).min(total)
+    } else {
+        position.saturating_sub(jump)
+    };
+    Some((target, target.as_secs_f32() / total.as_secs_f32()))
+}
+
+/// A time to the nearest whole second, as announced.
+fn whole_seconds(time: std::time::Duration) -> u32 {
+    time.as_secs_f64().round() as u32
 }
 
 /// Removes this frame's first press of `key` with Command on macOS, or Ctrl
@@ -1129,7 +1142,7 @@ fn video_keys(app: &mut App, ctx: &egui::Context) {
         let status = status.as_ref()?;
         Some(Action::SeekVideo {
             message: message.clone(),
-            fraction: seek_fraction(status.position, status.total, seconds)?,
+            fraction: seek_target(status.position, status.total, seconds)?.1,
         })
     };
     let mut actions = Vec::new();
@@ -1358,6 +1371,24 @@ mod tests {
         assert!(matches!(find_action(&app), Action::FocusSettingsSearch));
         app.page = Page::Wallpaper;
         assert!(matches!(find_action(&app), Action::FocusSearch));
+    }
+
+    /// A 5 s jump lands on the exact second, never one short through float
+    /// rounding, and stays within the clip.
+    #[test]
+    fn a_seek_target_is_exact_and_stays_within_the_clip() {
+        use std::time::Duration;
+        let total = Duration::from_millis(5990);
+        let (target, fraction) = seek_target(Duration::ZERO, total, 5.0).unwrap();
+        assert_eq!(target, Duration::from_secs(5));
+        assert!((fraction - 5.0 / 5.99).abs() < 1e-6);
+        assert_eq!(whole_seconds(target), 5);
+        assert_eq!(whole_seconds(total), 6);
+        let (target, fraction) = seek_target(Duration::from_secs(3), total, 5.0).unwrap();
+        assert_eq!((target, fraction), (total, 1.0));
+        let (target, fraction) = seek_target(Duration::from_secs(3), total, -5.0).unwrap();
+        assert_eq!((target, fraction), (Duration::ZERO, 0.0));
+        assert!(seek_target(Duration::ZERO, Duration::ZERO, 5.0).is_none());
     }
 
     /// An app whose open chat holds `messages`, by id and content, in order,

@@ -7151,20 +7151,7 @@ mod tests {
             moved >= std::time::Duration::from_millis(4500),
             "Right moved to {moved:?}"
         );
-        assert!(
-            // The clip is a little under 6 s long, so 5 s in reads 0:04 or 0:05.
-            app.announcer.spoken().iter().any(|text| {
-                [
-                    "0:04 of 0:05",
-                    "0:05 of 0:05",
-                    "0:04 of 0:06",
-                    "0:05 of 0:06",
-                ]
-                .contains(text)
-            }),
-            "{:?}",
-            app.announcer.spoken()
-        );
+        assert!(spoke(&app, "0:05 of 0:06"), "{:?}", app.announcer.spoken());
         press_key(&mut app, &ctx, egui::Key::ArrowLeft, egui::Modifiers::NONE);
         assert!(app.player.status(&id).position < moved);
         // The clip is back near its start now. Another message's keys must
