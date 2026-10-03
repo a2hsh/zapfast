@@ -354,6 +354,10 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
         None
     };
     if step != 0 || number.is_some() {
+        // Switching chats from the keyboard is keyboard navigation, as Tab
+        // is: a chat without a message field then hands its focus to the
+        // message list rather than to nothing.
+        ctx.data_mut(|data| data.insert_temp(crate::theme::keyboard_focus_id(), true));
         let visible = app.visible_chats();
         if !visible.is_empty() {
             let current = app

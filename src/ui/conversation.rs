@@ -2531,15 +2531,33 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat, under: f32) {
     // switching chats from the list would otherwise land on nothing. Opened
     // with the pointer, focus stays where it was, so the page keys still
     // scroll the view.
+    // Never under a dialog, whose own controls hold focus.
     let composer_fallback = app.focus_composer
         && keyboard
         && !chat.can_send()
         && app.selection.is_none()
-        && app.image_preview.is_none();
-    if composer_fallback {
+        && app.image_preview.is_none()
+        && app.dialog.is_none();
+    // Declined with the pointer, the request is dropped, not left pending:
+    // the field it names does not exist here, and a later Tab would
+    // otherwise take it up and scroll the view to the current message.
+    if composer_fallback || (!chat.can_send() && !keyboard) {
         app.focus_composer = false;
     }
-    let focus_list = std::mem::take(&mut app.focus_messages) || composer_fallback;
+    // A pass that draws the list hidden (the first after a chat opens is)
+    // gives no widget focus: the request waits for the pass that shows it.
+    let focus_list = if ui.is_visible() {
+        let deferred = app
+            .list_focus_deferred
+            .take()
+            .is_some_and(|deferred| deferred == chat.id);
+        std::mem::take(&mut app.focus_messages) || composer_fallback || deferred
+    } else {
+        if composer_fallback {
+            app.list_focus_deferred = Some(chat.id.clone());
+        }
+        false
+    };
     let mut reveal = std::mem::take(&mut app.reveal_cursor);
     // Check out the conversation while drawing rows and collecting actions.
     let mut conversation = app.conversations.remove(&chat.id).unwrap_or_default();
