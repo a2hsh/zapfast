@@ -720,6 +720,10 @@ pub struct App {
     /// One-shot: give the open chat's message list keyboard focus when it is
     /// next drawn.
     pub focus_messages: bool,
+    /// A read-only chat's message list asked for focus in a pass that drew
+    /// it hidden: the chat it was for, which a later visible pass of that
+    /// chat honours, and no other chat.
+    pub(crate) list_focus_deferred: Option<ChatId>,
     pub focus_composer: bool,
     pub focus_search: bool,
     /// What the Settings page is filtered by.
@@ -1468,6 +1472,7 @@ impl App {
             reveal_cursor: false,
             messages_focused: false,
             focus_messages: false,
+            list_focus_deferred: None,
             focus_composer: false,
             focus_search: false,
             settings_search: String::new(),
@@ -1728,6 +1733,8 @@ impl App {
         // A request for the message list to take focus was for the
         // previous account's chat.
         self.focus_messages = false;
+        // So was a list focus waiting for a visible pass.
+        self.list_focus_deferred = None;
         // Each chat's current message was the previous account's: accounts
         // can share a chat, and a hidden account's deletions do not move it.
         // The newest message the keys followed goes with it.
