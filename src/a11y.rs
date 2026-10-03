@@ -90,6 +90,17 @@ pub(crate) fn without_push_marker(name: &str) -> &str {
     }
 }
 
+/// The name of the message list: "Messages with Ahmed" in a one-to-one chat,
+/// "Messages in Family" in a group, so the reader knows whose messages follow.
+pub fn messages_list_label(locale: Locale, title: &str, group: bool) -> String {
+    let template = if group {
+        gettext(locale, "Messages in {name}")
+    } else {
+        gettext(locale, "Messages with {name}")
+    };
+    fill(&template, &[("name", &spoken(without_push_marker(title)))])
+}
+
 /// Joins the parts a screen reader announces for a message with ", ".
 pub fn message_label(locale: Locale, label: &MessageLabel<'_>) -> String {
     let mut parts: Vec<String> = Vec::new();
@@ -448,6 +459,31 @@ mod tests {
         }
     }
 
+    /// A name known only from a profile wears a "~" on screen; a screen
+    /// reader says the name without it, in the message's sender, the name
+    /// of a reply and the message list's name.
+    #[test]
+    fn the_push_name_marker_is_not_spoken() {
+        assert_eq!(without_push_marker("~Ana"), "Ana");
+        assert_eq!(without_push_marker("~ Ana"), "Ana");
+        assert_eq!(without_push_marker("~~Ana"), "~Ana", "one marker only");
+        assert_eq!(without_push_marker("Ana~"), "Ana~");
+        assert_eq!(without_push_marker("~"), "");
+        let label = MessageLabel {
+            sender: "~Ana",
+            reply_to: Some(("~ Sara", "dinner?")),
+            ..base()
+        };
+        assert_eq!(
+            message_label(Locale::English, &label),
+            "Ana, see you at 5, 10:32 PM, replying to Sara: dinner?"
+        );
+        assert_eq!(
+            messages_list_label(Locale::English, "~Ana", false),
+            "Messages with Ana"
+        );
+    }
+
     #[test]
     fn the_attachment_state_ends_the_message_label() {
         let en = Locale::default();
@@ -732,6 +768,25 @@ mod tests {
             Some("not sent")
         );
         assert_eq!(status_word(en, Delivery::Played).as_deref(), Some("played"));
+    }
+
+    #[test]
+    fn the_message_list_is_named_after_its_chat() {
+        let en = Locale::default();
+        assert_eq!(
+            messages_list_label(en, "Ahmed", false),
+            "Messages with Ahmed"
+        );
+        assert_eq!(
+            messages_list_label(en, "Family", true),
+            "Messages in Family"
+        );
+        // A name holding braces is never filled again.
+        assert_eq!(messages_list_label(en, "A{}B", true), "Messages in A{}B");
+        assert_eq!(
+            messages_list_label(en, "A{name}B", false),
+            "Messages with A{name}B"
+        );
     }
 
     #[test]
