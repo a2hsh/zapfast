@@ -542,15 +542,28 @@ impl KeyMenu {
 
     /// A menu opened in this pass from the keys when `opened`.
     fn start(ctx: &egui::Context, popup: egui::Id, opened: bool, hold: bool) -> Self {
+        let menu = Self::open(ctx, popup, opened);
+        if menu.state == Some(false) && menu.was_open && !hold {
+            Self::keys(ctx, popup);
+        }
+        menu
+    }
+
+    /// As [`KeyMenu::begin`], for a popup that is a list rather than a
+    /// menu, such as a drop-down's: it opens, takes focus, closes and hands
+    /// focus back as a menu does, but its keys are the caller's. A menu's
+    /// would wrap, keep Tab inside and open submenus.
+    pub fn begin_list(ctx: &egui::Context, popup: egui::Id, requested: bool) -> Self {
+        Self::open(ctx, popup, requested && keyboard(ctx))
+    }
+
+    fn open(ctx: &egui::Context, popup: egui::Id, opened: bool) -> Self {
         let pending = popup.with("from-keys");
         let was_open = egui::Popup::is_id_open(ctx, popup);
         if opened {
             ctx.data_mut(|data| data.insert_temp(pending, true));
         }
         let state = ctx.data(|data| data.get_temp::<bool>(pending));
-        if state == Some(false) && was_open && !hold {
-            Self::keys(ctx, popup);
-        }
         Self {
             popup,
             pending,

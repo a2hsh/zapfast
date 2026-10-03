@@ -610,26 +610,25 @@ fn sections(app: &App) -> Vec<Section> {
                 let width = 200.0_f32.min(ui.available_width());
                 // Named by its row, with the current choice as its value, as
                 // the other drop-downs here.
-                widgets::dropdown(
+                let limits = crate::settings::NotificationLimit::ALL;
+                let choices: Vec<_> = limits
+                    .iter()
+                    .map(|limit| widgets::Choice::new(limit.label(locale), *limit == selected))
+                    .collect();
+                let (_, chosen) = widgets::dropdown(
                     ui,
                     "limit_notifications",
                     &crate::i18n::gettext(locale, "Limit repeat notifications"),
                     &shown,
+                    false,
                     |combo| combo.selected_text(shown.as_ref()).width(width),
-                    |ui| {
-                        for limit in crate::settings::NotificationLimit::ALL {
-                            if theme_option(
-                                ui,
-                                &palette,
-                                limit.label(locale).as_ref(),
-                                limit == selected,
-                            ) {
-                                app.account_mut().settings.limit_notifications = limit;
-                                app.account_mut().mark_settings_dirty();
-                            }
-                        }
-                    },
+                    &choices,
+                    |ui, _, choice| theme_option(ui, &palette, &choice.label, choice.current),
                 );
+                if let Some(limit) = chosen.and_then(|index| limits.get(index)) {
+                    app.account_mut().settings.limit_notifications = *limit;
+                    app.account_mut().mark_settings_dirty();
+                }
             },
         );
         notifications.toggle(
@@ -998,25 +997,24 @@ fn app_lock_rows(app: &App, privacy: &mut Section) {
                 let selected = app.settings.app_lock_after;
                 let value = selected.label(app.locale);
                 let width = 200.0_f32.min(ui.available_width());
-                widgets::dropdown(
+                let all = crate::settings::AutoLock::ALL;
+                let choices: Vec<_> = all
+                    .iter()
+                    .map(|after| widgets::Choice::new(after.label(app.locale), *after == selected))
+                    .collect();
+                let (_, chosen) = widgets::dropdown(
                     ui,
                     "app_lock_after",
                     &crate::i18n::gettext(app.locale, "Lock after"),
                     &value,
+                    false,
                     |combo| combo.selected_text(value.as_ref()).width(width),
-                    |ui| {
-                        for after in crate::settings::AutoLock::ALL {
-                            if theme_option(
-                                ui,
-                                &palette,
-                                after.label(app.locale).as_ref(),
-                                after == selected,
-                            ) {
-                                app.actions.push(Action::SetAutoLock(after));
-                            }
-                        }
-                    },
+                    &choices,
+                    |ui, _, choice| theme_option(ui, &palette, &choice.label, choice.current),
                 );
+                if let Some(index) = chosen {
+                    app.actions.push(Action::SetAutoLock(all[index]));
+                }
             },
         );
     }
@@ -1155,39 +1153,52 @@ fn theme_picker(ui: &mut egui::Ui, app: &mut App) {
             .map(fastframe_theme::display_name)
             .unwrap_or_else(|| app.settings.theme.label());
         let width = 200.0_f32.min(ui.available_width());
-        let response = widgets::dropdown(
+        let customs: Vec<&str> = app
+            .custom_themes
+            .picker_themes()
+            .map(|custom| custom.filename.as_str())
+            .collect();
+        let built_in = ThemeChoice::ALL.len();
+        let choices: Vec<_> = ThemeChoice::ALL
+            .iter()
+            .map(|choice| {
+                widgets::Choice::new(
+                    choice.label(),
+                    app.settings.custom_theme.is_none() && app.settings.theme == *choice,
+                )
+            })
+            .chain(customs.iter().map(|filename| {
+                widgets::Choice::new(
+                    fastframe_theme::display_name(filename),
+                    app.settings.custom_theme.as_deref() == Some(*filename),
+                )
+            }))
+            .collect();
+        let (response, chosen) = widgets::dropdown(
             ui,
             "appearance_theme",
             &crate::i18n::gettext(app.locale, "Theme"),
             selected,
+            false,
             |combo| combo.selected_text(" ").width(width).height(320.0),
-            |ui| {
-                for &choice in ThemeChoice::ALL {
-                    if theme_option(
-                        ui,
-                        &palette,
-                        choice.label(),
-                        app.settings.custom_theme.is_none() && app.settings.theme == choice,
-                    ) {
-                        app.actions.push(Action::SetTheme(choice));
-                    }
-                }
-                if app.custom_themes.picker_themes().next().is_some() {
+            &choices,
+            |ui, index, choice| {
+                // The custom themes follow the built-in ones after a line.
+                if index == built_in {
                     ui.separator();
                 }
-                for custom in app.custom_themes.picker_themes() {
-                    if theme_option(
-                        ui,
-                        &palette,
-                        fastframe_theme::display_name(&custom.filename),
-                        app.settings.custom_theme.as_deref() == Some(custom.filename.as_str()),
-                    ) {
-                        app.actions
-                            .push(Action::SetCustomTheme(custom.filename.clone()));
-                    }
-                }
+                theme_option(ui, &palette, &choice.label, choice.current)
             },
         );
+        match chosen {
+            Some(index) if index < built_in => {
+                app.actions.push(Action::SetTheme(ThemeChoice::ALL[index]));
+            }
+            Some(index) => app
+                .actions
+                .push(Action::SetCustomTheme(customs[index - built_in].to_owned())),
+            None => {}
+        }
         let rect = response.rect;
         let text = widgets::line(
             ui,
@@ -1235,20 +1246,23 @@ fn font_picker(ui: &mut egui::Ui, app: &mut App) {
     };
     let value = label(selected);
     let width = 200.0_f32.min(ui.available_width());
-    widgets::dropdown(
+    let choices: Vec<_> = FontChoice::ALL
+        .iter()
+        .map(|choice| widgets::Choice::new(label(*choice), selected == *choice))
+        .collect();
+    let (_, chosen) = widgets::dropdown(
         ui,
         "interface_font",
         &crate::i18n::gettext(app.locale, "Font"),
         &value,
+        false,
         |combo| combo.selected_text(value.as_str()).width(width),
-        |ui| {
-            for choice in FontChoice::ALL {
-                if theme_option(ui, &palette, &label(choice), selected == choice) {
-                    app.actions.push(Action::SetFont(choice));
-                }
-            }
-        },
+        &choices,
+        |ui, _, choice| theme_option(ui, &palette, &choice.label, choice.current),
     );
+    if let Some(index) = chosen {
+        app.actions.push(Action::SetFont(FontChoice::ALL[index]));
+    }
 }
 
 fn language_picker(ui: &mut egui::Ui, app: &mut App) {
@@ -1259,28 +1273,31 @@ fn language_picker(ui: &mut egui::Ui, app: &mut App) {
         None => crate::i18n::gettext(app.locale, "Auto").into_owned(),
     };
     let width = 200.0_f32.min(ui.available_width());
-    widgets::dropdown(
+    // "Auto" first, then each language.
+    let choices: Vec<_> = std::iter::once(widgets::Choice::new(
+        crate::i18n::gettext(app.locale, "Auto"),
+        selected.is_none(),
+    ))
+    .chain(
+        Locale::ALL
+            .iter()
+            .map(|locale| widgets::Choice::new(locale.label(), selected == Some(*locale))),
+    )
+    .collect();
+    let (_, chosen) = widgets::dropdown(
         ui,
         "interface_language",
         &crate::i18n::gettext(app.locale, "Language"),
         &label,
+        false,
         |combo| combo.selected_text(label.as_str()).width(width),
-        |ui| {
-            if theme_option(
-                ui,
-                &palette,
-                crate::i18n::gettext(app.locale, "Auto").as_ref(),
-                selected.is_none(),
-            ) {
-                app.actions.push(Action::SetInterfaceLanguage(None));
-            }
-            for locale in Locale::ALL {
-                if theme_option(ui, &palette, locale.label(), selected == Some(locale)) {
-                    app.actions.push(Action::SetInterfaceLanguage(Some(locale)));
-                }
-            }
-        },
+        &choices,
+        |ui, _, choice| theme_option(ui, &palette, &choice.label, choice.current),
     );
+    if let Some(index) = chosen {
+        let locale = index.checked_sub(1).map(|index| Locale::ALL[index]);
+        app.actions.push(Action::SetInterfaceLanguage(locale));
+    }
 }
 
 /// Wallpaper colour picker and live preview.
@@ -2064,63 +2081,107 @@ fn sound_control(ui: &mut egui::Ui, app: &mut App, mention: bool) {
     }
     let width = 170.0_f32.min(ui.available_width());
     let (title, _) = sound_text(locale, mention);
-    widgets::dropdown(
+    // "Choose a file…" comes last and acts rather than becoming the value.
+    let entries: Vec<_> = choices
+        .iter()
+        .map(|(sound, name)| widgets::Choice::new(name.as_ref(), current == *sound))
+        .chain(std::iter::once(widgets::Choice::action(gettext(
+            locale,
+            "Choose a file…",
+        ))))
+        .collect();
+    let (_, chosen) = widgets::dropdown(
         ui,
         ("notification-sound", mention),
         &title.shown,
         &selected,
+        false,
         |combo| combo.selected_text(selected.as_str()).width(width),
-        |ui| {
-            for (sound, name) in choices {
-                let response = ui.selectable_label(current == sound, name);
-                if widgets::dropdown_choice(ui, &response, current == sound) {
-                    app.actions
-                        .push(Action::SetNotificationSound { mention, sound });
-                }
-            }
-            let response = ui.selectable_label(false, gettext(locale, "Choose a file…"));
-            if widgets::dropdown_choice(ui, &response, false) {
-                app.actions.push(Action::PickNotificationSound { mention });
-            }
-        },
+        &entries,
+        |ui, _, choice| ui.selectable_label(choice.current, choice.label.as_ref()),
     );
+    match chosen.map(|index| choices.get(index)) {
+        Some(Some((sound, _))) => app.actions.push(Action::SetNotificationSound {
+            mention,
+            sound: sound.clone(),
+        }),
+        Some(None) => app.actions.push(Action::PickNotificationSound { mention }),
+        None => {}
+    }
 }
 
 /// One account privacy category's picker: what the phone holds, and the
-/// values it takes. While a write is in flight it is disabled, so a second
-/// pick cannot race the first.
+/// values it takes. While a write is in flight it takes no other value, so a
+/// second pick cannot race the first: it is disabled or, while it has
+/// keyboard focus, busy, which looks the same but keeps focus.
 fn privacy_control(ui: &mut egui::Ui, app: &mut App, kind: PrivacyKind) {
     let palette = app.palette;
     let current = app.account_privacy.get(kind);
     let locale = app.locale;
     let selected = current.map_or(Cow::Borrowed("\u{2014}"), |choice| choice.label(locale));
     let pending = app.account_privacy.pending(kind);
-    ui.add_enabled_ui(!pending, |ui| {
+    // `add_enabled_ui` without its `disable`, which comes below: the ids stay
+    // the same.
+    ui.scope(|ui| {
         ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
             let salt = format!("privacy_{}", kind.wire_name());
+            let id = widgets::dropdown_id(ui, &salt);
+            // egui takes focus from a disabled widget, and a screen reader
+            // would then hear the window: the focused drop-down stays enabled
+            // while it saves, but inert.
+            let busy = pending && widgets::dropdown_has_focus(ui.ctx(), id);
+            if busy {
+                // The look of a disabled control: the fade `Ui::disable`
+                // gives, and its widget colours. A disabled widget keeps its
+                // click sense, so egui's `Widgets::style` paints it
+                // `inactive`, never hovered, pressed or focused; not
+                // `noninteractive`, which is for widgets that sense no
+                // click. A test compares the two paints.
+                ui.multiply_opacity(ui.visuals().disabled_alpha());
+                let widgets = &mut ui.visuals_mut().widgets;
+                let inactive = widgets.inactive;
+                widgets.hovered = inactive;
+                widgets.active = inactive;
+            } else if pending {
+                ui.disable();
+            }
+            // Said once, as the write starts with focus on the drop-down.
+            let announced = id.with("saving-announced");
+            if !pending {
+                ui.ctx().data_mut(|data| data.remove::<bool>(announced));
+            } else if busy
+                && !ui
+                    .ctx()
+                    .data(|data| data.get_temp::<bool>(announced).unwrap_or(false))
+            {
+                ui.ctx().data_mut(|data| data.insert_temp(announced, true));
+                app.announcer.say(
+                    crate::announcer::Category::Status,
+                    crate::i18n::gettext(locale, "Saving…"),
+                );
+            }
             let width = 220.0_f32.min(ui.available_width());
-            let response = widgets::dropdown(
+            let choices: Vec<_> = kind
+                .choices()
+                .iter()
+                .map(|choice| widgets::Choice::new(choice.label(locale), current == Some(*choice)))
+                .collect();
+            let (response, chosen) = widgets::dropdown(
                 ui,
                 salt,
                 &kind.label(locale),
                 &selected,
+                busy,
                 |combo| combo.selected_text(" ").width(width),
-                |ui| {
-                    for choice in kind.choices() {
-                        if theme_option(
-                            ui,
-                            &palette,
-                            &choice.label(locale),
-                            current == Some(*choice),
-                        ) {
-                            app.actions.push(Action::SetAccountPrivacy {
-                                kind,
-                                choice: *choice,
-                            });
-                        }
-                    }
-                },
+                &choices,
+                |ui, _, choice| theme_option(ui, &palette, &choice.label, choice.current),
             );
+            if let Some(index) = chosen {
+                app.actions.push(Action::SetAccountPrivacy {
+                    kind,
+                    choice: kind.choices()[index],
+                });
+            }
             let rect = response.rect;
             let text = widgets::line(
                 ui,
@@ -2139,8 +2200,14 @@ fn privacy_control(ui: &mut egui::Ui, app: &mut App, kind: PrivacyKind) {
     });
 }
 
+/// One entry of a drop-down's list, as [`widgets::dropdown`] draws it.
 /// Theme filenames can contain emoji, so paint them through the shared line renderer.
-fn theme_option(ui: &mut egui::Ui, palette: &theme::Palette, text: &str, selected: bool) -> bool {
+fn theme_option(
+    ui: &mut egui::Ui,
+    palette: &theme::Palette,
+    text: &str,
+    selected: bool,
+) -> egui::Response {
     let response = ui.add(
         egui::Button::selectable(selected, " ").min_size(egui::vec2(ui.available_width(), 28.0)),
     );
@@ -2168,7 +2235,7 @@ fn theme_option(ui: &mut egui::Ui, palette: &theme::Palette, text: &str, selecte
             text,
         )
     });
-    widgets::dropdown_choice(ui, &response, selected)
+    response
 }
 
 #[cfg(test)]

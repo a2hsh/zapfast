@@ -1035,62 +1035,190 @@ pub fn focusable_since(ui: &Ui, start: usize) -> Vec<egui::Id> {
     })
 }
 
-/// Where a drop-down records the current choice of its open list.
-fn current_choice_id() -> egui::Id {
-    egui::Id::new("dropdown-current-choice")
-}
-
 fn dropdown_mark_id(id: egui::Id) -> egui::Id {
     id.with("dropdown")
 }
 
+/// Where a drop-down's open list records its options, in the order it drew
+/// them, for the keys of the next pass.
+fn options_id(popup: egui::Id) -> egui::Id {
+    popup.with("options")
+}
+
+/// Where a drop-down left by Tab from its open list records the frame and
+/// whether Tab went back (Shift+Tab), for the pass that moves focus on.
+fn tab_out_id(id: egui::Id) -> egui::Id {
+    id.with("tab-out")
+}
+
+/// One entry in a [`dropdown`]'s list.
+pub struct Choice<'a> {
+    /// What the entry says, which the drop-down takes as its value once the
+    /// entry is chosen.
+    pub label: std::borrow::Cow<'a, str>,
+    /// Whether it is the drop-down's value now.
+    pub current: bool,
+    /// Whether it does something other than become the value, such as
+    /// "Choose a file…". Only the open list reaches it: the arrows on the
+    /// closed drop-down take each value they pass, and would set it off.
+    pub action: bool,
+}
+
+impl<'a> Choice<'a> {
+    /// A value the drop-down can take, `current` when it has it now.
+    pub fn new(label: impl Into<std::borrow::Cow<'a, str>>, current: bool) -> Self {
+        Self {
+            label: label.into(),
+            current,
+            action: false,
+        }
+    }
+
+    /// An entry that acts rather than becoming the value.
+    pub fn action(label: impl Into<std::borrow::Cow<'a, str>>) -> Self {
+        Self {
+            label: label.into(),
+            current: false,
+            action: true,
+        }
+    }
+}
+
 /// A drop-down: egui's ComboBox, set up by `combo`, whose node a screen
 /// reader hears as a combo box named `label` with `value`, expanded while
-/// its list is open. From the keyboard, Enter, Space or Alt+Down opens it
-/// with focus on the current choice; Up and Down move between the choices
-/// and wrap, Enter takes one and Escape closes the list without a change.
-/// Either way focus returns to the drop-down, which then reads its new
-/// value. Each choice in `add_contents` goes through [`dropdown_choice`].
+/// its list is open. `draw` draws entry `index` of `choices` in the list
+/// and returns its response.
+///
+/// From the keyboard it is a Windows combo box. Closed, Up and Down take
+/// the value before and after at once, and Home and End the first and the
+/// last, skipping entries that only act. Enter, Space or Alt+Down open the
+/// list on the current value without changing it. In the list, a list box
+/// of options, Up, Down, Home and End move without taking anything, Enter
+/// takes the focused option, Escape and Alt+Up close it unchanged, and Tab
+/// closes it unchanged and moves on. Focus then returns to the drop-down,
+/// which reads its new value. Returns the response and the index of the
+/// entry chosen in this pass, if any.
+///
+/// A `busy` drop-down, such as a focused one whose last choice is still
+/// being saved, keeps focus but takes nothing: the keys that would change
+/// it or open it do nothing, a list opened with the pointer closes, and a
+/// screen reader hears it as busy.
+#[allow(clippy::too_many_arguments)]
 pub fn dropdown(
     ui: &mut Ui,
     id_salt: impl std::hash::Hash + std::fmt::Debug,
     label: &str,
     value: &str,
+    busy: bool,
     combo: impl FnOnce(egui::ComboBox) -> egui::ComboBox,
-    add_contents: impl FnOnce(&mut Ui),
-) -> egui::Response {
+    choices: &[Choice<'_>],
+    mut draw: impl FnMut(&mut Ui, usize, &Choice<'_>) -> egui::Response,
+) -> (egui::Response, Option<usize>) {
     let ctx = ui.ctx().clone();
-    // The id egui's ComboBox gives its button: `from_id_salt` hashes the
-    // salt into an IdSalt, which the button's Ui id is then combined with.
-    let id = ui.make_persistent_id(egui::IdSalt::new(&id_salt));
+    let id = dropdown_id(ui, &id_salt);
     let popup = id.with("popup");
     let frame = ctx.cumulative_frame_nr();
     ctx.data_mut(|data| data.insert_temp(dropdown_mark_id(id), frame));
+    if busy && egui::Popup::is_id_open(&ctx, popup) {
+        // Opened with the pointer while saving: the list goes before it is
+        // drawn again, and nothing in it is taken. Focus on one of its
+        // options comes back to the drop-down.
+        egui::Popup::close_id(&ctx, popup);
+        ctx.memory_mut(|memory| memory.request_focus(id));
+    }
+    let was_open = egui::Popup::is_id_open(&ctx, popup);
     let mut requested = false;
-    if ctx.memory(|memory| memory.has_focus(id)) && !egui::Popup::is_id_open(&ctx, popup) {
-        let (alt_down, activate) = ctx.input_mut(|input| {
-            let alt_down =
-                super::keys::take_exact(input, egui::Modifiers::ALT, egui::Key::ArrowDown);
-            // Enter and Space click the focused button, and the click opens
-            // the list below.
-            let activate =
-                input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space);
-            (alt_down, activate)
+    let mut discard_after = false;
+    let mut stepped = None;
+    if busy && ctx.memory(|memory| memory.has_focus(id)) {
+        let swallowed = ctx.input_mut(|input| {
+            let mut swallowed = false;
+            for key in [
+                egui::Key::ArrowUp,
+                egui::Key::ArrowDown,
+                egui::Key::Home,
+                egui::Key::End,
+                egui::Key::Enter,
+                egui::Key::Space,
+            ] {
+                swallowed |= super::keys::take_plain(input, key);
+            }
+            swallowed |= super::keys::take_exact(input, egui::Modifiers::ALT, egui::Key::ArrowDown);
+            swallowed
         });
-        if alt_down {
-            egui::Popup::open_id(&ctx, popup);
+        if swallowed {
+            // egui already read an arrow as a spatial focus move of its own.
+            ctx.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
         }
-        requested = alt_down || activate;
-        if requested {
-            // Opening from the keys is keyboard navigation, as Tab is: the
-            // focus they move into the list is shown.
-            ctx.data_mut(|data| data.insert_temp(theme::keyboard_focus_id(), true));
+    } else if ctx.memory(|memory| memory.has_focus(id)) && !was_open {
+        if let Some(back) = take_tab_out(&ctx, id) {
+            // Tab left the open list in the pass before. The list's modal
+            // layer kept the drop-down out of Tab's order then; with the list
+            // gone, Tab moves on from the drop-down as from any control.
+            let direction = if back {
+                egui::FocusDirection::Previous
+            } else {
+                egui::FocusDirection::Next
+            };
+            ctx.memory_mut(|memory| memory.move_focus(direction));
+            // egui hands focus back to the control before only in the pass
+            // after this one, which is asked for once the drop-down is drawn:
+            // widgets drawn after the request are hidden and take no focus,
+            // and egui moves focus on from a focused widget it saw.
+            discard_after = back;
+        } else {
+            let (alt_down, activate) = ctx.input_mut(|input| {
+                let alt_down =
+                    super::keys::take_exact(input, egui::Modifiers::ALT, egui::Key::ArrowDown);
+                // Enter and Space click the focused button, and the click
+                // opens the list below.
+                let activate =
+                    input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space);
+                (alt_down, activate)
+            });
+            if alt_down {
+                egui::Popup::open_id(&ctx, popup);
+            }
+            requested = alt_down || activate;
+            if requested {
+                // Opening from the keys is keyboard navigation, as Tab is:
+                // the focus they move into the list is shown.
+                ctx.data_mut(|data| data.insert_temp(theme::keyboard_focus_id(), true));
+            } else {
+                stepped = closed_step(&ctx, choices);
+            }
         }
     }
-    let key_menu = super::list_nav::KeyMenu::begin(&ctx, popup, requested, false);
-    ctx.data_mut(|data| data.remove::<egui::Id>(current_choice_id()));
-    let shown = combo(egui::ComboBox::from_id_salt(&id_salt)).show_ui(ui, add_contents);
+    let key_menu = super::list_nav::KeyMenu::begin_list(&ctx, popup, requested);
+    if was_open {
+        list_keys(&ctx, id, popup);
+    }
+    let mut options = Vec::with_capacity(choices.len());
+    let mut current = None;
+    let mut taken = None;
+    let shown = combo(egui::ComboBox::from_id_salt(&id_salt)).show_ui(ui, |ui| {
+        for (index, choice) in choices.iter().enumerate() {
+            let response = draw(ui, index, choice);
+            theme::reveal_focus(&response);
+            // Alt+Up and Alt+Down on an option are the list's keys, not the
+            // keys that switch chats.
+            ui.ctx()
+                .data_mut(|data| data.insert_temp(dropdown_mark_id(response.id), frame));
+            if choice.current {
+                current = Some(response.id);
+            }
+            if response.clicked() {
+                // A pointer click closes the list on its own; Enter does not.
+                ui.close();
+                taken = Some(index);
+            }
+            options.push(response.id);
+        }
+    });
     let response = shown.response;
+    if discard_after {
+        ctx.request_discard("Shift+Tab left a drop-down's list");
+    }
     debug_assert_eq!(
         response.id, id,
         "the drop-down's id is known before it is drawn"
@@ -1101,50 +1229,207 @@ pub fn dropdown(
         .is_some()
         .then(|| egui::LayerId::new(egui::Order::Foreground, popup));
     // The list opens on the current choice, or else on its first.
-    let first = ctx
-        .data(|data| data.get_temp::<egui::Id>(current_choice_id()))
-        .or_else(|| {
-            let layer = layer?;
-            ctx.viewport(|viewport| {
-                viewport
-                    .this_pass
-                    .widgets
-                    .get_layer(layer)
-                    .find(|widget| widget.sense.is_focusable() && widget.id != popup.with("move"))
-                    .map(|widget| widget.id)
-            })
-        });
+    let first = current.or_else(|| options.first().copied());
     let open = key_menu.finish(&ctx, layer, false, first, id);
+    if layer.is_some() {
+        describe_list(&ctx, popup, label, &options, current);
+        ctx.data_mut(|data| data.insert_temp(options_id(popup), options));
+    }
+    let chosen = if busy { None } else { taken.or(stepped) };
+    // A choice taken in this pass is applied only after it, but focus is on
+    // the drop-down now: the node already says the new value, so a screen
+    // reader does not read the old one first. An entry that only acts
+    // leaves the value as it is.
+    let value = chosen
+        .map(|index| &choices[index])
+        .filter(|choice| !choice.action)
+        .map_or(value, |choice| choice.label.as_ref())
+        .to_owned();
     response.widget_info(|| {
         let mut info =
             egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, ui.is_enabled(), label);
-        info.current_text_value = Some(value.to_owned());
+        info.current_text_value = Some(value.clone());
         info
     });
-    ctx.accesskit_node_builder(id, |node| node.set_expanded(open));
-    response
+    ctx.accesskit_node_builder(id, |node| {
+        node.set_expanded(open);
+        // Busy rather than disabled: an unavailable control that keeps
+        // focus would be confusing.
+        if busy {
+            node.set_busy();
+        }
+    });
+    (response, chosen)
 }
 
-/// One choice in a [`dropdown`]'s list, given its `response`: it scrolls
-/// into view when the keys reach it, marks the current choice for the keys
-/// to start on, and closes the list once taken, from the keyboard as from
-/// the pointer. Returns whether it was taken.
-pub fn dropdown_choice(ui: &Ui, response: &egui::Response, current: bool) -> bool {
-    theme::reveal_focus(response);
-    if current {
-        ui.ctx()
-            .data_mut(|data| data.insert_temp(current_choice_id(), response.id));
-    }
-    let taken = response.clicked();
-    if taken {
-        // A pointer click closes the list on its own; Enter does not.
-        ui.close();
-    }
-    taken
+/// The id of the drop-down [`dropdown`] draws on `ui` with `id_salt`, known
+/// before it is drawn. egui's ComboBox hashes the salt into an IdSalt, which
+/// the button's Ui id is then combined with.
+pub fn dropdown_id(ui: &Ui, id_salt: &(impl std::hash::Hash + std::fmt::Debug)) -> egui::Id {
+    ui.make_persistent_id(egui::IdSalt::new(id_salt))
 }
 
-/// Whether keyboard focus is on a [`dropdown`] drawn this frame or the last:
-/// Alt+Down then opens it rather than switching chats.
+/// Whether keyboard focus is on drop-down `id` or on an option of its open
+/// list.
+pub fn dropdown_has_focus(ctx: &egui::Context, id: egui::Id) -> bool {
+    ctx.memory(|memory| memory.focused())
+        .is_some_and(|focused| {
+            focused == id
+                || ctx
+                    .data(|data| data.get_temp::<Vec<egui::Id>>(options_id(id.with("popup"))))
+                    .is_some_and(|options| options.contains(&focused))
+        })
+}
+
+/// Whether Tab left drop-down `id`'s open list in this frame or the one
+/// before, and if so whether it went back: taken once.
+fn take_tab_out(ctx: &egui::Context, id: egui::Id) -> Option<bool> {
+    let frame = ctx.cumulative_frame_nr();
+    let (left, back) = ctx.data_mut(|data| data.remove_temp::<(u64, bool)>(tab_out_id(id)))?;
+    (left + 1 >= frame).then_some(back)
+}
+
+/// Up, Down, Home or End on a closed drop-down: the entry they take at once,
+/// as in a Windows combo box, or None when the value stays. They stop at the
+/// ends rather than wrap, and pass over the entries that only act. Without
+/// a current value, Down and Home start on the first, Up and End on the
+/// last.
+fn closed_step(ctx: &egui::Context, choices: &[Choice<'_>]) -> Option<usize> {
+    use super::list_nav::Step;
+    let step = ctx.input_mut(|input| {
+        [
+            (egui::Key::ArrowUp, Step::Previous),
+            (egui::Key::ArrowDown, Step::Next),
+            (egui::Key::Home, Step::First),
+            (egui::Key::End, Step::Last),
+        ]
+        .into_iter()
+        .find(|(key, _)| super::keys::take_plain(input, *key))
+        .map(|(_, step)| step)
+    })?;
+    // egui already read an arrow as a spatial focus move of its own.
+    ctx.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
+    let values: Vec<usize> = choices
+        .iter()
+        .enumerate()
+        .filter(|(_, choice)| !choice.action)
+        .map(|(index, _)| index)
+        .collect();
+    let current = values.iter().position(|index| choices[*index].current);
+    let target = match (current, step) {
+        (Some(_), _) => super::list_nav::step(current, values.len(), step)?,
+        (None, Step::Previous | Step::Last) => values.len().checked_sub(1)?,
+        (None, _) => (!values.is_empty()).then_some(0)?,
+    };
+    (Some(target) != current).then(|| values[target])
+}
+
+/// The keys of drop-down `id`'s open list, taken before egui sees them
+/// while focus is on one of its options. Up, Down, Home and End move focus
+/// among the options, stopping at the ends as a Windows list does, and take
+/// nothing; Enter takes the focused option as a click. Alt+Up closes the
+/// list unchanged, as Escape does, and Tab and Shift+Tab close it unchanged
+/// and move on from the drop-down. Alt+Down does nothing here.
+fn list_keys(ctx: &egui::Context, id: egui::Id, popup: egui::Id) {
+    use super::keys::{take_exact, take_plain};
+    use super::list_nav::Step;
+    let options = ctx
+        .data(|data| data.get_temp::<Vec<egui::Id>>(options_id(popup)))
+        .unwrap_or_default();
+    let Some(at) = ctx
+        .memory(|memory| memory.focused())
+        .and_then(|focused| options.iter().position(|option| *option == focused))
+    else {
+        return;
+    };
+    let (step, close, tab) = ctx.input_mut(|input| {
+        let step = [
+            (egui::Key::ArrowUp, Step::Previous),
+            (egui::Key::ArrowDown, Step::Next),
+            (egui::Key::Home, Step::First),
+            (egui::Key::End, Step::Last),
+        ]
+        .into_iter()
+        .find(|(key, _)| take_plain(input, *key))
+        .map(|(_, step)| step);
+        let tab = if take_plain(input, egui::Key::Tab) {
+            Some(false)
+        } else if take_exact(input, egui::Modifiers::SHIFT, egui::Key::Tab) {
+            Some(true)
+        } else {
+            None
+        };
+        let close = take_exact(input, egui::Modifiers::ALT, egui::Key::ArrowUp);
+        take_exact(input, egui::Modifiers::ALT, egui::Key::ArrowDown);
+        (step, close, tab)
+    });
+    if step.is_some() || close || tab.is_some() {
+        // egui already read an arrow or Tab as a focus move of its own: an
+        // arrow to the nearest widget on screen, Tab onto the list's own
+        // background.
+        ctx.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
+    }
+    if let Some(target) = step.and_then(|step| super::list_nav::step(Some(at), options.len(), step))
+    {
+        ctx.memory_mut(|memory| memory.request_focus(options[target]));
+    }
+    if close || tab.is_some() {
+        // Closed before it is drawn: `KeyMenu::finish` then hands focus back
+        // to the drop-down.
+        egui::Popup::close_id(ctx, popup);
+    }
+    if let Some(back) = tab {
+        let frame = ctx.cumulative_frame_nr();
+        ctx.data_mut(|data| data.insert_temp(tab_out_id(id), (frame, back)));
+        // The next pass moves focus on, so the frame never shows focus
+        // resting on the drop-down in between.
+        ctx.request_discard("Tab left a drop-down's list");
+    }
+}
+
+/// Exposes a drop-down's open list, drawn in this pass on the popup layer
+/// `popup`, as a list box named `label` holding `options`, as a Windows
+/// combo box's list is: each option says where it is ("2 of 5"), and only
+/// the highlighted one, the focused option or else the current choice, is
+/// selected. egui gives a selectable entry a toggle state, which a screen
+/// reader would read as "checked" or "not checked" on every option.
+fn describe_list(
+    ctx: &egui::Context,
+    popup: egui::Id,
+    label: &str,
+    options: &[egui::Id],
+    current: Option<egui::Id>,
+) {
+    use egui::accesskit::Role;
+    let highlighted = ctx
+        .memory(|memory| memory.focused())
+        .filter(|focused| options.contains(focused))
+        .or(current);
+    let len = options.len();
+    // The layer's root `Ui` has the layer's id: its node holds the options.
+    ctx.accesskit_node_builder(popup, |node| {
+        node.set_role(Role::ListBox);
+        node.set_label(label);
+        node.set_size_of_set(len);
+    });
+    for (index, option) in options.iter().enumerate() {
+        ctx.accesskit_node_builder(*option, |node| {
+            node.set_role(Role::ListBoxOption);
+            node.set_position_in_set(index);
+            node.set_size_of_set(len);
+            node.clear_toggled();
+            if Some(*option) == highlighted {
+                node.set_selected(true);
+            } else {
+                node.clear_selected();
+            }
+        });
+    }
+}
+
+/// Whether keyboard focus is on a [`dropdown`], or an option of its open
+/// list, drawn this frame or the last: Alt+Down and Alt+Up are then its
+/// keys rather than the ones that switch chats.
 pub fn dropdown_focused(ctx: &egui::Context) -> bool {
     let frame = ctx.cumulative_frame_nr();
     ctx.memory(|memory| memory.focused()).is_some_and(|id| {

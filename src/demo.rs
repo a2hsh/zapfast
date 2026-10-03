@@ -26586,6 +26586,18 @@ mod settings_access_tests {
 
     fn frame(app: &mut App, ctx: &egui::Context, events: Vec<egui::Event>) -> TreeUpdate {
         ctx.enable_accesskit();
+        input_frame(app, ctx, events)
+            .platform_output
+            .accesskit_update
+            .expect("accessibility tree")
+    }
+
+    /// One frame with `events`, leaving AccessKit as it is.
+    fn input_frame(
+        app: &mut App,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
         let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -26603,9 +26615,6 @@ mod settings_access_tests {
         );
         output.textures_delta.clear();
         output
-            .platform_output
-            .accesskit_update
-            .expect("accessibility tree")
     }
 
     fn tree(app: &mut App, ctx: &egui::Context) -> TreeUpdate {
@@ -26656,6 +26665,16 @@ mod settings_access_tests {
             })],
         );
         render(app, ctx);
+    }
+
+    fn key(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
     }
 
     fn settings(flag: &str) -> (App, egui::Context) {
@@ -26736,7 +26755,13 @@ mod settings_access_tests {
         assert_eq!(node(&tree_open, id).is_expanded(), Some(true));
         press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
         assert_eq!(focused(&tree(&mut app, &ctx)).label(), Some("Inter"));
-        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        // The pass that takes the choice hands focus back with the new
+        // value already on the drop-down, so the screen reader never hears
+        // the old one first.
+        let taken = frame(&mut app, &ctx, vec![key(egui::Key::Enter)]);
+        assert_eq!(taken.focus, id, "focus is back on the drop-down at once");
+        assert_eq!(node(&taken, id).value(), Some("Inter"));
+        render(&mut app, &ctx);
         assert_eq!(app.settings.font, FontChoice::Inter);
         let chosen = tree(&mut app, &ctx);
         assert_eq!(chosen.focus, id, "focus is back on the drop-down");
@@ -26749,9 +26774,11 @@ mod settings_access_tests {
         press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
         assert_eq!(
             focused(&tree(&mut app, &ctx)).label(),
-            Some("System"),
-            "Down wraps from the last choice to the first"
+            Some("Inter"),
+            "Down stops at the last choice, as a Windows list does"
         );
+        press_key(&mut app, &ctx, egui::Key::ArrowUp, egui::Modifiers::NONE);
+        assert_eq!(focused(&tree(&mut app, &ctx)).label(), Some("System"));
         press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
         assert_eq!(app.settings.font, FontChoice::Inter);
         assert_eq!(
@@ -26762,6 +26789,403 @@ mod settings_access_tests {
         let closed = tree(&mut app, &ctx);
         assert_eq!(closed.focus, id);
         assert_eq!(focused(&closed).is_expanded(), Some(false));
+    }
+
+    /// The focused Font drop-down, closed.
+    fn font_dropdown() -> (App, egui::Context, NodeId) {
+        let (mut app, ctx) = settings("settings");
+        let (id, _) = find(&tree(&mut app, &ctx), Role::ComboBox, "Font").expect("Font");
+        focus(&mut app, &ctx, id);
+        (app, ctx, id)
+    }
+
+    fn key_with(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    /// On a closed drop-down, Up and Down take the previous and next choice
+    /// at once, as a Windows combo box does, and Home and End the first and
+    /// last: the drop-down keeps focus, stays closed, and says its new value
+    /// in the pass the key is pressed.
+    #[test]
+    fn up_and_down_on_a_closed_dropdown_change_its_value() {
+        use crate::settings::FontChoice;
+        let (mut app, ctx, id) = font_dropdown();
+        let mut press = |key: egui::Key, value: &str, font: FontChoice| {
+            let pressed = frame(&mut app, &ctx, vec![key_with(key, egui::Modifiers::NONE)]);
+            assert_eq!(pressed.focus, id, "{key:?} keeps focus on the drop-down");
+            assert_eq!(node(&pressed, id).value(), Some(value), "{key:?}");
+            assert_eq!(node(&pressed, id).is_expanded(), Some(false), "{key:?}");
+            render(&mut app, &ctx);
+            assert_eq!(app.settings.font, font, "{key:?}");
+            let settled = tree(&mut app, &ctx);
+            assert_eq!(settled.focus, id);
+            assert_eq!(focused(&settled).value(), Some(value));
+        };
+        press(egui::Key::ArrowDown, "Inter", FontChoice::Inter);
+        press(egui::Key::ArrowDown, "Inter", FontChoice::Inter);
+        press(egui::Key::ArrowUp, "System", FontChoice::System);
+        press(egui::Key::End, "Inter", FontChoice::Inter);
+        press(egui::Key::Home, "System", FontChoice::System);
+        assert!(!egui::Popup::is_any_open(&ctx), "nothing opened");
+    }
+
+    /// Enter, Space and Alt+Down open the list on the current choice, not
+    /// the first, and change nothing. The open list is a list box named as
+    /// the drop-down, whose options say where they are and which is
+    /// highlighted.
+    #[test]
+    fn opening_a_dropdown_changes_nothing_and_starts_on_its_value() {
+        use crate::settings::FontChoice;
+        for (key, modifiers) in [
+            (egui::Key::Enter, egui::Modifiers::NONE),
+            (egui::Key::Space, egui::Modifiers::NONE),
+            (egui::Key::ArrowDown, egui::Modifiers::ALT),
+        ] {
+            let (mut app, ctx, id) = font_dropdown();
+            press_key(&mut app, &ctx, egui::Key::End, egui::Modifiers::NONE);
+            assert_eq!(app.settings.font, FontChoice::Inter);
+            press_key(&mut app, &ctx, key, modifiers);
+            assert_eq!(app.settings.font, FontChoice::Inter, "{key:?} changed it");
+            let open = tree(&mut app, &ctx);
+            assert_eq!(node(&open, id).is_expanded(), Some(true), "{key:?}");
+            assert_eq!(node(&open, id).value(), Some("Inter"), "{key:?}");
+            let option = focused(&open);
+            assert_eq!(option.label(), Some("Inter"), "{key:?} opens on the value");
+            assert_eq!(option.role(), Role::ListBoxOption, "{key:?}");
+            assert_eq!(option.position_in_set(), Some(1));
+            assert_eq!(option.size_of_set(), Some(2));
+            assert_eq!(option.is_selected(), Some(true), "the highlighted option");
+            assert_eq!(option.toggled(), None);
+            let (list, _) = find(&open, Role::ListBox, "Font").expect("a list box named Font");
+            let options: Vec<Node> = descendants(&open, list)
+                .into_iter()
+                .filter(|node| node.role() == Role::ListBoxOption)
+                .collect();
+            assert_eq!(options.len(), 2, "{key:?}");
+            let system = options
+                .iter()
+                .find(|node| node.label() == Some("System"))
+                .expect("System");
+            assert_eq!(system.position_in_set(), Some(0));
+            assert_eq!(system.is_selected(), None, "only the highlight is selected");
+        }
+    }
+
+    /// In the open list, Up and Down move the highlight and change nothing;
+    /// Enter takes the highlighted option and closes the list, focus back on
+    /// the drop-down with its new value in the same pass.
+    #[test]
+    fn arrows_in_an_open_dropdown_move_and_enter_takes() {
+        use crate::settings::FontChoice;
+        let (mut app, ctx, id) = font_dropdown();
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        let moved = tree(&mut app, &ctx);
+        assert_eq!(focused(&moved).label(), Some("Inter"));
+        assert_eq!(focused(&moved).is_selected(), Some(true));
+        assert_eq!(
+            app.settings.font,
+            FontChoice::System,
+            "Down commits nothing"
+        );
+        assert_eq!(node(&moved, id).value(), Some("System"));
+        press_key(&mut app, &ctx, egui::Key::ArrowUp, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        assert_eq!(app.settings.font, FontChoice::System, "Up commits nothing");
+        let taken = frame(&mut app, &ctx, vec![key(egui::Key::Enter)]);
+        assert_eq!(taken.focus, id);
+        assert_eq!(node(&taken, id).value(), Some("Inter"));
+        assert_eq!(node(&taken, id).is_expanded(), Some(false));
+        render(&mut app, &ctx);
+        assert_eq!(app.settings.font, FontChoice::Inter);
+    }
+
+    /// Escape and Alt+Up close the open list and change nothing, focus back
+    /// on the drop-down.
+    #[test]
+    fn escape_and_alt_up_close_an_open_dropdown_unchanged() {
+        use crate::settings::FontChoice;
+        for (key, modifiers) in [
+            (egui::Key::Escape, egui::Modifiers::NONE),
+            (egui::Key::ArrowUp, egui::Modifiers::ALT),
+        ] {
+            let (mut app, ctx, id) = font_dropdown();
+            press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+            press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+            let closed = frame(&mut app, &ctx, vec![key_with(key, modifiers)]);
+            assert_eq!(closed.focus, id, "{key:?}");
+            assert_eq!(node(&closed, id).value(), Some("System"), "{key:?}");
+            assert_eq!(node(&closed, id).is_expanded(), Some(false), "{key:?}");
+            render(&mut app, &ctx);
+            assert_eq!(app.settings.font, FontChoice::System, "{key:?}");
+            assert_eq!(app.page, crate::model::Page::Settings, "{key:?}");
+            assert_eq!(tree(&mut app, &ctx).focus, id, "{key:?}");
+        }
+    }
+
+    /// Tab in the open list closes it unchanged and moves on as Tab from
+    /// the closed drop-down would, in the same frame; Shift+Tab moves back.
+    #[test]
+    fn tab_leaves_an_open_dropdown_unchanged() {
+        use crate::settings::FontChoice;
+        for modifiers in [egui::Modifiers::NONE, egui::Modifiers::SHIFT] {
+            let (mut app, ctx, id) = font_dropdown();
+            // Where Tab goes from the closed drop-down.
+            let expected = frame(&mut app, &ctx, vec![key_with(egui::Key::Tab, modifiers)]);
+            let expected = if expected.focus == id {
+                tree(&mut app, &ctx).focus
+            } else {
+                expected.focus
+            };
+            assert_ne!(expected, id);
+            focus(&mut app, &ctx, id);
+            press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+            press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+            let left = frame(&mut app, &ctx, vec![key_with(egui::Key::Tab, modifiers)]);
+            assert_eq!(left.focus, expected, "{modifiers:?} moves on at once");
+            assert_eq!(node(&left, id).is_expanded(), Some(false));
+            assert_eq!(node(&left, id).value(), Some("System"));
+            render(&mut app, &ctx);
+            assert_eq!(app.settings.font, FontChoice::System);
+            assert!(!egui::Popup::is_any_open(&ctx));
+            assert_eq!(tree(&mut app, &ctx).focus, expected, "{modifiers:?}");
+        }
+    }
+
+    /// "Choose a file…" in a sound list acts rather than becoming the value:
+    /// Up and Down on the closed drop-down skip it, so they never open a
+    /// file dialog, but the open list still reaches it.
+    #[test]
+    fn closed_dropdown_arrows_skip_an_option_that_acts() {
+        use crate::settings::NotificationSound;
+        let (mut app, ctx) = settings("settings");
+        let (id, combo) =
+            find(&tree(&mut app, &ctx), Role::ComboBox, "Message sound").expect("Message sound");
+        assert_eq!(combo.value(), Some("Pidgin"));
+        focus(&mut app, &ctx, id);
+        let picked = |app: &App| {
+            app.actions
+                .iter()
+                .any(|action| matches!(action, crate::model::Action::PickNotificationSound { .. }))
+        };
+        for key in [egui::Key::End, egui::Key::ArrowDown, egui::Key::ArrowDown] {
+            let pressed = frame(&mut app, &ctx, vec![key_with(key, egui::Modifiers::NONE)]);
+            assert!(!picked(&app), "{key:?} asked for a file");
+            assert_eq!(node(&pressed, id).value(), Some("None"), "{key:?}");
+            assert_eq!(pressed.focus, id);
+            render(&mut app, &ctx);
+            assert_eq!(app.settings.message_sound, NotificationSound::None);
+        }
+        press_key(&mut app, &ctx, egui::Key::ArrowUp, egui::Modifiers::NONE);
+        assert_eq!(app.settings.message_sound, NotificationSound::System);
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::ALT);
+        assert_eq!(
+            focused(&tree(&mut app, &ctx)).label(),
+            Some("System default")
+        );
+        press_key(&mut app, &ctx, egui::Key::End, egui::Modifiers::NONE);
+        let open = tree(&mut app, &ctx);
+        assert_eq!(focused(&open).label(), Some("Choose a file…"));
+        assert_eq!(focused(&open).position_in_set(), Some(4));
+        assert_eq!(focused(&open).size_of_set(), Some(5));
+        assert!(!picked(&app));
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert_eq!(app.settings.message_sound, NotificationSound::System);
+    }
+
+    /// The focused Profile photo drop-down, an account privacy setting the
+    /// demo's phone holds as "My contacts", with the phone writes recorded.
+    fn privacy_dropdown() -> (App, egui::Context, NodeId) {
+        let (mut app, ctx) = settings("settings");
+        app.backend.record_demo_commands();
+        let (id, combo) =
+            find(&tree(&mut app, &ctx), Role::ComboBox, "Profile photo").expect("Profile photo");
+        assert_eq!(combo.value(), Some("My contacts"));
+        // Reached from the keys, so focus scrolls it into view.
+        ctx.data_mut(|data| data.insert_temp(crate::theme::keyboard_focus_id(), true));
+        focus(&mut app, &ctx, id);
+        (app, ctx, id)
+    }
+
+    fn privacy_writes(app: &mut App) -> usize {
+        app.backend
+            .take_demo_commands()
+            .iter()
+            .filter(|command| {
+                matches!(
+                    command,
+                    crate::backend::Command::SetAccountPrivacy {
+                        kind: crate::privacy::PrivacyKind::Profile,
+                        ..
+                    }
+                )
+            })
+            .count()
+    }
+
+    fn saving_said(app: &App) -> usize {
+        app.announcer
+            .spoken()
+            .iter()
+            .filter(|spoken| spoken.trim_end_matches('\u{200B}') == "Saving…")
+            .count()
+    }
+
+    /// A privacy drop-down writes to the phone. While the write is pending
+    /// the focused drop-down keeps focus, says it is busy and "Saving…" once,
+    /// and takes no other value until the phone answers; then it takes the
+    /// arrows again.
+    #[test]
+    fn a_privacy_dropdown_keeps_focus_while_it_saves() {
+        use crate::privacy::{PrivacyChoice, PrivacyKind};
+        let (mut app, ctx, id) = privacy_dropdown();
+        let stepped = frame(&mut app, &ctx, vec![key(egui::Key::ArrowDown)]);
+        assert_eq!(node(&stepped, id).value(), Some("Nobody"));
+        render(&mut app, &ctx);
+        assert!(app.account_privacy.pending(PrivacyKind::Profile));
+        assert_eq!(privacy_writes(&mut app), 1);
+        let saving = tree(&mut app, &ctx);
+        assert_eq!(saving.focus, id, "focus stays on the saving drop-down");
+        assert_eq!(focused(&saving).value(), Some("Nobody"));
+        assert!(focused(&saving).is_busy());
+        assert_eq!(saving_said(&app), 1, "{:?}", app.announcer.spoken());
+        // While it saves, the keys that would change or open it do nothing.
+        for (key, modifiers) in [
+            (egui::Key::ArrowUp, egui::Modifiers::NONE),
+            (egui::Key::Home, egui::Modifiers::NONE),
+            (egui::Key::Enter, egui::Modifiers::NONE),
+            (egui::Key::Space, egui::Modifiers::NONE),
+            (egui::Key::ArrowDown, egui::Modifiers::ALT),
+        ] {
+            press_key(&mut app, &ctx, key, modifiers);
+            render(&mut app, &ctx);
+            let tree = tree(&mut app, &ctx);
+            assert_eq!(tree.focus, id, "{key:?}");
+            assert_eq!(focused(&tree).value(), Some("Nobody"), "{key:?}");
+            assert_eq!(focused(&tree).is_expanded(), Some(false), "{key:?}");
+            assert!(!egui::Popup::is_any_open(&ctx), "{key:?}");
+        }
+        assert_eq!(privacy_writes(&mut app), 0, "no second write");
+        assert_eq!(saving_said(&app), 1, "said once");
+        assert_eq!(
+            app.account_privacy.get(PrivacyKind::Profile),
+            Some(PrivacyChoice::Nobody)
+        );
+        // The phone confirms: the drop-down takes the arrows again.
+        assert!(app.account_privacy.finish_set(PrivacyKind::Profile));
+        render(&mut app, &ctx);
+        let done = tree(&mut app, &ctx);
+        assert_eq!(done.focus, id);
+        assert!(!focused(&done).is_busy());
+        press_key(&mut app, &ctx, egui::Key::ArrowUp, egui::Modifiers::NONE);
+        render(&mut app, &ctx);
+        assert_eq!(privacy_writes(&mut app), 1);
+        let again = tree(&mut app, &ctx);
+        assert_eq!(again.focus, id);
+        assert_eq!(focused(&again).value(), Some("My contacts"));
+    }
+
+    /// Enter on an option of a privacy drop-down's list starts the write and
+    /// leaves focus on the drop-down, which says the new value.
+    #[test]
+    fn a_privacy_dropdown_keeps_focus_after_enter_in_its_list() {
+        let (mut app, ctx, id) = privacy_dropdown();
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(focused(&tree(&mut app, &ctx)).label(), Some("My contacts"));
+        press_key(&mut app, &ctx, egui::Key::ArrowUp, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        render(&mut app, &ctx);
+        assert_eq!(privacy_writes(&mut app), 1);
+        let saving = tree(&mut app, &ctx);
+        assert_eq!(saving.focus, id, "focus stays on the saving drop-down");
+        assert_eq!(focused(&saving).value(), Some("Everyone"));
+        assert_eq!(focused(&saving).is_expanded(), Some(false));
+        assert!(focused(&saving).is_busy());
+    }
+
+    /// What the next frame paints over the drop-down `id`: each
+    /// tessellated vertex within its bounds, relative to them, with its
+    /// colour. The focus ring is the one difference a focused control may
+    /// show, so it is left out: keyboard navigation, which shows it, is off.
+    fn painted(app: &mut App, ctx: &egui::Context, id: NodeId) -> Vec<(i32, i32, egui::Color32)> {
+        ctx.data_mut(|data| data.insert_temp(crate::theme::keyboard_focus_id(), false));
+        let output = input_frame(app, ctx, Vec::new());
+        let tree = output
+            .platform_output
+            .accesskit_update
+            .clone()
+            .expect("accessibility tree");
+        let bounds = node(&tree, id).bounds().expect("the drop-down's bounds");
+        let ppp = ctx.pixels_per_point();
+        let rect = egui::Rect::from_min_max(
+            egui::pos2(bounds.x0 as f32 / ppp, bounds.y0 as f32 / ppp),
+            egui::pos2(bounds.x1 as f32 / ppp, bounds.y1 as f32 / ppp),
+        )
+        .expand(2.0);
+        ctx.tessellate(output.shapes, ppp)
+            .into_iter()
+            .filter_map(|clipped| match clipped.primitive {
+                egui::epaint::Primitive::Mesh(mesh) => Some(mesh),
+                egui::epaint::Primitive::Callback(_) => None,
+            })
+            .flat_map(|mesh| mesh.vertices)
+            .filter(|vertex| rect.contains(vertex.pos))
+            .map(|vertex| {
+                let at = vertex.pos - rect.min;
+                // Hundredths of a point: the same paint after a scroll that
+                // lands on another fraction of a pixel.
+                (
+                    (at.x * 100.0).round() as i32,
+                    (at.y * 100.0).round() as i32,
+                    vertex.color,
+                )
+            })
+            .collect()
+    }
+
+    /// A focused privacy drop-down that is saving stays enabled so it keeps
+    /// focus, but it paints exactly as the disabled one did before: the same
+    /// shapes and colours over its bounds, the focus ring aside.
+    #[test]
+    fn a_saving_privacy_dropdown_looks_disabled_when_focused() {
+        use crate::privacy::{PrivacyChoice, PrivacyKind};
+        // Disabled the old way: saving without focus. Focus first scrolls the
+        // drop-down into view, as in the focused case, then leaves it.
+        let (mut app, ctx, id) = privacy_dropdown();
+        assert!(
+            app.account_privacy
+                .begin_set(PrivacyKind::Profile, PrivacyChoice::Nobody)
+        );
+        ctx.memory_mut(|memory| {
+            if let Some(focused) = memory.focused() {
+                memory.surrender_focus(focused);
+            }
+        });
+        render(&mut app, &ctx);
+        let disabled = tree(&mut app, &ctx);
+        assert_ne!(disabled.focus, id);
+        assert!(!node(&disabled, id).is_busy());
+        let disabled = painted(&mut app, &ctx, id);
+        // Busy: saving with focus on it.
+        let (mut app, ctx, id) = privacy_dropdown();
+        assert!(
+            app.account_privacy
+                .begin_set(PrivacyKind::Profile, PrivacyChoice::Nobody)
+        );
+        render(&mut app, &ctx);
+        let busy = tree(&mut app, &ctx);
+        assert_eq!(busy.focus, id);
+        assert!(node(&busy, id).is_busy());
+        let busy = painted(&mut app, &ctx, id);
+        assert!(!disabled.is_empty(), "the drop-down is painted");
+        assert_eq!(busy, disabled, "busy paints as disabled");
     }
 
     #[test]
