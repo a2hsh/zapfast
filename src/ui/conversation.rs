@@ -2626,7 +2626,11 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat, under: f32) {
         } else {
             app.scroll_anchor.as_deref()
         },
-        open_menu: app.open_message_menu.as_deref(),
+        open_menu: app
+            .open_message_menu
+            .as_ref()
+            .filter(|(menu_chat, _)| *menu_chat == chat.id)
+            .map(|(_, message)| message.as_str()),
         starred: app.stars.get(&chat.id),
         pins: app.pins.get(&chat.id),
         pin_notices: app
@@ -4021,12 +4025,13 @@ fn reaction_affordance_visible(pointer: Option<egui::Pos2>, bubble: Rect, button
 }
 
 /// Opens the reaction picker beside the message, as its hover control and
-/// the message list's E do.
-pub(crate) fn open_reaction_picker_action(chat: &str, message: &str) -> Action {
+/// the message list's E (`from_list`) do.
+pub(crate) fn open_reaction_picker_action(chat: &str, message: &str, from_list: bool) -> Action {
     Action::OpenReactionPicker {
         chat: chat.to_owned(),
         message: message.to_owned(),
         beside_menu: false,
+        from_list,
     }
 }
 
@@ -4126,7 +4131,11 @@ fn reaction_affordance(
         .on_hover_text("React")
         .clicked()
     {
-        actions.push(open_reaction_picker_action(&view.chat.id, &message.id));
+        actions.push(open_reaction_picker_action(
+            &view.chat.id,
+            &message.id,
+            false,
+        ));
     }
     if !reply_fits {
         return;
@@ -5119,7 +5128,15 @@ fn bubble_frame(
         }
     }
     let from_keys = ui.ctx().data(|data| data.get_temp::<bool>(from_keys_id));
-    if from_keys.is_some() && was_open && !reacting {
+    // Whether keyboard focus is on one of the menu's items (true), on a
+    // widget elsewhere (false), or on nothing drawn (None, as between two
+    // items while Tab moves on).
+    let focus_in_menu = |ctx: &egui::Context| {
+        ctx.memory(|memory| memory.focused())
+            .and_then(|id| ctx.read_response(id))
+            .map(|response| response.layer_id.id == popup_id)
+    };
+    if from_keys == Some(false) && was_open && !reacting && focus_in_menu(ui.ctx()) == Some(true) {
         // Up and Down walk the items in order and wrap, as Tab does, as in
         // any desktop menu. egui's own arrow moves go to the nearest widget
         // on screen, which can be one under the menu.
@@ -5180,23 +5197,26 @@ fn bubble_frame(
         ui.ctx()
             .data_mut(|data| data.insert_temp(bubble_id.with("menu-rect"), menu.response.rect));
     }
-    let open_now = egui::Popup::is_id_open(ui.ctx(), popup_id);
-    if at_message || was_open {
-        ui.ctx().data_mut(|data| {
-            if at_message && open_now {
-                data.insert_temp(at_message_id, true);
-            } else {
-                data.remove::<bool>(at_message_id);
-            }
-        });
-    }
+    let mut open_now = egui::Popup::is_id_open(ui.ctx(), popup_id);
     if let Some(focus_pending) = from_keys {
-        if !open_now {
+        if open_now && !focus_pending && !reacting && focus_in_menu(ui.ctx()) == Some(false) {
+            // A shortcut (Ctrl+L, Ctrl+K, Alt+2) took focus out of the menu:
+            // it closes, as a desktop menu does when focus leaves, rather
+            // than staying open unseen and holding on to the arrows, Tab and
+            // the next Escape. Focus stays where the shortcut put it.
+            egui::Popup::close_id(ui.ctx(), popup_id);
+            open_now = false;
             ui.ctx().data_mut(|data| data.remove::<bool>(from_keys_id));
-            // Closed by Escape or a chosen item: back to the message list,
-            // drawn earlier in this pass. A click elsewhere keeps the focus
-            // it gave.
-            if !ui.input(|input| input.pointer.any_pressed() || input.pointer.any_click()) {
+        } else if !open_now {
+            ui.ctx().data_mut(|data| data.remove::<bool>(from_keys_id));
+            // Closed in this pass by Escape or a chosen item: back to the
+            // message list, drawn earlier in this pass. A click elsewhere
+            // keeps the focus it gave. A menu that went away unseen, its
+            // message not drawn (another chat, Settings), returns nothing:
+            // focus has moved on since.
+            if was_open
+                && !ui.input(|input| input.pointer.any_pressed() || input.pointer.any_click())
+            {
                 let item = ui.memory(|memory| memory.focused());
                 super::overlay::hand_back(ui.ctx(), messages_list_id(&view.chat.id), item);
             }
@@ -5223,6 +5243,15 @@ fn bubble_frame(
                     .data_mut(|data| data.insert_temp(from_keys_id, false));
             }
         }
+    }
+    if at_message || was_open {
+        ui.ctx().data_mut(|data| {
+            if at_message && open_now {
+                data.insert_temp(at_message_id, true);
+            } else {
+                data.remove::<bool>(at_message_id);
+            }
+        });
     }
     // Keep the target explicit for every menu action, not just the emoji
     // picker. Paint in the message layer so the menu itself remains above it.
@@ -6410,6 +6439,10 @@ fn context_menu(
                 let chosen = mine == Some(emoji);
                 let line = widgets::line(ui, emoji, theme::regular(20.0), palette.text, 40.0, 1);
                 let (rect, response) = ui.allocate_exact_size(Vec2::splat(34.0), Sense::click());
+                // Screen readers speak the emoji's name.
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), emoji)
+                });
                 theme::focus_outline(ui, response.id, rect, 17.0);
                 if chosen {
                     ui.painter()
@@ -6443,6 +6476,11 @@ fn context_menu(
                 }
             }
             let (rect, response) = ui.allocate_exact_size(Vec2::splat(34.0), Sense::click());
+            // The tooltip doubles as the screen reader's label.
+            let more = crate::i18n::gettext(view.locale, "React with any emoji").into_owned();
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &more)
+            });
             theme::focus_outline(ui, response.id, rect, 17.0);
             if ui.is_rect_visible(rect) {
                 let hovered = response.hovered();
@@ -6461,15 +6499,14 @@ fn context_menu(
             }
             if response
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .on_hover_text(
-                    crate::i18n::gettext(view.locale, "React with any emoji").into_owned(),
-                )
+                .on_hover_text(more)
                 .clicked()
             {
                 actions.push(Action::OpenReactionPicker {
                     chat: chat.clone(),
                     message: message.id.clone(),
                     beside_menu: true,
+                    from_list: false,
                 });
             }
         },
@@ -10962,10 +10999,10 @@ mod tests {
 
     #[test]
     fn reaction_affordance_action_targets_the_message_it_belongs_to() {
-        let action = open_reaction_picker_action("chat@example", "message-42");
+        let action = open_reaction_picker_action("chat@example", "message-42", false);
         assert!(matches!(
             action,
-            Action::OpenReactionPicker { chat, message, beside_menu: false }
+            Action::OpenReactionPicker { chat, message, beside_menu: false, from_list: false }
                 if chat == "chat@example" && message == "message-42"
         ));
     }
@@ -12030,9 +12067,15 @@ mod reaction_tests {
             .iter()
             .flat_map(|row| drawn_menu_words(crate::i18n::Locale::English, row))
             .collect();
-        // The menu is as wide as the longest label it measures.
+        // The menu is as wide as the longest label it measures. The
+        // reactions row above its items is named for screen readers, but
+        // it is no item the width measures.
+        let reactions_row = ["React with any emoji"];
         let measured = message_menu_labels(crate::i18n::Locale::English);
-        for label in &labels {
+        for label in labels
+            .iter()
+            .filter(|label| !reactions_row.contains(&label.as_str()))
+        {
             assert!(measured.contains(label), "menu width leaves out {label}");
         }
         // The fixtures reach every entry a list row's menu can show. A private
@@ -12043,7 +12086,8 @@ mod reaction_tests {
             .filter(|label| !labels.iter().any(|drawn| drawn == label))
             .collect();
         assert_eq!(undrawn, ["Reply privately"]);
-        // Hover texts are not in the accessibility tree.
+        // Hover texts are not in the accessibility tree (React with any
+        // emoji is, as its button's name).
         labels.extend(["React with any emoji".into(), "Remove your reaction".into()]);
         labels.sort();
         labels.dedup();

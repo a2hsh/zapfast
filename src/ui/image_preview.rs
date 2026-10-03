@@ -377,6 +377,7 @@ fn header(
                         chat: chat.to_owned(),
                         message: message.clone(),
                         beside_menu: false,
+                        from_list: false,
                     });
                 }
                 if theme::icon_button(
