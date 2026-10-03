@@ -6850,8 +6850,13 @@ impl App {
                 {
                     // From the chats or the Calls page alike.
                     self.settings_return_focus = focused;
-                    // A reader starts in the search, as Ctrl+F puts them.
-                    self.focus_settings_search = true;
+                    // Opened from the keys (Ctrl+, or Enter on the gear) or
+                    // with a screen reader, the reader starts in the search,
+                    // as Ctrl+F puts them. A pointer click on the gear leaves
+                    // focus and the page's scroll position as they were.
+                    let clicked = ctx.input(|input| input.pointer.any_click());
+                    self.focus_settings_search = !clicked
+                        || crate::a11y::screen_reader_active(ctx, egui::accesskit_root_id());
                 } else if page == Page::Wallpaper && self.page == Page::Settings {
                     self.wallpaper_return_focus = focused;
                     self.focus_wallpaper_back = true;

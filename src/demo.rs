@@ -27361,6 +27361,80 @@ mod settings_access_tests {
         }
     }
 
+    /// A pointer click at `pos`: pressed in one frame, released in the next.
+    fn click(app: &mut App, ctx: &egui::Context, pos: egui::Pos2) {
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        input_frame(app, ctx, vec![egui::Event::PointerMoved(pos), button(true)]);
+        input_frame(app, ctx, vec![button(false)]);
+        render(app, ctx);
+    }
+
+    /// Opened with the pointer and no screen reader, Settings keep the
+    /// focus and the scroll position they had: no caret, no jump.
+    #[test]
+    fn the_gear_clicked_with_the_pointer_leaves_the_search_and_the_scroll_alone() {
+        let (mut app, ctx) = settings("chat");
+        // Found once in the tree; AccessKit is then off, as without a
+        // screen reader.
+        let (gear, _) = find(&tree(&mut app, &ctx), Role::Button, &gear_label()).expect("the gear");
+        ctx.disable_accesskit();
+        let gear = ctx
+            .viewport(|viewport| {
+                viewport
+                    .prev_pass
+                    .widgets
+                    .layers()
+                    .flat_map(|(_, widgets)| widgets.iter())
+                    .find(|widget| widget.id.accesskit_id() == gear)
+                    .map(|widget| widget.rect.center())
+            })
+            .expect("the gear was drawn");
+        let search = egui::Id::new(crate::ui::settings::SEARCH_ID);
+        let field_top =
+            |ctx: &egui::Context| ctx.read_response(search).expect("the field").rect.top();
+        click(&mut app, &ctx, gear);
+        assert_eq!(app.page, crate::model::Page::Settings);
+        assert_ne!(ctx.memory(|memory| memory.focused()), Some(search));
+        // Scrolled down, closed and opened again with the pointer.
+        let page = egui::pos2(800.0, 400.0);
+        input_frame(
+            &mut app,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(page),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -300.0),
+                    modifiers: egui::Modifiers::NONE,
+                    phase: egui::TouchPhase::Move,
+                },
+            ],
+        );
+        for _ in 0..30 {
+            input_frame(&mut app, &ctx, Vec::new());
+        }
+        let scrolled = field_top(&ctx);
+        assert!(scrolled < 0.0, "the page scrolled: {scrolled}");
+        click(&mut app, &ctx, gear);
+        assert_eq!(app.page, crate::model::Page::Chats);
+        click(&mut app, &ctx, gear);
+        assert_eq!(app.page, crate::model::Page::Settings);
+        for _ in 0..30 {
+            input_frame(&mut app, &ctx, Vec::new());
+        }
+        assert_ne!(ctx.memory(|memory| memory.focused()), Some(search));
+        assert_eq!(
+            field_top(&ctx),
+            scrolled,
+            "the page keeps its scroll position"
+        );
+    }
+
     /// The rail's gear as a screen reader names it: with Command on macOS.
     fn gear_label() -> String {
         crate::ui::keys::label("Settings (Ctrl+,)")
