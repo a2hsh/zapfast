@@ -6196,6 +6196,55 @@ mod tests {
         assert!(!label.contains(&english), "{label}");
     }
 
+    /// The hover-only React and Reply controls are pointer conveniences: the
+    /// message menu and its keys reach the same actions, so they stay out of
+    /// Tab order and out of the accessibility tree.
+    #[test]
+    fn hover_reaction_controls_are_not_focusable_or_exposed() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let chat = app.open_chat.clone().expect("demo opens a chat");
+        let message = app.conversations[&chat].messages.last().unwrap().id.clone();
+        let bubble = crate::ui::conversation::bubble_id(&chat, &message);
+        let controls = [bubble.with("react"), bubble.with("reply")];
+        let labels = accessible_labels(&mut app, &ctx);
+        assert!(
+            !labels
+                .iter()
+                .any(|label| label.starts_with("React to") || label == "Reply"),
+            "hover controls exposed: {labels:?}"
+        );
+        // No node at all, labelled or not, may exist for the controls' ids.
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 780.0),
+                )),
+                ..Default::default()
+            },
+            |ui| app.frame_ui(ui),
+        );
+        output.textures_delta.clear();
+        let tree = output
+            .platform_output
+            .accesskit_update
+            .expect("accessibility tree");
+        for control in controls {
+            assert!(
+                !tree.nodes.iter().any(|(id, _)| id.0 == control.value()),
+                "node exposed for hover control {control:?}"
+            );
+        }
+        for control in controls {
+            ctx.memory_mut(|memory| memory.request_focus(control));
+            render(&mut app, &ctx);
+            assert_ne!(ctx.memory(|memory| memory.focused()), Some(control));
+        }
+    }
+
     fn focus_messages(app: &mut App, ctx: &egui::Context) {
         let chat = app.open_chat.clone().unwrap();
         ctx.memory_mut(|memory| {
