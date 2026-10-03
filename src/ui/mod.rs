@@ -147,6 +147,12 @@ fn list_pane_only(app: &App) -> bool {
 /// Emits the screen reader announcement nodes; private ones stay silent
 /// while the app is locked.
 fn announce(app: &mut App, ctx: &egui::Context) {
+    let now = std::time::Instant::now();
+    // Held messages are due after the chat goes quiet, when no event may
+    // come to wake the window: wake it then.
+    if let Some(deadline) = app.flush_announcements(now) {
+        ctx.request_repaint_after(deadline.saturating_duration_since(now));
+    }
     app.announcer.show(ctx, !app.app_lock.is_locked());
 }
 

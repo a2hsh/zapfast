@@ -943,27 +943,14 @@ pub struct App {
     /// voice message, while announced: someone who keeps typing, or pauses
     /// briefly, is announced once rather than at every refresh.
     typing_announced: HashMap<(ChatId, String), (Instant, bool)>,
-    /// The latest incoming-message announcement, while a burst can still be
-    /// folded into it as a count.
-    incoming_burst: Option<IncomingBurst>,
-    /// A queued "Sent", so sends acknowledged together are said once.
-    sent_announced: Option<crate::announcer::Queued>,
+    /// Incoming messages in the chat being read, waiting to be spoken as one
+    /// line; see `flush_announcements`.
+    message_hold: crate::announcer::MessageHold,
+    /// Whether "Sent" is already queued for this frame, so sends
+    /// acknowledged together are said once.
+    sent_queued: bool,
 }
 
-/// Incoming messages in the open chat announced as one, see
-/// `App::announce_incoming`.
-struct IncomingBurst {
-    chat: ChatId,
-    /// The one sender so far; `None` once several people wrote.
-    sender: Option<String>,
-    count: u32,
-    /// When the latest message of the burst came.
-    at: Instant,
-    queued: crate::announcer::Queued,
-}
-
-/// Messages closer together than this are counted instead of read.
-const INCOMING_BURST: Duration = Duration::from_millis(1500);
 /// How long someone stays announced as typing after they were last heard.
 const TYPING_REPEAT: Duration = Duration::from_secs(15);
 
@@ -1664,8 +1651,8 @@ impl App {
             announced_offline: false,
             announced_connecting: false,
             typing_announced: HashMap::new(),
-            incoming_burst: None,
-            sent_announced: None,
+            message_hold: Default::default(),
+            sent_queued: false,
         };
         // A hand-edited speed snaps to a supported one, so a speed control
         // always shows the speed that plays.
@@ -1903,6 +1890,8 @@ impl App {
         self.unread_jump = None;
         // Typing announced in the previous account's chat starts over.
         self.typing_announced.clear();
+        // Messages held to be spoken belong to the previous account's chat.
+        self.message_hold.clear();
     }
 
     fn add_account(&mut self) {
@@ -2218,56 +2207,23 @@ impl App {
             && self.open_chat.as_deref() == Some(chat_id)
     }
 
-    /// Speaks a live message in the chat being read, as a desktop
-    /// notification would for any other chat. Messages that come closer
-    /// together than `INCOMING_BURST`, before the first is spoken, become a
-    /// count instead of a flood of text.
+    /// Holds a live message in the chat being read, to be spoken as a
+    /// desktop notification would announce it for any other chat. The hold
+    /// turns a burst into one count instead of a flood of text; see
+    /// `flush_announcements`. Like notifications, a message older than
+    /// `LIVE_MESSAGE_SECS` is not news: that is the backlog delivered after a
+    /// reconnect, which must not be read out message by message.
     fn announce_incoming(&mut self, chat_id: &str, message: &Message, now: Instant) {
-        if message.from_me || !self.reading(chat_id) {
+        if message.from_me
+            || !self.reading(chat_id)
+            || !live_message(crate::util::now(), message.timestamp)
+        {
             return;
         }
         let locale = self.locale;
         let sender = crate::a11y::spoken(
             &self.display_name_or(&message.sender, message.sender_name.as_deref()),
         );
-        if let Some(burst) = &mut self.incoming_burst
-            && burst.chat == chat_id
-            && now.saturating_duration_since(burst.at) <= INCOMING_BURST
-        {
-            let count = burst.count + 1;
-            let one_sender = burst.sender.as_deref() == Some(message.sender.as_str());
-            let text = if one_sender {
-                crate::a11y::fill(
-                    &crate::i18n::ngettext(
-                        locale,
-                        "{count} new message from {sender}",
-                        "{count} new messages from {sender}",
-                        count,
-                    ),
-                    &[("count", &count.to_string()), ("sender", &sender)],
-                )
-            } else {
-                crate::a11y::fill(
-                    &crate::i18n::ngettext(
-                        locale,
-                        "{count} new message",
-                        "{count} new messages",
-                        count,
-                    ),
-                    &[("count", &count.to_string())],
-                )
-            };
-            // A burst whose first message was already spoken is not counted
-            // on: the new message is read in full below.
-            if self.announcer.replace(burst.queued, text) {
-                burst.count = count;
-                burst.at = now;
-                if !one_sender {
-                    burst.sender = None;
-                }
-                return;
-            }
-        }
         let body = crate::a11y::spoken(&self.spoken_content(message));
         let group = self
             .chat(chat_id)
@@ -2283,16 +2239,56 @@ impl App {
                 &[("sender", &sender), ("text", &body)],
             ),
         };
-        self.incoming_burst = self
-            .announcer
-            .say_queued(crate::announcer::Category::Message, text)
-            .map(|queued| IncomingBurst {
-                chat: chat_id.to_owned(),
-                sender: Some(message.sender.clone()),
-                count: 1,
-                at: now,
-                queued,
-            });
+        self.message_hold
+            .push(chat_id, &message.sender, sender, text, now);
+    }
+
+    /// Per-frame announcement work, run just before the announcer speaks:
+    /// speaks held messages that are due and returns when the next ones will
+    /// be, so the caller can repaint then without waiting for input. Held
+    /// messages are dropped, unspoken, once the app locks or the user is no
+    /// longer reading their chat.
+    pub(crate) fn flush_announcements(&mut self, now: Instant) -> Option<Instant> {
+        self.sent_queued = false;
+        let stale = self
+            .message_hold
+            .chat()
+            .is_some_and(|chat| self.app_lock.is_locked() || !self.reading(chat));
+        if stale {
+            self.message_hold.clear();
+        }
+        if let Some(burst) = self.message_hold.due(now) {
+            let text = match burst {
+                crate::announcer::Burst::One(line) => line,
+                crate::announcer::Burst::Many {
+                    count,
+                    sender: Some(sender),
+                } => crate::a11y::fill(
+                    &crate::i18n::ngettext(
+                        self.locale,
+                        "{count} new message from {sender}",
+                        "{count} new messages from {sender}",
+                        count,
+                    ),
+                    &[("count", &count.to_string()), ("sender", &sender)],
+                ),
+                crate::announcer::Burst::Many {
+                    count,
+                    sender: None,
+                } => crate::a11y::fill(
+                    &crate::i18n::ngettext(
+                        self.locale,
+                        "{count} new message",
+                        "{count} new messages",
+                        count,
+                    ),
+                    &[("count", &count.to_string())],
+                ),
+            };
+            self.announcer
+                .say(crate::announcer::Category::Message, text);
+        }
+        self.message_hold.deadline()
     }
 
     /// A message's content as its message-list label describes it: the
@@ -2349,7 +2345,7 @@ impl App {
             crate::i18n::gettext(self.locale, "{name} is typing")
         };
         let text = crate::a11y::fill(&template, &[("name", &name)]);
-        self.announcer.say(crate::announcer::Category::Typing, text);
+        self.announcer.say_typing(chat_id, sender, text);
     }
 
     /// Speaks "Sent" when WhatsApp accepts one of our messages in the chat
@@ -2365,16 +2361,15 @@ impl App {
         if !from_me || before != Delivery::Pending || !accepted || !self.reading(chat_id) {
             return;
         }
-        let text = crate::i18n::gettext(self.locale, "Sent").into_owned();
         // Several sends acknowledged in one frame say "Sent" once.
-        if let Some(queued) = self.sent_announced
-            && self.announcer.replace(queued, text.clone())
-        {
+        if self.sent_queued {
             return;
         }
-        self.sent_announced = self
-            .announcer
-            .say_queued(crate::announcer::Category::Sent, text);
+        self.sent_queued = true;
+        self.announcer.say(
+            crate::announcer::Category::Sent,
+            crate::i18n::gettext(self.locale, "Sent"),
+        );
     }
 
     fn clear_chat_notifications(&mut self, chat: &str) {
@@ -3965,6 +3960,10 @@ impl App {
                 recording,
             } => {
                 self.announce_typing(&chat, &sender, composing, recording, Instant::now());
+                // A pause ends what "Ada is typing" said, in the tree too.
+                if !composing {
+                    self.announcer.typing_stopped(&chat, &sender);
+                }
                 let typers = self.typing.entry(chat).or_default();
                 typers.retain(|(who, _)| *who != sender);
                 if composing {
@@ -6341,10 +6340,22 @@ impl App {
         {
             self.stop_composing(&chat);
         }
-        for typers in self.typing.values_mut() {
-            typers.retain(|(_, since)| now.duration_since(*since) < TYPING_TIMEOUT);
+        let mut expired = Vec::new();
+        for (chat, typers) in &mut self.typing {
+            typers.retain(|(sender, since)| {
+                let typing = now.duration_since(*since) < TYPING_TIMEOUT;
+                if !typing {
+                    expired.push((chat.clone(), sender.clone()));
+                }
+                typing
+            });
         }
         self.typing.retain(|_, typers| !typers.is_empty());
+        // Typing that expires, rather than pauses, ends what was said of it
+        // too.
+        for (chat, sender) in expired {
+            self.announcer.typing_stopped(&chat, &sender);
+        }
         self.toasts.retain(|toast| {
             toast.kind == ToastKind::Error || toast.created.elapsed() < INFO_TOAST_LIFETIME
         });
@@ -9544,6 +9555,8 @@ impl App {
         self.app_lock.lock();
         // Nothing private stays readable in the tree behind the lock screen.
         self.announcer.forget_private();
+        // Messages waiting to be spoken must not be heard after the unlock.
+        self.message_hold.clear();
         self.window_focused = false;
         self.flush_open_draft();
         self.recording = None;
@@ -11080,7 +11093,17 @@ fn notification_eligible(chat: &Chat, now: i64, message_at: i64) -> bool {
     if chat.archived || chat.unread == 0 || chat.muted(now) || chat.locked {
         return false;
     }
-    now - message_at <= 60
+    live_message(now, message_at)
+}
+
+/// How old, in seconds, an incoming message can be and still be news.
+const LIVE_MESSAGE_SECS: i64 = 60;
+
+/// Whether a message from `message_at` is news at `now`, both Unix seconds.
+/// Messages delivered late after a reconnect are not: they arrive one by
+/// one as live, and notifying or announcing each would flood the user.
+fn live_message(now: i64, message_at: i64) -> bool {
+    now - message_at <= LIVE_MESSAGE_SECS
 }
 
 mod calls;
@@ -11191,24 +11214,43 @@ mod tests {
         (app, events, root)
     }
 
-    /// What the next frame speaks, if anything.
-    fn speak(app: &mut App) -> Option<String> {
+    /// What a frame drawn at `now` speaks, if anything.
+    fn speak_at(app: &mut App, now: Instant) -> Option<String> {
         let before: Vec<String> = app.announcer.spoken().map(String::from).into();
+        app.flush_announcements(now);
         app.announcer.show(&egui::Context::default(), true);
+        // A node emptied speaks nothing.
         before
             .iter()
             .zip(app.announcer.spoken())
-            .find(|(old, new)| old.as_str() != *new)
+            .find(|(old, new)| old.as_str() != *new && !new.is_empty())
             .map(|(_, new)| new.trim_end_matches('\u{200B}').to_owned())
     }
 
-    fn incoming_from(chat: &str, sender: &str, id: &str, text: &str) -> Event {
+    /// What the next frame speaks, if anything.
+    fn speak(app: &mut App) -> Option<String> {
+        speak_at(app, Instant::now())
+    }
+
+    /// What a frame speaks once every held message is due.
+    fn settled(app: &mut App) -> Option<String> {
+        speak_at(
+            app,
+            Instant::now() + crate::announcer::MAX_HOLD + Duration::from_millis(100),
+        )
+    }
+
+    fn text_from(chat: &str, sender: &str, id: &str, text: &str) -> Message {
         let mut message = message(chat, id, crate::util::now());
         message.sender = sender.into();
         message.content = Content::text(text);
+        message
+    }
+
+    fn incoming_from(chat: &str, sender: &str, id: &str, text: &str) -> Event {
         Event::Incoming {
             chat: chat.into(),
-            message: Box::new(message),
+            message: Box::new(text_from(chat, sender, id, text)),
         }
     }
 
@@ -11222,7 +11264,7 @@ mod tests {
             .send(incoming_from(ADA, ADA, "m1", "calling you back"))
             .unwrap();
         app.handle_events();
-        assert_eq!(speak(&mut app).as_deref(), Some("Ada: calling you back"));
+        assert_eq!(settled(&mut app).as_deref(), Some("Ada: calling you back"));
     }
 
     #[test]
@@ -11234,7 +11276,7 @@ mod tests {
             .send(incoming_from(ADA, ADA, "m1", "see you\n   at 5"))
             .unwrap();
         app.handle_events();
-        assert_eq!(speak(&mut app).as_deref(), Some("Ada: see you at 5"));
+        assert_eq!(settled(&mut app).as_deref(), Some("Ada: see you at 5"));
 
         let (mut app, events, _root) = reading(FAMILY, "Family");
         events
@@ -11242,7 +11284,7 @@ mod tests {
             .unwrap();
         app.handle_events();
         assert_eq!(
-            speak(&mut app).as_deref(),
+            settled(&mut app).as_deref(),
             Some("Grace in Family: dinner at 8")
         );
 
@@ -11270,7 +11312,7 @@ mod tests {
             .unwrap();
         app.handle_events();
         assert_eq!(
-            speak(&mut app).as_deref(),
+            settled(&mut app).as_deref(),
             Some("Grace in Family: Photo, the cake")
         );
 
@@ -11287,7 +11329,7 @@ mod tests {
             .send(incoming_from(ADA, ADA, "m5", "elsewhere"))
             .unwrap();
         app.handle_events();
-        assert_eq!(speak(&mut app), None);
+        assert_eq!(settled(&mut app), None);
     }
 
     #[test]
@@ -11296,18 +11338,32 @@ mod tests {
         app.window_focused = false;
         events.send(incoming_from(ADA, ADA, "m1", "hello")).unwrap();
         app.handle_events();
-        assert_eq!(speak(&mut app), None);
+        assert_eq!(settled(&mut app), None);
         // Nor while the window is hidden or another page is up.
         app.window_focused = true;
         app.window_hidden = true;
         events.send(incoming_from(ADA, ADA, "m2", "hello")).unwrap();
         app.handle_events();
-        assert_eq!(speak(&mut app), None);
+        assert_eq!(settled(&mut app), None);
         app.window_hidden = false;
         app.page = Page::Settings;
         events.send(incoming_from(ADA, ADA, "m3", "hello")).unwrap();
         app.handle_events();
-        assert_eq!(speak(&mut app), None);
+        assert_eq!(settled(&mut app), None);
+    }
+
+    #[test]
+    fn a_single_message_is_spoken_after_the_hold() {
+        let (mut app, _events, _root) = reading(ADA, "Ada");
+        let t0 = Instant::now();
+        app.announce_incoming(ADA, &text_from(ADA, ADA, "m1", "hi"), t0);
+        assert_eq!(speak_at(&mut app, t0), None);
+        assert_eq!(speak_at(&mut app, t0 + Duration::from_millis(500)), None);
+        assert_eq!(
+            speak_at(&mut app, t0 + crate::announcer::QUIET).as_deref(),
+            Some("Ada: hi")
+        );
+        assert_eq!(speak_at(&mut app, t0 + Duration::from_secs(5)), None);
     }
 
     #[test]
@@ -11324,49 +11380,124 @@ mod tests {
                 complete: true,
             })
             .unwrap();
-        for index in 0..5 {
-            events
-                .send(incoming_from(ADA, ADA, &format!("m{index}"), "hello"))
-                .unwrap();
-        }
         app.handle_events();
-        assert_eq!(speak(&mut app).as_deref(), Some("5 new messages from Ada"));
-        assert_eq!(speak(&mut app), None);
+        assert_eq!(settled(&mut app), None);
 
-        // Once spoken, the next message is read in full, not counted on.
-        events
-            .send(incoming_from(ADA, ADA, "m5", "still there?"))
-            .unwrap();
-        app.handle_events();
-        assert_eq!(speak(&mut app).as_deref(), Some("Ada: still there?"));
+        // Five messages 300 ms apart, each in a frame of its own, are one
+        // count a quiet second after the last.
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        for index in 0..5u32 {
+            let at = t0 + ms(300) * index;
+            app.announce_incoming(ADA, &text_from(ADA, ADA, &format!("m{index}"), "hi"), at);
+            assert_eq!(speak_at(&mut app, at), None);
+        }
+        let last = t0 + ms(1200);
+        assert_eq!(speak_at(&mut app, last + ms(900)), None);
+        assert_eq!(
+            speak_at(&mut app, last + crate::announcer::QUIET).as_deref(),
+            Some("5 new messages from Ada")
+        );
+        assert_eq!(speak_at(&mut app, last + ms(5000)), None);
 
         // Mixed senders in a group are only counted.
-        let (mut app, events, _root) = reading(FAMILY, "Family");
+        let (mut app, _events, _root) = reading(FAMILY, "Family");
         for (index, sender) in [ADA, GRACE, ADA].into_iter().enumerate() {
-            events
-                .send(incoming_from(FAMILY, sender, &format!("g{index}"), "hi"))
-                .unwrap();
+            let at = t0 + ms(200) * index as u32;
+            app.announce_incoming(FAMILY, &text_from(FAMILY, sender, "g", "hi"), at);
+            assert_eq!(speak_at(&mut app, at), None);
         }
-        app.handle_events();
-        assert_eq!(speak(&mut app).as_deref(), Some("3 new messages"));
-
-        // A message that comes more than the burst window later stands alone,
-        // even before the earlier one is spoken.
-        events
-            .send(incoming_from(FAMILY, ADA, "g3", "one"))
-            .unwrap();
-        app.handle_events();
-        if let Some(burst) = &mut app.incoming_burst {
-            burst.at = burst.at.checked_sub(Duration::from_secs(2)).unwrap();
-        }
-        events
-            .send(incoming_from(FAMILY, ADA, "g4", "two"))
-            .unwrap();
-        app.handle_events();
         assert_eq!(
-            speak(&mut app).as_deref(),
-            Some("Ada in Family: one. Ada in Family: two")
+            speak_at(&mut app, t0 + ms(400) + crate::announcer::QUIET).as_deref(),
+            Some("3 new messages")
         );
+    }
+
+    #[test]
+    fn a_steady_stream_is_counted_at_the_cap() {
+        let (mut app, _events, _root) = reading(ADA, "Ada");
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let mut spoken = Vec::new();
+        // A message every 400 ms never leaves a quiet second.
+        for index in 0..10u32 {
+            let at = t0 + ms(400) * index;
+            // The repaint `flush_announcements` asked for, if it comes first.
+            if let Some(due) = app.message_hold.deadline().filter(|due| *due <= at) {
+                spoken.extend(speak_at(&mut app, due).map(|text| (due - t0, text)));
+            }
+            app.announce_incoming(ADA, &text_from(ADA, ADA, "m", "more"), at);
+            spoken.extend(speak_at(&mut app, at).map(|text| (at - t0, text)));
+        }
+        // The cap at 2.5 s speaks the seven messages so far; the one at 2.8 s
+        // starts the next hold.
+        assert_eq!(spoken, [(ms(2500), "7 new messages from Ada".to_owned())]);
+        assert_eq!(
+            speak_at(&mut app, t0 + ms(3600) + crate::announcer::QUIET).as_deref(),
+            Some("3 new messages from Ada")
+        );
+    }
+
+    #[test]
+    fn held_messages_are_dropped_on_lock_chat_change_or_focus_loss() {
+        let ms = Duration::from_millis;
+        // Locking between arrival and the due time: nothing then, nor after
+        // the unlock.
+        let root = tempfile::tempdir().unwrap();
+        let settings = Settings {
+            app_lock_hash: Some(crate::app_lock::verifier("fixture password")),
+            ..Settings::default()
+        };
+        let (mut app, _events) = App::headless(AppDirs::under(root.path()), settings);
+        app.app_lock.release();
+        app.chats = vec![Chat::new(ADA.into(), "Ada".into())];
+        app.open_chat = Some(ADA.into());
+        app.window_focused = true;
+        let t0 = Instant::now();
+        app.announce_incoming(ADA, &text_from(ADA, ADA, "m1", "secret"), t0);
+        app.lock_app();
+        // At once, whether or not a frame comes while locked.
+        assert!(app.message_hold.chat().is_none());
+        assert_eq!(speak_at(&mut app, t0 + ms(3000)), None);
+        app.app_lock.release();
+        app.window_focused = true;
+        assert_eq!(speak_at(&mut app, t0 + ms(6000)), None);
+
+        // Switching chats before the due time drops it.
+        let (mut app, _events, _root) = reading(ADA, "Ada");
+        app.announce_incoming(ADA, &text_from(ADA, ADA, "m1", "hi"), t0);
+        app.open_chat = Some(GRACE.into());
+        assert_eq!(speak_at(&mut app, t0 + ms(200)), None);
+        app.open_chat = Some(ADA.into());
+        assert_eq!(speak_at(&mut app, t0 + ms(3000)), None);
+
+        // So does losing focus.
+        app.announce_incoming(ADA, &text_from(ADA, ADA, "m2", "hi"), t0);
+        app.window_focused = false;
+        assert_eq!(speak_at(&mut app, t0 + ms(200)), None);
+        app.window_focused = true;
+        assert_eq!(speak_at(&mut app, t0 + ms(3000)), None);
+    }
+
+    #[test]
+    fn a_backlog_after_a_reconnect_is_not_announced() {
+        let (mut app, events, _root) = reading(ADA, "Ada");
+        // Delivered late after a reconnect: five minutes old.
+        let mut late = text_from(ADA, ADA, "old", "sent while offline");
+        late.timestamp = crate::util::now() - 300;
+        events
+            .send(Event::Incoming {
+                chat: ADA.into(),
+                message: Box::new(late),
+            })
+            .unwrap();
+        app.handle_events();
+        assert_eq!(settled(&mut app), None);
+        events
+            .send(incoming_from(ADA, ADA, "new", "hello"))
+            .unwrap();
+        app.handle_events();
+        assert_eq!(settled(&mut app).as_deref(), Some("Ada: hello"));
     }
 
     #[test]
@@ -11411,6 +11542,47 @@ mod tests {
         events.send(typing(ADA, true, false)).unwrap();
         app.handle_events();
         assert_eq!(speak(&mut app), None);
+    }
+
+    /// G19: "Ada is typing" leaves the tree when Ada pauses, and when her
+    /// typing expires without a pause; the chat's typing indicator goes at
+    /// the same moments.
+    #[test]
+    fn typing_leaves_the_tree_when_the_typer_stops() {
+        let (mut app, events, _root) = reading(FAMILY, "Family");
+        let typing = |composing: bool| Event::Typing {
+            chat: FAMILY.into(),
+            sender: ADA.into(),
+            composing,
+            recording: false,
+        };
+        events.send(typing(true)).unwrap();
+        app.handle_events();
+        assert_eq!(speak(&mut app).as_deref(), Some("Ada is typing"));
+        assert_eq!(app.typing_in(FAMILY).len(), 1);
+        events.send(typing(false)).unwrap();
+        app.handle_events();
+        assert_eq!(speak(&mut app), None, "the pause speaks nothing");
+        assert_eq!(app.announcer.spoken(), ["", ""]);
+        assert!(app.typing_in(FAMILY).is_empty(), "the indicator goes too");
+
+        // Typing again after the stretch, then never pausing: the entry
+        // expires after `TYPING_TIMEOUT`.
+        app.typing_announced.clear();
+        events.send(typing(true)).unwrap();
+        app.handle_events();
+        assert_eq!(speak(&mut app).as_deref(), Some("Ada is typing"));
+        let ctx = egui::Context::default();
+        app.tick(&ctx);
+        assert!(app.announcer.spoken().contains(&"Ada is typing"));
+        for typers in app.typing.values_mut() {
+            for (_, since) in typers.iter_mut() {
+                *since = since.checked_sub(TYPING_TIMEOUT).unwrap();
+            }
+        }
+        app.tick(&ctx);
+        assert!(app.typing_in(FAMILY).is_empty());
+        assert_eq!(app.announcer.spoken(), ["", ""]);
     }
 
     /// A send refused while WhatsApp is not connected never becomes a
@@ -13153,6 +13325,7 @@ mod tests {
         app.events_hidden = false;
         app.active = 0;
         assert!(app.typing_announced.is_empty());
+        app.flush_announcements(Instant::now() + std::time::Duration::from_secs(5));
         app.announcer.show(&egui::Context::default(), true);
         assert_eq!(app.announcer.spoken(), ["", ""]);
     }
@@ -13169,6 +13342,25 @@ mod tests {
         );
         app.apply(Action::SwitchAccount(AccountId::parse("2").unwrap()), &ctx);
         assert!(app.typing_announced.is_empty());
+    }
+
+    /// Messages held back to be spoken as a burst are dropped with their
+    /// account, unspoken.
+    #[test]
+    fn switching_accounts_drops_the_held_messages() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _commands) = two_accounts(directory.path());
+        let ctx = egui::Context::default();
+        app.message_hold.push(
+            "15550007777@s.whatsapp.net",
+            "15550007777@s.whatsapp.net",
+            "Grace".into(),
+            "Grace: Hello".into(),
+            Instant::now(),
+        );
+        assert!(app.message_hold.chat().is_some());
+        app.apply(Action::SwitchAccount(AccountId::parse("2").unwrap()), &ctx);
+        assert!(app.message_hold.chat().is_none());
     }
 
     #[test]
