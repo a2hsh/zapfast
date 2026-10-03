@@ -3163,7 +3163,7 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                 let group = SAMPLES[1].id;
                 app.open_chat = Some(group.into());
                 if part == "private-reply-menu" {
-                    app.open_message_menu = Some("group-photo".into());
+                    app.open_message_menu = message_menu(app, "group-photo");
                     app.scroll_to_bottom = false;
                     app.scroll_anchor = Some("group-photo".into());
                 } else if part == "private-reply-locked-source" {
@@ -3558,9 +3558,9 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
             }
             // With "voice": the menu of a playable voice message, which
             // lists every playback speed.
-            "voice-menu" => app.open_message_menu = Some("ada-voice".into()),
+            "voice-menu" => app.open_message_menu = message_menu(app, "ada-voice"),
             "react-menu" => {
-                app.open_message_menu = Some("ada-link".into());
+                app.open_message_menu = message_menu(app, "ada-link");
                 if let Some(row) = app
                     .conversations
                     .get_mut(SAMPLES[0].id)
@@ -3706,6 +3706,14 @@ fn pin_sample(app: &mut App) {
         });
     }
     app.chat_pins.insert(chat.into(), rows);
+}
+
+/// A request to open `message`'s menu, in the chat that holds it.
+fn message_menu(app: &App, message: &str) -> Option<(crate::model::ChatId, String)> {
+    app.conversations
+        .iter()
+        .find(|(_, conversation)| conversation.message(message).is_some())
+        .map(|(chat, _)| (chat.clone(), message.to_owned()))
 }
 
 fn unlink(app: &mut App) {
@@ -7142,6 +7150,41 @@ mod tests {
         }
     }
 
+    /// Tab and Shift+Tab in a menu the keys opened stop on named items only:
+    /// the menu's background takes clicks but is no Tab stop of its own.
+    #[test]
+    fn tab_in_a_menu_opened_from_the_keyboard_never_lands_on_an_unnamed_node() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        ctx.enable_accesskit();
+        let popup = open_menu_by_keys(&mut app, &ctx);
+        for modifiers in [egui::Modifiers::NONE, egui::Modifiers::SHIFT] {
+            let mut seen = std::collections::HashSet::new();
+            for _ in 0..40 {
+                press_key(&mut app, &ctx, egui::Key::Tab, modifiers);
+                assert!(egui::Popup::is_id_open(&ctx, popup), "Tab closed it");
+                let tree = tree_after(&mut app, &ctx, None);
+                let focused = tree
+                    .nodes
+                    .iter()
+                    .find(|(id, _)| *id == tree.focus)
+                    .map(|(_, node)| node.clone())
+                    .expect("the focused node is in the tree");
+                let named = focused
+                    .label()
+                    .is_some_and(|label| !label.trim().is_empty());
+                assert!(
+                    named,
+                    "Tab with {modifiers:?} landed on an unnamed {:?}",
+                    focused.role()
+                );
+                seen.insert(tree.focus);
+            }
+            assert!(seen.len() > 1, "Tab with {modifiers:?} moved focus");
+        }
+    }
+
     /// The open chat with one fixture message as its newest, the list
     /// focused on it.
     fn focus_fixture_message(app: &mut App, ctx: &egui::Context, content: Content) -> String {
@@ -7446,6 +7489,111 @@ mod tests {
                 "{key:?}: Voice call has focus"
             );
         }
+    }
+
+    /// Escape or a chosen emoji closes a picker opened by E, and focus goes
+    /// back to the list rather than nowhere.
+    #[test]
+    fn the_reaction_picker_from_e_returns_focus_to_the_list() {
+        for key in [egui::Key::Escape, egui::Key::Enter] {
+            let mut app = app();
+            let ctx = egui::Context::default();
+            app.attach(&ctx);
+            render(&mut app, &ctx);
+            let chat = focus_fixture_message(&mut app, &ctx, Content::text("Fixture react"));
+            press_key(&mut app, &ctx, egui::Key::E, egui::Modifiers::NONE);
+            assert!(app.reaction_target.is_some());
+            press_key(&mut app, &ctx, key, egui::Modifiers::NONE);
+            assert!(app.reaction_target.is_none(), "{key:?} closed the picker");
+            assert_eq!(
+                ctx.memory(|memory| memory.focused()),
+                Some(crate::ui::conversation::messages_list_id(&chat)),
+                "{key:?}"
+            );
+        }
+    }
+
+    /// A menu opened from the keyboard and then left by a chat switch, not
+    /// closed, takes no focus when its chat is opened again: opening a chat
+    /// focuses the message field.
+    #[test]
+    fn a_menu_left_by_a_chat_switch_takes_no_focus_later() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        open_menu_by_keys(&mut app, &ctx);
+        let chat = app.open_chat.clone().unwrap();
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::ALT);
+        assert_ne!(app.open_chat.as_ref(), Some(&chat));
+        press_key(&mut app, &ctx, egui::Key::ArrowUp, egui::Modifiers::ALT);
+        assert_eq!(app.open_chat.as_ref(), Some(&chat));
+        assert!(!egui::Popup::is_any_open(&ctx));
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(egui::Id::new("composer-text"))
+        );
+    }
+
+    /// A shortcut that takes focus out of a keyboard-opened menu closes it,
+    /// so it does not stay open unseen holding the arrows and Escape.
+    #[test]
+    fn a_shortcut_out_of_the_message_menu_closes_it() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        open_menu_by_keys(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::L, egui::Modifiers::COMMAND);
+        assert!(!egui::Popup::is_any_open(&ctx), "the menu closed");
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(egui::Id::new("composer-text")),
+            "focus stays where the shortcut put it"
+        );
+    }
+
+    #[test]
+    fn the_message_menus_reaction_buttons_have_names() {
+        let mut app = app();
+        app.settings.reaction_emoji = vec![("🦀".into(), 5)];
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        open_menu_by_keys(&mut app, &ctx);
+        ctx.enable_accesskit();
+        let nodes = accessible_nodes(&mut app, &ctx, Vec::new());
+        for name in ["🦀", "React with any emoji"] {
+            assert!(
+                nodes
+                    .iter()
+                    .any(|(label, role, _)| label == name
+                        && *role == egui::accesskit::Role::Button),
+                "no button named {name}"
+            );
+        }
+    }
+
+    /// A menu asked for in one chat and not yet drawn when the reader moves
+    /// to another chat does not open when they come back.
+    #[test]
+    fn a_pending_message_menu_is_dropped_by_a_chat_change() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let chat = app.open_chat.clone().unwrap();
+        let other = sample_ids()
+            .into_iter()
+            .find(|id| *id != chat)
+            .unwrap()
+            .to_owned();
+        let newest = app.conversations[&chat].messages.last().unwrap().id.clone();
+        app.actions
+            .push(crate::model::Action::OpenMessageMenu(newest));
+        app.actions.push(crate::model::Action::OpenChat(other));
+        render(&mut app, &ctx);
+        app.actions.push(crate::model::Action::OpenChat(chat));
+        render(&mut app, &ctx);
+        assert!(!egui::Popup::is_any_open(&ctx));
+        assert!(app.open_message_menu.is_none());
     }
 
     #[test]
@@ -12120,7 +12268,7 @@ mod tests {
             );
             app.selection = None;
             render(&mut app, &ctx);
-            app.open_message_menu = Some("ada-reply".into());
+            app.open_message_menu = message_menu(&app, "ada-reply");
             render(&mut app, &ctx);
             let nodes = accessible_nodes(&mut app, &ctx, Vec::new());
             assert!(nodes.iter().any(|(label, _, _)| label == "Copy message ID"));
@@ -12686,7 +12834,7 @@ mod tests {
                     media: photo,
                 },
             )];
-            app.open_message_menu = Some("copy-photo".into());
+            app.open_message_menu = Some((chat.clone(), "copy-photo".into()));
             render(&mut app, &ctx);
             let nodes = accessible_nodes(&mut app, &ctx, Vec::new());
             let copy = nodes

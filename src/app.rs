@@ -523,10 +523,14 @@ pub struct App {
     /// The reaction picker came from a message's context menu, which stays
     /// open beside it.
     pub reaction_beside_menu: bool,
-    /// One-shot: open this message's context menu when its bubble is next
-    /// drawn. Set by the message list's keys that open it, and by demo
-    /// pages; the menu then stays open until it is closed.
-    pub open_message_menu: Option<String>,
+    /// One-shot: open this message's context menu, by chat and message id,
+    /// when its bubble is next drawn. Set by the message list's keys that
+    /// open it, and by demo pages; the menu then stays open until it is
+    /// closed. A chat or page change drops a request not yet drawn.
+    pub open_message_menu: Option<(ChatId, String)>,
+    /// The reaction picker came from the message list's E: closing it
+    /// returns focus to the list.
+    pub reaction_from_list: bool,
     /// Demo/test: keep this chat row's context menu open.
     #[cfg(any(test, feature = "demo"))]
     pub open_chat_menu: Option<ChatId>,
@@ -1386,6 +1390,7 @@ impl App {
             reaction_anchor: None,
             reaction_beside_menu: false,
             open_message_menu: None,
+            reaction_from_list: false,
             #[cfg(any(test, feature = "demo"))]
             open_chat_menu: None,
             #[cfg(any(test, feature = "demo"))]
@@ -1739,6 +1744,11 @@ impl App {
         // The newest message the keys followed goes with it.
         self.message_cursor.clear();
         self.cursor_followed = None;
+        // So was a message menu asked for and not drawn yet.
+        self.open_message_menu = None;
+        // A reaction picker the message list opened belongs to the chat
+        // left behind.
+        self.reaction_from_list = false;
     }
 
     fn add_account(&mut self) {
@@ -5250,6 +5260,9 @@ impl App {
         if self.open_chat.as_deref() != Some(id.as_str()) {
             self.reaction_target = None;
             self.reaction_anchor = None;
+            self.reaction_from_list = false;
+            // A menu asked for in the chat being left is not opened later.
+            self.open_message_menu = None;
             self.composer_tools_open = false;
             self.emoji_jump = None;
             self.jump_highlight = None;
@@ -6186,6 +6199,11 @@ impl App {
                 if matches!(self.dialog, Some(Dialog::NewContact)) {
                     self.cancel_contact_dialog_request();
                 }
+                if self.page != page {
+                    // A menu asked for on the page being left is not opened
+                    // later.
+                    self.open_message_menu = None;
+                }
                 self.page = page;
                 self.dialog = None;
                 self.emoji_start = None;
@@ -6365,6 +6383,7 @@ impl App {
                 // A narrow window's Back from a picked call returns to the
                 // call history.
                 self.picked_call = None;
+                self.open_message_menu = None;
                 if let Some(chat) = self.open_chat.take() {
                     self.save_attachment_draft(&chat);
                     self.stop_composing(&chat);
@@ -7337,6 +7356,7 @@ impl App {
                 self.reaction_target = None;
                 self.reaction_anchor = None;
                 self.emoji_jump = None;
+                self.return_from_reaction_picker(was_reaction);
                 if !was_reaction {
                     self.refocus_composer(ctx);
                 }
@@ -7345,7 +7365,9 @@ impl App {
                 chat,
                 message,
                 beside_menu,
+                from_list,
             } => {
+                self.reaction_from_list = from_list;
                 self.focus_composer = false;
                 self.emoji_start = None;
                 self.mention_start = None;
@@ -7591,6 +7613,9 @@ impl App {
                 message,
                 emoji,
             } => {
+                // Only a reaction chosen in the open picker hands focus back
+                // to the list that opened it.
+                let picker_open = self.reaction_target.is_some();
                 if !emoji.is_empty() {
                     let count = self
                         .settings
@@ -7616,6 +7641,7 @@ impl App {
                 );
                 self.reaction_target = None;
                 self.reaction_anchor = None;
+                self.return_from_reaction_picker(picker_open);
                 self.backend.send(Command::React {
                     chat,
                     message,
@@ -8032,8 +8058,10 @@ impl App {
             Action::OpenMessageMenu(id) => {
                 // The bubble opens its menu when it is next drawn; the
                 // current message is brought into view so that it is.
-                self.open_message_menu = Some(id);
-                self.reveal_cursor = true;
+                if let Some(chat) = self.open_chat.clone() {
+                    self.open_message_menu = Some((chat, id));
+                    self.reveal_cursor = true;
+                }
             }
             Action::MessageMenuOpened => self.open_message_menu = None,
             Action::FocusMessages => {
@@ -9246,6 +9274,20 @@ impl App {
             .take_while(|message| voice_note(message))
             .find(|message| !message.from_me && !self.played_told.contains(&message.id))
             .map(|message| message.id.clone())
+    }
+
+    /// A reaction picker opened by the message list's E hands focus back to
+    /// the list as it closes, by Escape or a chosen emoji: egui's Escape has
+    /// already cleared focus, and nothing else would take it. `picker_open`
+    /// says the picker was still open: one closed another way (the emoji tab,
+    /// the composer tools, a cleared chat) leaves the flag behind, and a
+    /// later reaction from a chip or the menu's row is not the picker's.
+    /// The flag is dropped either way.
+    fn return_from_reaction_picker(&mut self, picker_open: bool) {
+        if std::mem::take(&mut self.reaction_from_list) && picker_open {
+            self.focus_composer = false;
+            self.focus_messages = true;
+        }
     }
 
     /// Makes `message` the current one in `chat`'s message list, where the
@@ -11537,6 +11579,75 @@ mod tests {
         app.focus_messages = true;
         app.apply(Action::SwitchAccount(AccountId::parse("2").unwrap()), &ctx);
         assert!(!app.focus_messages);
+    }
+
+    /// A reaction picker the message list opened is not handed back to the
+    /// list of another account's chat.
+    #[test]
+    fn switching_accounts_forgets_the_lists_reaction_picker() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _commands) = two_accounts(directory.path());
+        let ctx = egui::Context::default();
+        app.reaction_from_list = true;
+        app.apply(Action::SwitchAccount(AccountId::parse("2").unwrap()), &ctx);
+        assert!(!app.reaction_from_list);
+    }
+
+    /// A reaction picker the list opened and something else closed (the
+    /// emoji tab, the composer tools, the chat cleared on the phone) has no
+    /// claim on focus: a later reaction from a chip leaves focus alone.
+    #[test]
+    fn a_reaction_after_the_lists_picker_closed_elsewhere_leaves_focus_alone() {
+        let chat = "peer@s.whatsapp.net";
+        for close in ["emoji tab", "composer tools", "chat cleared"] {
+            let directory = tempfile::tempdir().unwrap();
+            let (mut app, _events) =
+                App::headless(AppDirs::under(directory.path()), Settings::default());
+            app.chats.push(Chat::new(chat.into(), "Peer".into()));
+            app.conversations.entry(chat.into()).or_default().merge(
+                vec![message(chat, "m1", 100), message(chat, "m2", 200)],
+                false,
+            );
+            app.open_chat = Some(chat.into());
+            let ctx = egui::Context::default();
+            app.apply(
+                crate::ui::conversation::open_reaction_picker_action(chat, "m1", true),
+                &ctx,
+            );
+            assert!(app.reaction_target.is_some() && app.reaction_from_list);
+            match close {
+                "emoji tab" => app.apply(Action::TogglePicker(PickerTab::Emoji), &ctx),
+                "composer tools" => app.apply(Action::SetComposerTools(true), &ctx),
+                _ => app.handle_chat_cleared(chat, 100, true),
+            }
+            assert_eq!(app.reaction_target, None, "{close} closes the picker");
+            app.focus_messages = false;
+            app.apply(
+                Action::React {
+                    chat: chat.into(),
+                    message: "m2".into(),
+                    emoji: "👍".into(),
+                },
+                &ctx,
+            );
+            assert!(
+                !app.focus_messages,
+                "after the {close}, a chip's reaction does not move focus to the list"
+            );
+            assert!(!app.reaction_from_list, "{close}: the flag is gone");
+        }
+    }
+
+    /// A message menu asked for and not drawn yet is not opened on another
+    /// account's chat.
+    #[test]
+    fn switching_accounts_drops_a_pending_message_menu() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _commands) = two_accounts(directory.path());
+        let ctx = egui::Context::default();
+        app.open_message_menu = Some(("15550007777@s.whatsapp.net".into(), "m".into()));
+        app.apply(Action::SwitchAccount(AccountId::parse("2").unwrap()), &ctx);
+        assert!(app.open_message_menu.is_none());
     }
 
     #[test]

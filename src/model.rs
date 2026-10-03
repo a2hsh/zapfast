@@ -2550,10 +2550,13 @@ pub enum Action {
     /// Opens the full emoji picker to react to a message. `beside_menu` keeps
     /// the message's context menu open next to it, as when the picker comes
     /// from the menu's "+"; the hover button opens the picker alone.
+    /// `from_list`: opened by the message list's E, so closing the picker
+    /// returns focus to the list.
     OpenReactionPicker {
         chat: ChatId,
         message: String,
         beside_menu: bool,
+        from_list: bool,
     },
     /// Inserts an emoji at the composer cursor.
     InsertEmoji(String),
