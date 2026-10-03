@@ -4035,17 +4035,10 @@ pub(crate) fn open_reaction_picker_action(chat: &str, message: &str, from_list: 
     }
 }
 
-/// The screen-reader label names whose message the hover control reacts to, so
-/// a user can tell the controls apart. The visual tooltip stays a short "React".
-fn reaction_button_label(from_me: bool, sender: &str) -> String {
-    if from_me {
-        "React to your message".to_owned()
-    } else {
-        format!("React to {sender}'s message")
-    }
-}
-
 /// Draws a Smile control beside a hovered message and opens the existing picker.
+/// These hover controls are for the pointer only. They use `Sense::CLICK`, which
+/// is not focusable and adds no accessibility node; the message menu and the
+/// message keys give keyboard and screen-reader users the same actions.
 fn reaction_affordance(
     ui: &mut egui::Ui,
     view: &View<'_>,
@@ -4085,13 +4078,7 @@ fn reaction_affordance(
         .data_mut(|data| data.insert_temp(bubble.id.with("react-rect"), rect));
 
     // Acquire under the same layer as the bubble so the row strip keeps clicks.
-    let response = ui.interact(rect, bubble.id.with("react"), Sense::click());
-    let sender = (view.names_or)(&message.sender, message.sender_name.as_deref());
-    let label = reaction_button_label(message.from_me, &sender);
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &label)
-    });
-    theme::reveal_focus(&response);
+    let response = ui.interact(rect, bubble.id.with("react"), Sense::CLICK);
     // Reply sits one step further out, where the chat accepts messages.
     let can_reply = view.chat.can_send()
         && !matches!(
@@ -4112,7 +4099,7 @@ fn reaction_affordance(
         rect
     };
     let revealed = reaction_affordance_visible(pointer, shown, reach);
-    if ui.is_rect_visible(rect) && (response.has_focus() || (uncovered && revealed)) {
+    if ui.is_rect_visible(rect) && uncovered && revealed {
         floating_circle(ui, &view.palette, rect, response.hovered());
         theme::paint_icon(
             ui,
@@ -4140,12 +4127,8 @@ fn reaction_affordance(
     if !reply_fits {
         return;
     }
-    let reply = ui.interact(reply_rect, bubble.id.with("reply"), Sense::click());
-    reply.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Reply")
-    });
-    theme::reveal_focus(&reply);
-    if ui.is_rect_visible(reply_rect) && (reply.has_focus() || (uncovered && revealed)) {
+    let reply = ui.interact(reply_rect, bubble.id.with("reply"), Sense::CLICK);
+    if ui.is_rect_visible(reply_rect) && uncovered && revealed {
         floating_circle(ui, &view.palette, reply_rect, reply.hovered());
         theme::paint_icon(
             ui,
@@ -11330,15 +11313,6 @@ mod tests {
             Action::OpenReactionPicker { chat, message, beside_menu: false, from_list: false }
                 if chat == "chat@example" && message == "message-42"
         ));
-    }
-
-    #[test]
-    fn reaction_button_label_names_whose_message_it_reacts_to() {
-        assert_eq!(reaction_button_label(true, "Ada"), "React to your message");
-        assert_eq!(
-            reaction_button_label(false, "Ada"),
-            "React to Ada's message"
-        );
     }
 
     #[test]
