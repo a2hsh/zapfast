@@ -8326,6 +8326,38 @@ mod tests {
         }
     }
 
+    /// A group call's menu has no choice, only why: opened from the keys,
+    /// that row takes focus and says it, so the reader does not land nowhere.
+    #[test]
+    fn a_group_call_entrys_menu_focuses_why_it_has_no_choice() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let chat = focus_fixture_message(
+            &mut app,
+            &ctx,
+            Content::Call {
+                video: false,
+                status: crate::model::CallStatus::Missed,
+                duration: 0,
+                group: true,
+            },
+        );
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        let popup = crate::ui::conversation::bubble_id(&chat, "key-fixture").with("popup");
+        assert!(egui::Popup::is_id_open(&ctx, popup), "the call's menu");
+        assert_eq!(
+            focused_layer(&ctx).map(|layer| layer.id),
+            Some(popup),
+            "its row has focus"
+        );
+        assert_eq!(
+            focused_label(&mut app, &ctx).as_deref(),
+            Some("Group calls happen on the phone")
+        );
+    }
+
     /// Escape or a chosen emoji closes a picker opened by E, and focus goes
     /// back to the list rather than nowhere.
     #[test]
@@ -15012,12 +15044,8 @@ mod tests {
         let count = |nodes: &[(String, egui::accesskit::Role, egui::Pos2)], label: &str| {
             nodes.iter().filter(|(name, _, _)| name == label).count()
         };
-        let labels = [
-            "Tell me more",
-            "Choose a session",
-            "Copy invitation code",
-            "Open registration form",
-        ];
+        let labels = ["Tell me more", "Choose a session", "Copy invitation code"];
+        let unavailable = "Open registration form, unavailable: Open this option in WhatsApp Web or on your phone";
         let start = || {
             let ctx = egui::Context::default();
             ctx.enable_accesskit();
@@ -15033,7 +15061,7 @@ mod tests {
         app.open_message_menu = message_menu(&app, "interactive-card");
         render(&mut app, &ctx);
         let after = accessible_nodes(&mut app, &ctx, Vec::new());
-        for label in labels {
+        for label in labels.into_iter().chain([unavailable]) {
             assert_eq!(
                 count(&after, label),
                 count(&before, label),
@@ -15055,8 +15083,9 @@ mod tests {
                 "{label} is a menu entry"
             );
         }
-        // The unavailable button's entry is disabled, in the menu and in the
-        // card alike.
+        // The unavailable button's entry says why in its name, and is
+        // disabled, as the card's own row is.
+        assert_eq!(count(&after, unavailable), 1, "the entry names its reason");
         let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -15073,16 +15102,29 @@ mod tests {
         );
         output.textures_delta.clear();
         let tree = output.platform_output.accesskit_update.unwrap();
-        let states: Vec<bool> = tree
+        let states: Vec<(bool, bool)> = tree
             .nodes
             .iter()
             .filter(|(_, node)| {
-                node.label() == Some("Open registration form")
-                    && node.role() == egui::accesskit::Role::Button
+                node.role() == egui::accesskit::Role::Button
+                    && (node.label() == Some(unavailable)
+                        || node.label() == Some("Open registration form"))
             })
-            .map(|(_, node)| node.is_disabled())
+            .map(|(_, node)| (node.is_disabled(), node.label() == Some(unavailable)))
             .collect();
-        assert_eq!(states, [true, true], "disabled in the card and the menu");
+        assert_eq!(states.len(), 2, "{states:?}");
+        assert!(states.iter().all(|(disabled, _)| *disabled), "{states:?}");
+        // The disabled row takes the click: nothing under the menu, which
+        // the keys open over the message, acts.
+        let commands = click_entry(&mut app, &ctx, unavailable);
+        assert!(
+            !commands.iter().any(|command| matches!(
+                command,
+                egui::OutputCommand::OpenUrl(_) | egui::OutputCommand::CopyText(_)
+            )),
+            "a click on a disabled row reached the card below: {commands:?}"
+        );
+        assert!(app.dialog.is_none());
         // Chosen from the keys, an entry does what its button's click does.
         let (mut app, ctx) = start();
         let choose = |app: &mut App, label: &str| {
@@ -15102,6 +15144,68 @@ mod tests {
             app.dialog,
             Some(Dialog::InteractiveList { button: 1, .. })
         ));
+    }
+
+    /// Clicks the centre of the menu entry named `label` and returns what the
+    /// frames asked the platform to do.
+    fn click_entry(app: &mut App, ctx: &egui::Context, label: &str) -> Vec<egui::OutputCommand> {
+        let nodes = accessible_nodes(app, ctx, Vec::new());
+        // A card's own button rows carry the same names: the entry is the one
+        // that is not at a row's place, in the menu's layer above the chat.
+        let rows: Vec<egui::Pos2> = (0..8usize)
+            .filter_map(|index| {
+                ctx.data(|data| {
+                    data.get_temp::<egui::Rect>(
+                        crate::ui::conversation::bubble_id(SAMPLES[0].id, "interactive-card")
+                            .with(("interactive-button", index)),
+                    )
+                })
+            })
+            .map(|rect| rect.center())
+            .collect();
+        let (_, _, pos) = nodes
+            .iter()
+            .find(|(name, _, pos)| {
+                name == label
+                    && !rows.iter().any(|row| row.distance(*pos) < 1.0)
+                    && ctx
+                        .layer_id_at(*pos)
+                        .is_some_and(|layer| layer.order == egui::Order::Foreground)
+            })
+            .unwrap_or_else(|| panic!("no menu entry named {label}"))
+            .clone();
+        let press = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut commands = Vec::new();
+        for events in [
+            vec![egui::Event::PointerMoved(pos), press(true)],
+            vec![press(false)],
+            // The app applies the click's actions at the start of a frame.
+            Vec::new(),
+        ] {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1180.0, 780.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let ctx = ui.ctx().clone();
+                    app.background_frame(&ctx);
+                    app.frame_ui(ui);
+                },
+            );
+            output.textures_delta.clear();
+            commands.extend(output.platform_output.commands);
+        }
+        commands
     }
 
     /// Opening the log hands it to the worker, which waits to see it open or
