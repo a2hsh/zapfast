@@ -11410,8 +11410,13 @@ fn recording_strip(app: &mut App, ui: &mut egui::Ui) {
                 );
                 // The message field's focus is Send's while the recorder
                 // stands in for the field: when recording starts, and when
-                // a chat opens with it running.
-                if app.focus_composer && app.image_preview.is_none() {
+                // a chat opens with it running. Only for the keys or a
+                // screen reader: with the pointer nothing is focused, as
+                // upstream, and the request waits for the field.
+                if app.focus_composer
+                    && app.image_preview.is_none()
+                    && super::keys::keyboard_or_reader(ui.ctx())
+                {
                     app.focus_composer = false;
                     send.request_focus();
                 }
@@ -11421,6 +11426,35 @@ fn recording_strip(app: &mut App, ui: &mut egui::Ui) {
             });
         },
     );
+}
+
+/// Why a chat's composer takes no messages, in the words it shows in the
+/// field's place, or `None` when it does take them.
+pub(crate) fn read_only_reason(app: &App, chat: &Chat) -> Option<std::borrow::Cow<'static, str>> {
+    use crate::i18n::gettext;
+    if chat.can_send() {
+        return None;
+    }
+    let locale = app.locale;
+    Some(if chat.kind == crate::model::ChatKind::Broadcast {
+        if chat.left {
+            gettext(locale, "You left this channel")
+        } else {
+            gettext(locale, "Channels are read-only in ZapFast")
+        }
+    } else if chat.locked {
+        gettext(locale, "Locked chats are read-only in ZapFast")
+    } else {
+        // A group we left, here or as the phone says, rather than the admins.
+        let ours = app.our_ids();
+        let left = chat.left
+            || (!ours.is_empty() && !chat.participants.is_empty() && !chat.lists_any(&ours));
+        if left {
+            gettext(locale, "You left this group")
+        } else {
+            gettext(locale, "Only admins can send messages")
+        }
+    })
 }
 
 /// The recorder's toolbar: Discard and Send.

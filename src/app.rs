@@ -1789,7 +1789,7 @@ impl App {
         self.forget_unstaged_pictures();
         self.reply_to = None;
         self.editing = None;
-        self.recording = None;
+        self.discard_recording();
         self.emoji_start = None;
         self.mention_start = None;
     }
@@ -1890,7 +1890,7 @@ impl App {
         self.motion_playing = None;
         self.voice_chat = None;
         self.voice_wanted = None;
-        self.recording = None;
+        self.discard_recording();
         self.image_preview = None;
         self.viewer_media.clear();
         self.viewer_media_chat = None;
@@ -3007,7 +3007,7 @@ impl App {
             self.mention_start = None;
             self.emoji_jump = None;
             self.dialog = None;
-            self.recording = None;
+            self.discard_recording();
             self.player.stop();
         }
     }
@@ -6244,6 +6244,35 @@ impl App {
             if let Some(conversation) = self.conversations.get_mut(&id) {
                 conversation.key_scroll = None;
             }
+            // A recording carries on into the chat opened, and is sent there:
+            // a reader who never sees the header change hears where it goes,
+            // and, in a chat that takes no messages, the composer's reason.
+            // The chat's name is cleared from the tree on a lock or an
+            // account switch, as messages are.
+            if self.recording.is_some() {
+                let name = self
+                    .chat(&id)
+                    .map_or_else(|| self.display_name(&id), |chat| self.chat_title(chat));
+                let name = crate::a11y::spoken(crate::a11y::without_push_marker(&name));
+                let refused = self
+                    .chat(&id)
+                    .and_then(|chat| crate::ui::conversation::read_only_reason(self, chat));
+                let text = match refused {
+                    Some(reason) => crate::a11y::fill(
+                        &crate::i18n::gettext(
+                            self.locale,
+                            "Recording continues in {chat}. {reason}",
+                        ),
+                        &[("chat", &name), ("reason", &reason)],
+                    ),
+                    None => crate::a11y::fill(
+                        &crate::i18n::gettext(self.locale, "Recording continues in {chat}"),
+                        &[("chat", &name)],
+                    ),
+                };
+                self.announcer
+                    .say(crate::announcer::Category::ChatStatus, text);
+            }
         }
         self.emoji_start = None;
         self.mention_start = None;
@@ -8309,23 +8338,25 @@ impl App {
                     #[cfg(not(any(test, feature = "demo")))]
                     let recorder = Recorder::start(self.waker.clone());
                     self.recording = Some(recorder);
-                    // The recorder stands in for the message field: its Send
-                    // takes the field's focus. A microphone that cannot
-                    // start says so through `tick_audio`'s error.
-                    self.focus_composer = true;
-                    self.announcer.say(
-                        crate::announcer::Category::Status,
-                        crate::i18n::gettext(self.locale, "Recording"),
-                    );
+                    // For the keys or a screen reader, the recorder stands in
+                    // for the message field: its Send takes focus, and the
+                    // toolbar focus enters, named Recording, says so. Spoken
+                    // as well, the word would be heard twice, or cut off by
+                    // the focus change. With the pointer nothing is focused,
+                    // as upstream. A microphone that cannot start says so
+                    // through `tick_audio`'s error.
+                    if crate::ui::keys::keyboard_or_reader(ctx) {
+                        self.focus_composer = true;
+                    } else {
+                        self.announcer.say(
+                            crate::announcer::Category::Status,
+                            crate::i18n::gettext(self.locale, "Recording"),
+                        );
+                    }
                 }
             }
             Action::CancelRecording => {
-                if self.recording.take().is_some() {
-                    self.announcer.say(
-                        crate::announcer::Category::Status,
-                        crate::i18n::gettext(self.locale, "Recording discarded"),
-                    );
-                }
+                self.discard_recording();
                 self.refocus_composer(ctx);
             }
             Action::SendRecording => {
@@ -10790,7 +10821,19 @@ impl App {
         }
     }
 
-    /// Stops and sends a recording unless it is under one second. With no
+    /// Drops a running recording and says so: a reader never sees the
+    /// recorder go, whether Discard, an account switch or a chat that is gone
+    /// took it. Locking stays silent, as everything behind the lock does.
+    fn discard_recording(&mut self) {
+        if self.recording.take().is_some() {
+            self.announcer.say(
+                crate::announcer::Category::Status,
+                crate::i18n::gettext(self.locale, "Recording discarded"),
+            );
+        }
+    }
+
+    /// Stops and sends a recording unless it is under half a second. With no
     /// recorder running, sends the open chat's refused voice message again;
     /// it quotes whatever the reply banner shows now, so a reply the worker
     /// refused for its missing original is only sent unquoted after the
@@ -10830,10 +10873,29 @@ impl App {
             return;
         };
         let Some(chat) = self.open_chat.clone() else {
+            // Nowhere to send it: dropped, and said so.
+            self.recording = Some(recorder);
+            self.discard_recording();
             return;
         };
+        // A chat that takes no messages would drop it: the recording goes on,
+        // and the reader hears why, to send it from another chat.
+        if let Some(reason) = self
+            .chat(&chat)
+            .and_then(|open| crate::ui::conversation::read_only_reason(self, open))
+        {
+            self.recording = Some(recorder);
+            self.announcer
+                .say(crate::announcer::Category::Status, reason);
+            return;
+        }
         match recorder.finish() {
-            Ok(samples) if samples.len() < crate::voice::RATE as usize / 2 => {}
+            Ok(samples) if samples.len() < crate::voice::RATE as usize / 2 => {
+                self.announcer.say(
+                    crate::announcer::Category::Status,
+                    crate::i18n::gettext(self.locale, "Recording too short, not sent"),
+                );
+            }
             Ok(samples) => {
                 if self
                     .reply_to
@@ -14933,6 +14995,50 @@ mod tests {
         );
     }
 
+    /// A recording dropped because its chat is gone says so, as Discard
+    /// does: deleted here, or by the phone.
+    #[test]
+    fn a_chat_removed_while_recording_says_the_recording_is_discarded() {
+        let (mut app, events, _root) = reading(ADA, "Ada");
+        app.recording = Some(crate::audio::Recorder::rehearsal());
+        events
+            .send(Event::ChatRemoved { chat: ADA.into() })
+            .unwrap();
+        app.handle_events();
+        assert!(app.recording.is_none());
+        assert_eq!(speak(&mut app).as_deref(), Some("Recording discarded"));
+    }
+
+    /// A recording asked to be sent with no chat open has nowhere to go: it
+    /// is dropped, and the reader hears so.
+    #[test]
+    fn sending_a_recording_with_no_chat_open_says_it_is_discarded() {
+        let (mut app, _events, _root) = reading(ADA, "Ada");
+        app.open_chat = None;
+        app.recording = Some(crate::audio::Recorder::rehearsal());
+        app.apply(Action::SendRecording, &egui::Context::default());
+        assert!(app.recording.is_none());
+        assert_eq!(speak(&mut app).as_deref(), Some("Recording discarded"));
+    }
+
+    /// A chat that takes no messages keeps the recording: a send there
+    /// would lose it, so the reader hears why and can open another chat.
+    #[test]
+    fn sending_a_recording_into_a_read_only_chat_keeps_it() {
+        let (mut app, _events, _root) = reading(ADA, "Ada");
+        app.chats[0].read_only = true;
+        app.recording = Some(crate::audio::Recorder::recorded_fixture(vec![
+            0.0;
+            crate::voice::RATE
+                as usize
+        ]));
+        app.apply(Action::SendRecording, &egui::Context::default());
+        assert!(app.recording.is_some(), "still recording");
+        assert_eq!(
+            speak(&mut app).as_deref(),
+            Some("Only admins can send messages")
+        );
+    }
     /// Demo and test runs share the machine with a linked ZapFast, whose real
     /// taskbar badge they must not overwrite.
     /// A background page is not an answer to a request the reader made.
