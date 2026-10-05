@@ -810,6 +810,10 @@ with several accounts, the account's name comes before ZapFast. While
 ZapFast is locked the title is only "ZapFast", and a locked chat's name
 never appears in it.
 
+The message input is named after the open chat, "Type a message to Ada" or
+"Type a message to group Rust Berlin", so opening a chat from the keyboard
+says whose chat it is.
+
 ZapFast announces confirmations, errors, connection changes and history loading
 through the screen reader without moving focus. While the window is focused,
 the open chat also announces new messages with their sender, a quick burst as

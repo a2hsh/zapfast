@@ -1857,7 +1857,25 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                                     ui.ctx().request_discard("composer height changed");
                                 }
                                 let response = output.response.response.clone().tab_stop(Stop::Composer);
-                                ui.ctx().accesskit_node_builder(response.id, |node| node.set_label("Message"));
+                                // Named after the chat, as the header names it,
+                                // so opening a chat from the keyboard, which
+                                // lands here, says whose chat it is. Built only
+                                // while a screen reader is attached. The name
+                                // already says "Type a message", so that hint
+                                // is no placeholder too: a screen reader would
+                                // read it after the name. "Add a caption" says
+                                // more, and stays.
+                                let captioning = !app.pending.is_empty();
+                                ui.ctx().accesskit_node_builder(response.id, |node| {
+                                    node.set_label(crate::a11y::composer_label(
+                                        app.locale,
+                                        &app.chat_title(chat),
+                                        chat.is_group(),
+                                    ));
+                                    if !captioning {
+                                        node.clear_placeholder();
+                                    }
+                                });
                                 if response.changed() {
                                     app.actions.push(Action::Composing {
                                         chat: chat.id.clone(),

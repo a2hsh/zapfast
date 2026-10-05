@@ -104,6 +104,28 @@ pub fn messages_list_label(locale: Locale, title: &str, group: bool) -> String {
     fill(&template, &[("name", &spoken(without_push_marker(title)))])
 }
 
+/// The message field's name: "Type a message to Ahmed" in a one-to-one chat,
+/// "Type a message to group Family" in a group, so a reader who opens a chat
+/// from the keyboard and lands in the field hears whose chat it is. Only the
+/// name: the field still shows its hint ("Type a message", "Add a caption").
+/// A name that is all marker or blank falls back to the hint.
+pub fn composer_label(locale: Locale, title: &str, group: bool) -> String {
+    let name = spoken(without_push_marker(title));
+    if name.is_empty() {
+        return gettext(locale, "Type a message").into_owned();
+    }
+    let template = if group {
+        // Translators: the message field's name for a screen reader in a
+        // group chat; {name} is the group's name.
+        gettext(locale, "Type a message to group {name}")
+    } else {
+        // Translators: the message field's name for a screen reader in a
+        // one-to-one chat; {name} is the person's name.
+        gettext(locale, "Type a message to {name}")
+    };
+    fill(&template, &[("name", &name)])
+}
+
 /// The chat header's name for a screen reader: the chat's name, then the
 /// line under it when there is one ("online", "last seen today at 10:32",
 /// "typing…", a group's members), as the header shows them.
@@ -1944,6 +1966,35 @@ mod tests {
             messages_list_label(en, "A{name}B", false),
             "Messages with A{name}B"
         );
+    }
+
+    /// The message field says whose chat it is in, as the header names it,
+    /// without the push-name marker, and with "group" before a group's name.
+    #[test]
+    fn the_message_field_is_named_after_its_chat() {
+        let en = Locale::default();
+        assert_eq!(
+            composer_label(en, "Ahmed", false),
+            "Type a message to Ahmed"
+        );
+        assert_eq!(
+            composer_label(en, "Family", true),
+            "Type a message to group Family"
+        );
+        assert_eq!(composer_label(en, "~Ana", false), "Type a message to Ana");
+        assert_eq!(composer_label(en, "~ Ana", false), "Type a message to Ana");
+        assert_eq!(
+            composer_label(en, "Family\nand friends", true),
+            "Type a message to group Family and friends"
+        );
+        // A name holding braces is never filled again.
+        assert_eq!(
+            composer_label(en, "A{name}B", false),
+            "Type a message to A{name}B"
+        );
+        // Nothing left to name: the field's own hint, not a dangling "to".
+        assert_eq!(composer_label(en, "~", false), "Type a message");
+        assert_eq!(composer_label(en, " ", true), "Type a message");
     }
 
     #[test]

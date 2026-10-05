@@ -6672,6 +6672,70 @@ mod tests {
         assert_eq!(list.label(), Some("Messages in Rust Berlin"));
     }
 
+    /// The message field's name says whose chat it is, so landing in it
+    /// after opening a chat from the keyboard is never only "Message". The
+    /// hint it shows, "Type a message", which the name already says, is no
+    /// placeholder as well, or a screen reader would read it after the name;
+    /// "Add a caption" says more, and stays. The name follows a switch.
+    #[test]
+    fn the_message_field_is_named_after_the_open_chat() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        ctx.enable_accesskit();
+        let composer = egui::Id::new("composer-text").accesskit_id();
+        let field = |app: &mut App| {
+            let mut output = ctx.run_ui(Default::default(), |ui| app.frame_ui(ui));
+            output.textures_delta.clear();
+            let tree = output.platform_output.accesskit_update.unwrap();
+            tree.nodes
+                .iter()
+                .find(|(id, _)| *id == composer)
+                .expect("the message field is in the tree")
+                .1
+                .clone()
+        };
+
+        assert_eq!(app.open_chat.as_deref(), Some(SAMPLES[0].id));
+        let node = field(&mut app);
+        assert_eq!(node.role(), egui::accesskit::Role::MultilineTextInput);
+        assert_eq!(node.label(), Some("Type a message to Ada Lovelace"));
+        assert_eq!(node.placeholder(), None);
+
+        app.actions
+            .push(crate::model::Action::OpenChat(SAMPLES[1].id.into()));
+        render(&mut app, &ctx);
+        let node = field(&mut app);
+        assert_eq!(node.label(), Some("Type a message to group Rust Berlin"));
+        assert_eq!(node.placeholder(), None);
+        // An attachment waiting for its caption: the hint says so.
+        let (photo, _) = sample_files(&app);
+        app.stage(crate::app::Pending::File(photo));
+        render(&mut app, &ctx);
+        let node = field(&mut app);
+        assert_eq!(node.label(), Some("Type a message to group Rust Berlin"));
+        assert_eq!(node.placeholder(), Some("Add a caption"));
+        app.pending.clear();
+
+        // Known only by the name on their own profile: the screen keeps the
+        // "~", the name read aloud does not.
+        app.contacts.insert(
+            SAMPLES[0].id.into(),
+            crate::model::Contact {
+                id: SAMPLES[0].id.into(),
+                full_name: None,
+                first_name: None,
+                push_name: Some("Ada".into()),
+            },
+        );
+        assert_eq!(app.chat_title(app.chat(SAMPLES[0].id).unwrap()), "~Ada");
+        app.actions
+            .push(crate::model::Action::OpenChat(SAMPLES[0].id.into()));
+        render(&mut app, &ctx);
+        assert_eq!(field(&mut app).label(), Some("Type a message to Ada"));
+    }
+
     /// A message whose file is not simply there ends its label with why: not
     /// downloaded yet, downloading, or the error the bubble shows.
     #[test]
@@ -22426,7 +22490,7 @@ mod tests {
             .expect("accessibility tree");
         tree.nodes
             .iter()
-            // The composer field is also labelled "Message"; match buttons only.
+            // Another node may share the label; match buttons only.
             .find(|(_, node)| {
                 node.role() == egui::accesskit::Role::Button && node.label() == Some(label)
             })
