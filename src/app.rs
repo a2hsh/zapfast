@@ -8309,10 +8309,23 @@ impl App {
                     #[cfg(not(any(test, feature = "demo")))]
                     let recorder = Recorder::start(self.waker.clone());
                     self.recording = Some(recorder);
+                    // The recorder stands in for the message field: its Send
+                    // takes the field's focus. A microphone that cannot
+                    // start says so through `tick_audio`'s error.
+                    self.focus_composer = true;
+                    self.announcer.say(
+                        crate::announcer::Category::Status,
+                        crate::i18n::gettext(self.locale, "Recording"),
+                    );
                 }
             }
             Action::CancelRecording => {
-                self.recording = None;
+                if self.recording.take().is_some() {
+                    self.announcer.say(
+                        crate::announcer::Category::Status,
+                        crate::i18n::gettext(self.locale, "Recording discarded"),
+                    );
+                }
                 self.refocus_composer(ctx);
             }
             Action::SendRecording => {

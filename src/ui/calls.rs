@@ -491,6 +491,11 @@ pub fn list_keys(app: &mut App, ctx: &egui::Context) -> Vec<Action> {
         note_moved(ctx, list);
         return Vec::new();
     }
+    // While a voice message records, the lists are read but act on nothing:
+    // the recording would go on in a chat opened, or meet a call placed.
+    if app.recording.is_some() {
+        return Vec::new();
+    }
     let (enter, menu) = ctx.input_mut(|input| {
         (
             super::keys::take_plain(input, egui::Key::Enter),

@@ -8430,6 +8430,41 @@ mod tests {
         assert!(said_last(&app, &why), "{:?}", app.announcer.spoken());
     }
 
+    /// While a voice message records, the call history and the Starred list
+    /// are read with their keys, as the chat list is, but Enter opens
+    /// nothing: the recording would go on in the chat opened.
+    #[test]
+    fn the_call_history_and_starred_are_read_while_recording() {
+        for page in ["calls-chat,recording", "starred,recording"] {
+            let (mut app, ctx) = calls_page(page);
+            assert!(app.recording.is_some(), "{page}");
+            let list = if app.show_starred {
+                // A second starred message, in another chat.
+                let other = app.conversations[SAMPLES[2].id]
+                    .messages
+                    .last()
+                    .cloned()
+                    .expect("a sample message");
+                app.starred.push(crate::archive::Starred {
+                    message: other,
+                    starred_at: crate::util::now() - 60,
+                });
+                crate::ui::chats::starred_list_id()
+            } else {
+                crate::ui::calls::history_list_id()
+            };
+            ctx.memory_mut(|memory| memory.request_focus(list));
+            render(&mut app, &ctx);
+            let open = app.open_chat.clone();
+            let tree = tree_after(&mut app, &ctx, Some(egui::Key::ArrowDown));
+            let active = list_nodes(&tree, list).1.expect("the current row");
+            assert_eq!(active.position_in_set(), Some(1), "{page}: the arrows read");
+            press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+            assert_eq!(app.open_chat, open, "{page}: Enter opens nothing");
+            assert!(app.recording.is_some(), "{page}: still recording");
+        }
+    }
+
     #[test]
     fn arrows_move_the_chat_cursor_without_opening() {
         let mut app = app();

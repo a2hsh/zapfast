@@ -102,11 +102,11 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
         // the open chat's first unread message. On macOS they are Control+1,
         // 2 and 3: Command+1 to 9 open chats there, and Option with a digit
         // types characters some keyboard layouts need, such as # and €.
+        // They work while a voice message records, as Tab and F6 do.
         if app.dialog.is_none()
             && !app.show_update
             && app.picker.is_none()
             && app.reaction_target.is_none()
-            && app.recording.is_none()
             // The call screen covers the chats.
             && (app.call.is_none() || app.call_surface_hidden)
         {
@@ -183,12 +183,13 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
         actions.push(Action::MessageCursor(step));
     }
     // The focused chat list: the same keys move its current chat without
-    // opening it, Enter opens it, and Shift+F10 opens its menu.
+    // opening it, Enter opens it, and Shift+F10 opens its menu. While a
+    // voice message records, the list is read but nothing is opened: the
+    // recording would go on in the chat opened.
     if app.dialog.is_none()
         && !app.show_update
         && app.picker.is_none()
         && app.reaction_target.is_none()
-        && app.recording.is_none()
         && !menu_open
         // The call screen covers the chats.
         && (app.call.is_none() || app.call_surface_hidden)
@@ -197,31 +198,33 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
         if let Some(step) = crate::ui::list_nav::take_step(ctx, || crate::ui::chats::page_rows(ctx))
         {
             actions.push(Action::ChatCursor(step));
-        } else if let Some(chat) = app.current_list_chat() {
+        } else if app.recording.is_none()
+            && let Some(chat) = app.current_list_chat()
+        {
             actions.extend(chat_list_keys(app, ctx, chat));
         }
     }
     // The focused Starred list, in the chat list's place: the same keys
-    // move its current message, Enter opens it and Shift+F10 its menu.
+    // move its current message, Enter opens it and Shift+F10 its menu. It is
+    // read while a voice message records, as the chat list is.
     if app.show_starred
         && app.dialog.is_none()
         && !app.show_update
         && app.picker.is_none()
         && app.reaction_target.is_none()
-        && app.recording.is_none()
         && !menu_open
         && ctx.memory(|memory| memory.has_focus(crate::ui::chats::starred_list_id()))
     {
         actions.extend(crate::ui::chats::starred_keys(app, ctx));
     }
     // The Calls page's focused call history or new-call list: the same keys
-    // move its current row, Enter and Shift+F10 act on it.
+    // move its current row, Enter and Shift+F10 act on it. They are read
+    // while a voice message records, as the chat list is.
     if app.page == Page::Calls
         && app.dialog.is_none()
         && !app.show_update
         && app.picker.is_none()
         && app.reaction_target.is_none()
-        && app.recording.is_none()
         && !menu_open
         // The call screen covers the list.
         && (app.call.is_none() || app.call_surface_hidden)
@@ -249,12 +252,11 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
         }
     }
     // A focused toolbar button takes the arrows, Home and End to move along
-    // its toolbar, ahead of the scrolling below.
+    // its toolbar, ahead of the scrolling below. The recorder is one.
     if app.dialog.is_none()
         && !app.show_update
         && app.picker.is_none()
         && app.reaction_target.is_none()
-        && app.recording.is_none()
         && !menu_open
     {
         crate::ui::toolbar::keys(ctx);
@@ -399,11 +401,23 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
     if escape {
         keep_focus_on_escape(app, ctx, &mut actions);
     }
-    // Enter sends a recording because the text field is hidden.
+    // Enter sends a recording because the text field is hidden: from Send,
+    // where recording puts focus, or from nowhere, as the pointer leaves it.
+    // Any other focused control keeps its own Enter, as Discard does.
+    let send = crate::ui::conversation::recording_send(ctx);
     if app.recording.is_some()
+        && ctx
+            .memory(|memory| memory.focused())
+            .is_none_or(|id| Some(id) == send)
         && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Enter))
     {
         actions.push(Action::SendRecording);
+    }
+    if let Some(action) = record_key(app, ctx, menu_open) {
+        // A shortcut is keyboard navigation, as Tab is: the recorder's Send,
+        // which takes focus, is shown.
+        ctx.data_mut(|data| data.insert_temp(crate::theme::keyboard_focus_id(), true));
+        actions.push(action);
     }
     // Alt+Up/Down switches chats without leaving the composer, and so do
     // Ctrl+Shift+[ and Ctrl+Shift+], WhatsApp's own keys. With Shift held,
@@ -504,6 +518,55 @@ fn is_copy_event(event: &egui::Event) -> bool {
             key: Key::C, pressed: true, modifiers, ..
         } if (modifiers.command || modifiers.ctrl)
             && !modifiers.alt && !modifiers.shift)
+}
+
+/// Takes Ctrl+Shift+R (Command+Shift+R on macOS) and returns what it does:
+/// in the open chat, where its microphone button is offered, it starts a
+/// voice message, and while one records it sends it. Under a dialog, a menu
+/// or a picker, and in a chat without a message field, it does nothing.
+fn record_key(app: &App, ctx: &egui::Context, menu_open: bool) -> Option<Action> {
+    // The open chat shows on the chats' page and beside the call history,
+    // and the call screen covers it.
+    if !app.chat_view()
+        || (app.call.is_some() && !app.call_surface_hidden)
+        || app.dialog.is_some()
+        || app.show_update
+        || app.picker.is_some()
+        || app.reaction_target.is_some()
+        || menu_open
+    {
+        return None;
+    }
+    let action = if app.recording.is_some() {
+        Action::SendRecording
+    } else if record_offered(app) {
+        Action::StartRecording
+    } else {
+        return None;
+    };
+    ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::R))
+        .then_some(action)
+}
+
+/// Whether the open chat's composer offers its microphone button: a chat
+/// that takes messages, with nothing typed, staged, edited or waiting to be
+/// sent again, and no messages selected.
+fn record_offered(app: &App) -> bool {
+    let Some(chat) = app.current_chat() else {
+        return false;
+    };
+    chat.can_send()
+        && app.composer.trim().is_empty()
+        && app.pending.is_empty()
+        && app.editing.is_none()
+        && app
+            .selection
+            .as_ref()
+            .is_none_or(|(selected, _)| *selected != chat.id)
+        && app
+            .unsent_voice
+            .as_ref()
+            .is_none_or(|(unsent, _)| *unsent != chat.id)
 }
 
 /// Takes this frame's Enter or Shift+F10 for `chat`, the focused chat
@@ -1518,6 +1581,10 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+Shift+2", "Calls"),
     ("↑", "Edit the previous message (when the input is empty)"),
     ("Enter", "Send (Shift+Enter for a new line)"),
+    (
+        "Ctrl+Shift+R",
+        "Record a voice message, and send it when pressed again",
+    ),
     (
         "Escape",
         "Dismiss the current action, return from search, Calls or Starred, or close the chat",
@@ -4014,6 +4081,41 @@ mod tests {
         );
     }
 
+    /// Ctrl+Shift+R (Command+Shift+R on macOS) records in the open chat
+    /// wherever it shows, on the chats' page and beside the call history
+    /// alike, and sends from either. Under the call screen it does nothing.
+    #[test]
+    fn the_record_key_works_wherever_the_chat_shows() {
+        let (_root, mut app, ids) = app_with_chats(1);
+        app.link = crate::backend::LinkStatus::Connected;
+        app.open_chat = Some(ids[0].clone());
+        // A context of its own for each press: a key held from the last one
+        // would arrive as a repeat, which never toggles recording.
+        let record = Modifiers::COMMAND | Modifiers::SHIFT;
+        for page in [Page::Chats, Page::Calls] {
+            app.page = page.clone();
+            app.actions.clear();
+            press(&mut app, &egui::Context::default(), Key::R, record);
+            assert_eq!(app.actions, [Action::StartRecording], "{page:?}");
+        }
+        app.recording = Some(crate::audio::Recorder::rehearsal());
+        app.actions.clear();
+        press(&mut app, &egui::Context::default(), Key::R, record);
+        assert_eq!(app.actions, [Action::SendRecording], "from the Calls page");
+        app.recording = None;
+        app.page = Page::Chats;
+        crate::demo::call_sample(&mut app, false, false);
+        app.actions.clear();
+        press(&mut app, &egui::Context::default(), Key::R, record);
+        assert!(
+            app.actions.is_empty(),
+            "under the call screen: {:?}",
+            app.actions
+        );
+        app.call_surface_hidden = true;
+        press(&mut app, &egui::Context::default(), Key::R, record);
+        assert_eq!(app.actions, [Action::StartRecording], "the call put aside");
+    }
     /// The focused chat list takes the arrows, Home, End and the page keys
     /// for its cursor, ahead of the open chat's scrolling, and Enter and
     /// Shift+F10 for its current chat.

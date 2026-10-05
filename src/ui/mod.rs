@@ -63,7 +63,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         && !app.show_update
         && app.picker.is_none()
         && app.reaction_target.is_none()
-        && app.recording.is_none()
+        // A voice message recording keeps it: the recorder's toolbar is the
+        // composer's stop, and the rest of the window keeps its own.
         && app.image_preview.is_none()
         && app.picture_edit.is_none()
         && app.sticker_view.is_none()

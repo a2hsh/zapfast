@@ -74,7 +74,9 @@ pub fn of(stop: Stop) -> Section {
         | Stop::ChatSearchResults
         | Stop::Messages => Section::Conversation,
         Stop::InfoClose | Stop::InfoControl(_) => Section::Info,
-        Stop::Composer | Stop::MessageActions => Section::Composer,
+        // The recorder takes the composer's place while a voice message
+        // records.
+        Stop::Composer | Stop::Recording | Stop::MessageActions => Section::Composer,
     }
 }
 
@@ -183,7 +185,8 @@ fn next(present: &[Section], current: Option<Section>, steps: i32) -> Option<Sec
 }
 
 /// Moves focus into `section`: to its stop focused last, else its entry,
-/// else its first stop drawn. The composer is always entered on its entry.
+/// else its first stop drawn. The composer is always entered on its entry,
+/// or on the recorder, its only stop while a voice message records.
 fn land(app: &mut App, ctx: &Context, section: Section, stops: &[(Stop, Id)]) {
     // On the Calls page the list's place holds the call history or the
     // new-call list, which take focus as any stop does.
@@ -246,6 +249,7 @@ mod tests {
             (Stop::InfoControl(0), Section::Info),
             (Stop::Messages, Section::Conversation),
             (Stop::Composer, Section::Composer),
+            (Stop::Recording, Section::Composer),
             (Stop::MessageActions, Section::Composer),
         ] {
             assert_eq!(of(stop), section, "{stop:?}");

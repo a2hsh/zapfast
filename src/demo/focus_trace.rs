@@ -2794,3 +2794,379 @@ fn a_saving_privacy_dropdown_keeps_focus() {
     assert_eq!(trace.last().name, profile);
     trace.assert_clean(from, "a privacy drop-down while it saves");
 }
+
+/// Ctrl+Shift+R, Command+Shift+R on macOS: record, and send.
+fn record_keys() -> egui::Modifiers {
+    egui::Modifiers::COMMAND | egui::Modifiers::SHIFT
+}
+
+/// The recorder's Send button, as last drawn.
+fn recording_send(trace: &Trace) -> Option<egui::Id> {
+    crate::ui::conversation::recording_send(&trace.ctx)
+}
+
+/// The demo with its sent commands kept, recording from the message field
+/// by Ctrl+Shift+R: the reader is on Send.
+fn recording(app: App) -> Trace {
+    let mut app = app;
+    app.backend.record_demo_commands();
+    let mut trace = Trace::new(app);
+    focus_stop(&mut trace, Stop::Composer);
+    let from = trace.mark();
+    trace.press("Ctrl+Shift+R", egui::Key::R, record_keys());
+    assert!(trace.app.recording.is_some(), "Ctrl+Shift+R records");
+    assert_eq!(trace.last().egui, recording_send(&trace));
+    trace.assert_clean(from, "recording started");
+    trace
+}
+
+/// Whether the reader hears `text` among the announcements shown now.
+fn heard(trace: &Trace, text: &str) -> bool {
+    trace.app.announcer.spoken().contains(&text)
+}
+
+/// Whether the demo backend was asked to send a voice message.
+fn sent_voice(trace: &Trace) -> bool {
+    trace
+        .app
+        .backend
+        .take_demo_commands()
+        .iter()
+        .any(|command| matches!(command, crate::backend::Command::SendVoice { .. }))
+}
+
+/// Waits until the simulated recorder, which records in real time on its
+/// own thread, holds more than the half second under which a recording is
+/// dropped rather than sent. It waits for the samples themselves, not for a
+/// fixed time, which a busy machine may not give the thread.
+fn record_for_a_while(trace: &Trace) {
+    let recorder = trace.app.recording.as_ref().expect("recording");
+    // One level per 50 ms of samples: 12 levels are 0.6 s.
+    let started = std::time::Instant::now();
+    while recorder.levels().len() < 12 {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "the simulated recorder made no progress"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// Waits until `trace`'s recording has run for at least `time`.
+fn recorded_for(trace: &Trace, time: std::time::Duration) {
+    let recorder = trace.app.recording.as_ref().expect("recording");
+    while recorder.elapsed() < time {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// Starting a voice message from the keys says "Recording" and puts the
+/// reader on Send, named for what it sends and described by the time
+/// recorded. Ctrl+Shift+R again sends it, and the reader is back in the
+/// message field. Each step is heard once, never as the window.
+#[test]
+fn ctrl_shift_r_records_and_sends_a_voice_message() {
+    let mut trace = recording(app());
+    assert!(
+        heard(&trace, "Recording"),
+        "{:?}",
+        trace.app.announcer.spoken()
+    );
+    let send = trace.last().clone();
+    assert_eq!(send.name, "Button \"Send voice message\"");
+    assert!(
+        send.spoken.contains("Some(\"0:00\")"),
+        "the time recorded is Send's description: {}",
+        send.spoken
+    );
+    record_for_a_while(&trace);
+    let from = trace.mark();
+    trace.press("Ctrl+Shift+R", egui::Key::R, record_keys());
+    assert!(trace.app.recording.is_none());
+    assert_eq!(trace.last().egui, Some(egui::Id::new("composer-text")));
+    assert!(sent_voice(&trace), "the voice message is sent");
+    trace.assert_clean(from, "sent with Ctrl+Shift+R");
+}
+
+/// The time recorded moves on in Send's description while its name stays
+/// as it was: a screen reader speaks a focused control's new name, so the
+/// time there would be heard every second.
+#[test]
+fn the_time_recorded_changes_only_the_description() {
+    let mut trace = recording(app());
+    let before = trace.last().clone();
+    recorded_for(&trace, std::time::Duration::from_millis(1100));
+    trace.settle("a second later", 3);
+    let after = trace.last().clone();
+    assert_eq!(after.name, before.name);
+    assert_eq!(after.effective, before.effective);
+    assert!(
+        after.spoken.contains("Some(\"0:01\")"),
+        "the description moved on: {}",
+        after.spoken
+    );
+}
+
+/// Enter on Send sends the recording, and the reader is back in the
+/// message field.
+#[test]
+fn enter_on_send_sends_the_recording() {
+    let mut trace = recording(app());
+    record_for_a_while(&trace);
+    let from = trace.mark();
+    trace.press("Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    assert!(trace.app.recording.is_none());
+    assert_eq!(trace.last().egui, Some(egui::Id::new("composer-text")));
+    assert!(sent_voice(&trace), "the voice message is sent");
+    assert!(!heard(&trace, "Recording discarded"));
+    trace.assert_clean(from, "sent with Enter");
+}
+
+/// Escape, or Enter on Discard (Left from Send), discards the recording:
+/// the reader hears "Recording discarded" and is back in the message field,
+/// and nothing is sent. Enter on Discard never sends.
+#[test]
+fn discarding_says_so_and_returns_to_the_field() {
+    for keys in [
+        &[egui::Key::Escape][..],
+        &[egui::Key::ArrowLeft, egui::Key::Enter][..],
+    ] {
+        let mut trace = recording(app());
+        record_for_a_while(&trace);
+        let from = trace.mark();
+        for key in keys {
+            trace.press(&format!("{key:?}"), *key, egui::Modifiers::NONE);
+            if *key == egui::Key::ArrowLeft {
+                assert_eq!(trace.last().name, "Button \"Discard voice message\"");
+            }
+        }
+        let scenario = format!("discarded with {keys:?}");
+        assert!(trace.app.recording.is_none(), "{scenario}");
+        assert!(
+            heard(&trace, "Recording discarded"),
+            "{scenario}: {:?}",
+            trace.app.announcer.spoken()
+        );
+        assert_eq!(
+            trace.last().egui,
+            Some(egui::Id::new("composer-text")),
+            "{scenario}\n{}",
+            trace.dump(from)
+        );
+        assert!(!sent_voice(&trace), "{scenario}: nothing sent");
+        trace.assert_clean(from, &scenario);
+    }
+}
+
+/// While a voice message records, Tab walks the window's own stops, each
+/// named, and comes back to the recorder: no unnamed control is reached, as
+/// egui's own order reached them before. Shift+Tab, F6, Alt+1, Alt+2 and the
+/// lists' arrows keep working, F6 into the composer lands on the recorder,
+/// and Enter in the chat list opens no chat for the recording to go on in.
+#[test]
+fn the_window_keeps_its_order_while_recording() {
+    let mut trace = recording(app());
+    let send = recording_send(&trace);
+    let from = trace.mark();
+    let mut walked = Vec::new();
+    // Every stop of the window once, the rail's included, and a few more.
+    for _ in 0..24 {
+        trace.press("Tab", egui::Key::Tab, egui::Modifiers::NONE);
+        let frame = trace.last().clone();
+        let stop = crate::ui::focus::stops(&trace.ctx)
+            .into_iter()
+            .find(|(_, id)| Some(*id) == frame.egui)
+            .map(|(stop, _)| stop);
+        assert!(
+            stop.is_some(),
+            "Tab reached a control that is not a stop: {}",
+            frame.name
+        );
+        assert!(
+            !frame.name.ends_with("None") && !frame.name.ends_with("\"\""),
+            "Tab reached an unnamed control: {}",
+            frame.name
+        );
+        walked.push(stop);
+        if frame.egui == send {
+            break;
+        }
+    }
+    assert_eq!(walked.last(), Some(&Some(Stop::Recording)), "{walked:?}");
+    assert!(walked.contains(&Some(Stop::Messages)), "{walked:?}");
+    trace.press("Shift+Tab", egui::Key::Tab, egui::Modifiers::SHIFT);
+    let chat = trace.app.open_chat.clone().expect("the demo opens a chat");
+    let messages = crate::ui::conversation::messages_list_id(&chat);
+    assert_eq!(trace.last().egui, Some(messages));
+    trace.press("F6", egui::Key::F6, egui::Modifiers::NONE);
+    assert_eq!(trace.last().egui, send, "F6 to the composer: the recorder");
+    trace.press("Alt+1", egui::Key::Num1, alt());
+    assert_eq!(trace.last().egui, Some(crate::ui::chats::chats_list_id()));
+    trace.press("Down", egui::Key::ArrowDown, egui::Modifiers::NONE);
+    trace.press("Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    assert_eq!(
+        trace.app.open_chat.as_ref(),
+        Some(&chat),
+        "Enter in the chat list opens nothing while recording"
+    );
+    trace.press("Alt+2", egui::Key::Num2, alt());
+    assert_eq!(trace.last().egui, Some(messages));
+    trace.press("Up", egui::Key::ArrowUp, egui::Modifiers::NONE);
+    trace.press("Shift+F6", egui::Key::F6, egui::Modifiers::SHIFT);
+    assert_eq!(trace.last().egui, Some(crate::ui::chats::chats_list_id()));
+    assert!(trace.app.recording.is_some(), "still recording");
+    trace.assert_clean(from, "moving around while recording");
+}
+
+/// Ctrl+Shift+R does nothing where the microphone button is not offered:
+/// under a dialog, with no chat open, in a chat that takes no messages, or
+/// with a message typed.
+#[test]
+fn ctrl_shift_r_records_only_where_the_microphone_is_offered() {
+    let mut dialog = Trace::new(app());
+    dialog
+        .app
+        .actions
+        .push(Action::ShowDialog(crate::model::Dialog::Shortcuts));
+    dialog.settle("dialog", 3);
+    let mut closed = no_chat_open(Stop::ChatList);
+    let mut channel = Trace::new(app());
+    super::apply_flags(&mut channel.app, Some("channel"));
+    channel.settle("channel", 3);
+    let mut typed = Trace::new(app());
+    typed.app.composer = "Fixture draft".to_owned();
+    typed.settle("typed", 3);
+    for (scenario, trace) in [
+        ("a dialog", &mut dialog),
+        ("no chat", &mut closed),
+        ("a channel", &mut channel),
+        ("a draft", &mut typed),
+    ] {
+        if scenario == "a channel" {
+            let chat = trace.app.current_chat().expect("a channel is open");
+            assert!(!chat.can_send(), "{scenario}");
+        }
+        trace.press("Ctrl+Shift+R", egui::Key::R, record_keys());
+        assert!(trace.app.recording.is_none(), "{scenario}");
+        assert!(!heard(trace, "Recording"), "{scenario}");
+    }
+    assert!(dialog.app.dialog.is_some(), "the dialog stays");
+}
+
+/// A microphone that cannot start says why, as the error it always was,
+/// and the reader is back in the message field rather than on the window.
+#[test]
+fn a_microphone_that_fails_returns_to_the_field() {
+    let mut trace = recording(app());
+    let from = trace.mark();
+    trace.action += 1;
+    trace.app.recording = Some(crate::audio::Recorder::failed("No input device"));
+    trace.settle("failed", 4);
+    assert!(trace.app.recording.is_none());
+    assert!(
+        heard(&trace, "Could not record: No input device"),
+        "{:?}",
+        trace.app.announcer.spoken()
+    );
+    assert_eq!(trace.last().egui, Some(egui::Id::new("composer-text")));
+    trace.assert_clean(from, "the microphone failed");
+}
+
+/// Locking while recording discards the recording, as it always did, with
+/// nothing said about it; after the unlock the reader is in the message
+/// field.
+#[test]
+fn locking_while_recording_lands_in_the_field_after_the_unlock() {
+    let mut app = app();
+    app.settings.app_lock_hash = Some(crate::app_lock::verifier("fixture"));
+    let mut trace = recording(app);
+    trace.app.lock_app();
+    trace.settle("locked", 3);
+    assert!(trace.app.recording.is_none());
+    assert_eq!(
+        trace.last().egui,
+        Some(egui::Id::new(crate::ui::lock::PASSWORD_ID))
+    );
+    assert!(!heard(&trace, "Recording discarded"));
+    trace.app.app_lock.unlocked(true);
+    trace.settle("unlocked", 3);
+    assert_eq!(trace.last().egui, Some(egui::Id::new("composer-text")));
+}
+
+/// Switching to another account while recording drops the recording, as
+/// it always did: focus moves once, to the other account's message field,
+/// and nothing of the recording follows it there. Ctrl+Shift+R records
+/// afresh in that account.
+#[test]
+fn switching_accounts_while_recording_lands_in_the_other_field() {
+    let mut trace = recording(app_with_two_accounts());
+    let switcher = crate::ui::rail::buttons(&trace.ctx)
+        .last()
+        .copied()
+        .expect("the rail's picture");
+    trace
+        .ctx
+        .memory_mut(|memory| memory.request_focus(switcher));
+    trace.settle("focus", 3);
+    trace.press("Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    trace.press("Down", egui::Key::ArrowDown, egui::Modifiers::NONE);
+    let from = trace.mark();
+    trace.press("Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    assert_eq!(trace.app.account().id.as_str(), "2");
+    assert!(trace.app.recording.is_none());
+    assert_eq!(trace.last().egui, Some(egui::Id::new("composer-text")));
+    assert!(!heard(&trace, "Recording discarded"));
+    trace.assert_clean(from, "switching accounts while recording");
+    trace.press("Ctrl+Shift+R", egui::Key::R, record_keys());
+    assert!(trace.app.recording.is_some());
+    assert_eq!(trace.last().egui, recording_send(&trace));
+}
+
+/// The first voice message of a session, on a fresh window, sent from the
+/// keys: started from the message field, from the message list or from the
+/// microphone button, and sent with Enter on Send or with Ctrl+Shift+R.
+/// The reader goes from Send back to the message field once, never by way
+/// of the window.
+#[test]
+fn the_first_recording_of_a_session_returns_to_the_field() {
+    for start in ["field", "list", "button"] {
+        for send in ["Enter", "Ctrl+Shift+R"] {
+            let mut app = app();
+            app.backend.record_demo_commands();
+            let mut trace = Trace::new(app);
+            match start {
+                "field" => focus_stop(&mut trace, Stop::Composer),
+                "list" => focus_stop(&mut trace, Stop::Messages),
+                _ => {
+                    focus_stop(&mut trace, Stop::MessageActions);
+                    trace.press("End", egui::Key::End, egui::Modifiers::NONE);
+                    assert_eq!(trace.last().name, "Button \"Record a voice message\"");
+                }
+            }
+            let from = trace.mark();
+            if start == "button" {
+                trace.press("Enter", egui::Key::Enter, egui::Modifiers::NONE);
+            } else {
+                trace.press("Ctrl+Shift+R", egui::Key::R, record_keys());
+            }
+            let scenario = format!("recorded from the {start}, sent with {send}");
+            assert!(trace.app.recording.is_some(), "{scenario}");
+            assert_eq!(trace.last().egui, recording_send(&trace), "{scenario}");
+            record_for_a_while(&trace);
+            if send == "Enter" {
+                trace.press("Enter", egui::Key::Enter, egui::Modifiers::NONE);
+            } else {
+                trace.press("Ctrl+Shift+R", egui::Key::R, record_keys());
+            }
+            assert!(trace.app.recording.is_none(), "{scenario}");
+            assert!(sent_voice(&trace), "{scenario}: sent");
+            assert_eq!(
+                trace.last().egui,
+                Some(egui::Id::new("composer-text")),
+                "{scenario}\n{}",
+                trace.dump(from)
+            );
+            trace.assert_clean(from, &scenario);
+        }
+    }
+}

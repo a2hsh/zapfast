@@ -1029,6 +1029,11 @@ pub fn starred_keys(app: &mut App, ctx: &egui::Context) -> Vec<Action> {
         }
         return Vec::new();
     }
+    // While a voice message records, the list is read but nothing is
+    // opened: the recording would go on in the chat opened.
+    if app.recording.is_some() {
+        return Vec::new();
+    }
     let (enter, menu) = ctx.input_mut(|input| {
         (
             super::keys::take_plain(input, Key::Enter),
