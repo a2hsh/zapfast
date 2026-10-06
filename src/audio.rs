@@ -775,12 +775,21 @@ mod tests {
         settle();
         asked.store(0, Ordering::SeqCst);
         let before = recorder.levels().len();
-        std::thread::sleep(Duration::from_millis(300));
+        // Busy machines oversleep, so wait for progress instead of a fixed time.
+        let waited = |done: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !done() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            done()
+        };
+        assert!(
+            waited(&|| recorder.levels().len() >= before + 4),
+            "still recording"
+        );
         assert_eq!(asked.load(Ordering::SeqCst), 0);
-        assert!(recorder.levels().len() >= before + 4, "still recording");
         recorder.set_stepped(false);
-        std::thread::sleep(Duration::from_millis(150));
-        assert!(asked.load(Ordering::SeqCst) >= 1);
+        assert!(waited(&|| asked.load(Ordering::SeqCst) >= 1));
         recorder.finish().expect("recorded");
     }
 
