@@ -212,7 +212,8 @@ pub fn scrolling_text(
         travelled
     };
     if let Some(after) = repaint {
-        ui.ctx().request_repaint_after(after);
+        // Decorative: stepped while a screen reader is attached.
+        crate::motion::request_frame_after(ui.ctx(), after);
     }
     if !ui.is_rect_visible(rect) {
         return response;
@@ -1253,6 +1254,44 @@ mod tests {
     /// A name too wide for its room rests three seconds at its start, eases
     /// to its end at 40 points a second on average, rests there as long, and
     /// comes back the same way. One that fits never moves or repaints.
+    #[test]
+    fn scrolling_text_steps_its_crossing_while_a_screen_reader_is_attached() {
+        use std::time::Duration;
+        // Wide text in a narrow room, drawn in the middle of its first
+        // crossing (after the 3 s rest), when it asks for every frame.
+        let delay = |reader: bool| {
+            let ctx = crate::motion::tests::reading(reader);
+            let draw = |ctx: &egui::Context, time: f64| {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        time: Some(time),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        ui.set_max_width(60.0);
+                        scrolling_text(
+                            ui,
+                            "A picture with a very long name indeed.jpg",
+                            egui::FontId::proportional(14.0),
+                            Color32::WHITE,
+                            Color32::BLACK,
+                        );
+                    },
+                );
+                output.textures_delta.clear();
+                output.viewport_output[&egui::ViewportId::ROOT].repaint_delay
+            };
+            draw(&ctx, 0.0);
+            draw(&ctx, 3.5)
+        };
+        assert_eq!(delay(false), Duration::ZERO);
+        let stepped = delay(true);
+        assert!(
+            stepped > Duration::from_millis(75) && stepped <= crate::motion::STEP,
+            "{stepped:?}"
+        );
+    }
+
     #[test]
     fn scrolling_text_rests_at_each_end_and_crosses_in_between() {
         use std::time::Duration;
