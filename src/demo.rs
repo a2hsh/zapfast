@@ -29012,3 +29012,145 @@ mod search_access_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod suggestion_access_tests {
+    use super::settings_access_tests::{node, settings, tree};
+    use super::tests::{press_key, render};
+    use egui::accesskit::Role;
+
+    fn field() -> egui::Id {
+        egui::Id::new("composer-text")
+    }
+
+    /// Up from the first suggestion wraps to the last, which the list has
+    /// to draw before the field can name it: with more rows than the list
+    /// shows, it scrolls there first.
+    #[test]
+    fn up_from_the_first_suggestion_names_the_last() {
+        let (mut app, ctx) = settings("mention-everyone");
+        let chat = app.open_chat.clone().expect("a group is open");
+        if let Some(group) = app.chats.iter_mut().find(|group| group.id == chat) {
+            for index in 0..6 {
+                group
+                    .participants
+                    .push(format!("4915550000{index}@s.whatsapp.net"));
+            }
+        }
+        let group = app.chat(&chat).expect("the group");
+        let candidates = app.mention_candidates(group, "");
+        assert!(candidates.len() > 6, "{}", candidates.len());
+        let end = app.composer.chars().count();
+        let mut state = egui::TextEdit::load_state(&ctx, field()).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(end),
+            )));
+        state.store(&ctx, field());
+        ctx.memory_mut(|memory| memory.request_focus(field()));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::ArrowUp, egui::Modifiers::NONE);
+        assert_eq!(app.mention_selected, candidates.len() - 1);
+        let last = &candidates[candidates.len() - 1].0;
+        let shown = tree(&mut app, &ctx);
+        assert_eq!(
+            node(&shown, field().accesskit_id()).active_descendant(),
+            Some(field().with(("mention-option", last)).accesskit_id()),
+            "the field names the last suggestion"
+        );
+    }
+
+    /// The message field's mention and emoji suggestions work as a combo
+    /// box: the count is said when the list appears, typing stays in the
+    /// field, the arrows have the field name the highlighted option, and a
+    /// caret move hands the field back so the screen reader reads it.
+    #[test]
+    fn the_field_names_the_suggestion_the_arrows_reach() {
+        for (page, units) in [
+            ("mention", [" person", " people"]),
+            ("emoji-complete", [" emoji", " emoji"]),
+        ] {
+            let (mut app, ctx) = settings(page);
+            if page == "mention" {
+                // "@" alone suggests every member, after the caret.
+                app.composer = "@".to_owned();
+                app.mention_start = Some(0);
+                app.mention_selected = 0;
+            }
+            let end = app.composer.chars().count();
+            let mut state = egui::TextEdit::load_state(&ctx, field()).unwrap_or_default();
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(
+                    egui::text::CCursor::new(end),
+                )));
+            state.store(&ctx, field());
+            ctx.memory_mut(|memory| memory.request_focus(field()));
+            render(&mut app, &ctx);
+            let before = tree(&mut app, &ctx);
+            assert_eq!(
+                node(&before, field().accesskit_id()).active_descendant(),
+                None,
+                "{page}: nothing is named before an arrow"
+            );
+            let said: Vec<String> = app
+                .announcer
+                .spoken()
+                .iter()
+                .map(|spoken| spoken.trim_end_matches('\u{200B}').to_owned())
+                .collect();
+            // The demo sets the text before the field has a caret, so the
+            // count said first may be of the query before the caret settled.
+            assert!(
+                said.iter().any(|spoken| units.iter().any(|unit| spoken
+                    .strip_suffix(unit)
+                    .is_some_and(|count| count.parse::<usize>().is_ok()))),
+                "{page}: a count is said: {said:?}"
+            );
+
+            press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+            let selected = if page == "mention" {
+                app.mention_selected
+            } else {
+                app.emoji_selected
+            };
+            assert_eq!(selected, 1, "{page}");
+            let after = tree(&mut app, &ctx);
+            assert_eq!(after.focus, field().accesskit_id(), "{page}: typing stays");
+            let active = node(&after, field().accesskit_id())
+                .active_descendant()
+                .expect("the field names the option");
+            let option = node(&after, active);
+            assert_eq!(option.role(), Role::ListBoxOption, "{page}");
+            assert_eq!(option.position_in_set(), Some(1), "{page}");
+            let count = option.size_of_set().expect("a size");
+            assert!(option.label().is_some_and(|label| !label.is_empty()));
+            // Its siblings are the other suggestions drawn, all of one list.
+            let parent = after
+                .nodes
+                .iter()
+                .find(|(_, node)| node.children().contains(&active))
+                .map(|(_, node)| node.clone())
+                .expect("a parent");
+            let siblings: Vec<_> = parent
+                .children()
+                .iter()
+                .map(|id| node(&after, *id))
+                .filter(|node| node.role() == Role::ListBoxOption)
+                .collect();
+            assert!(siblings.len() > 1, "{page}");
+            for sibling in &siblings {
+                assert_eq!(sibling.size_of_set(), Some(count), "{page}");
+            }
+
+            press_key(&mut app, &ctx, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+            let moved = tree(&mut app, &ctx);
+            assert_eq!(
+                node(&moved, field().accesskit_id()).active_descendant(),
+                None,
+                "{page}: a caret move hands the field back"
+            );
+        }
+    }
+}
