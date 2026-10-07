@@ -29061,10 +29061,44 @@ mod suggestion_access_tests {
         );
     }
 
+    /// The description waits for the typing to pause in the message field:
+    /// focus gone elsewhere by then, as with Alt+2 just after "@", it is
+    /// not said over where the reader went.
+    #[test]
+    fn a_suggestion_list_is_not_described_once_the_field_lost_focus() {
+        let (mut app, ctx) = settings("mention-everyone");
+        let end = app.composer.chars().count();
+        let mut state = egui::TextEdit::load_state(&ctx, field()).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(end),
+            )));
+        state.store(&ctx, field());
+        ctx.memory_mut(|memory| memory.request_focus(field()));
+        render(&mut app, &ctx);
+        let chat = app.open_chat.clone().expect("a group is open");
+        let list = crate::ui::conversation::messages_list_id(&chat);
+        ctx.memory_mut(|memory| memory.request_focus(list));
+        for _ in 0..40 {
+            render(&mut app, &ctx);
+        }
+        assert_ne!(ctx.memory(|memory| memory.focused()), Some(field()));
+        assert!(
+            !app.announcer
+                .spoken()
+                .iter()
+                .any(|spoken| spoken.contains("Press Down to browse")),
+            "{:?}",
+            app.announcer.spoken()
+        );
+    }
+
     /// The message field's mention and emoji suggestions work as a combo
-    /// box: the count is said when the list appears, typing stays in the
-    /// field, the arrows have the field name the highlighted option, and a
-    /// caret move hands the field back so the screen reader reads it.
+    /// box: once typing pauses the count and the highlighted option are
+    /// said, typing stays in the field, the arrows have the field name the
+    /// highlighted option, and a caret move hands the field back so the
+    /// screen reader reads it.
     #[test]
     fn the_field_names_the_suggestion_the_arrows_reach() {
         for (page, units) in [
@@ -29094,19 +29128,33 @@ mod suggestion_access_tests {
                 None,
                 "{page}: nothing is named before an arrow"
             );
-            let said: Vec<String> = app
-                .announcer
-                .spoken()
-                .iter()
-                .map(|spoken| spoken.trim_end_matches('\u{200B}').to_owned())
-                .collect();
-            // The demo sets the text before the field has a caret, so the
-            // count said first may be of the query before the caret settled.
+            let said = |app: &crate::app::App| -> Vec<String> {
+                app.announcer
+                    .spoken()
+                    .iter()
+                    .map(|spoken| spoken.trim_end_matches('\u{200B}').to_owned())
+                    .collect()
+            };
+            let described = |said: &[String]| {
+                said.iter().any(|spoken| {
+                    spoken.ends_with(" selected. Press Down to browse")
+                        && units.iter().any(|unit| {
+                            spoken
+                                .split_once(&format!("{unit}. "))
+                                .is_some_and(|(count, _)| count.parse::<usize>().is_ok())
+                        })
+                })
+            };
+            assert!(!described(&said(&app)), "{page}: not while typing");
+            // Each frame here is 1/60 s; the list is described once typing
+            // has paused for 0.4 s.
+            for _ in 0..40 {
+                render(&mut app, &ctx);
+            }
             assert!(
-                said.iter().any(|spoken| units.iter().any(|unit| spoken
-                    .strip_suffix(unit)
-                    .is_some_and(|count| count.parse::<usize>().is_ok()))),
-                "{page}: a count is said: {said:?}"
+                described(&said(&app)),
+                "{page}: the count and the pick are said: {:?}",
+                said(&app)
             );
 
             press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);

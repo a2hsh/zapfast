@@ -1195,72 +1195,109 @@ fn suggestion_active_id() -> egui::Id {
     egui::Id::new("suggestion-active-row")
 }
 
-/// Screen reader side of a suggestion list above the message field. Says
-/// how many suggestions there are when the list appears, and when typing
-/// changes how many, but not when only the caret moves. Returns whether the
-/// field should name the highlighted row: only once the arrows have reached
-/// the list, and only until the caret moves or the text changes. While the
-/// field names a row the screen reader reads that row, so typing and caret
-/// moves need the field itself back.
+/// Screen reader side of a suggestion list above the message field. Once
+/// typing pauses after the list appears or the text changes, it says how
+/// many suggestions there are, the one Enter or Tab would pick, and that
+/// Down browses them: the screen reader stays in the field, where it reads
+/// the typing. Returns whether the field should name the highlighted row:
+/// only once the arrows have reached the list, and only until the caret
+/// moves or the text changes, since the screen reader then reads that row
+/// instead of the field.
+#[allow(clippy::too_many_arguments)]
 fn suggestion_speech(
     app: &mut App,
     ui: &egui::Ui,
+    field: egui::Id,
     kind: &'static str,
     count: usize,
+    highlighted: &str,
     arrowed: bool,
-    say: impl Fn(usize) -> String,
+    available: impl Fn(usize) -> String,
 ) -> bool {
+    /// How long typing pauses before the list is described, in seconds.
+    const PAUSE: f64 = 0.4;
     let id = egui::Id::new(("suggestion-speech", kind));
-    // The list draws before the field takes this frame's keys, so a
-    // keystroke changes the count a frame later: compare the text instead.
     let text = app.composer.clone();
-    let (typed, moved) = ui.input(|input| {
-        let mut typed = false;
-        let mut moved = false;
-        for event in &input.events {
-            match event {
-                egui::Event::Text(_) | egui::Event::Paste(_) => typed = true,
-                egui::Event::Key {
-                    key: Key::Backspace | Key::Delete,
-                    pressed: true,
-                    ..
-                } => typed = true,
-                egui::Event::Key {
-                    key: Key::ArrowLeft | Key::ArrowRight | Key::Home | Key::End,
-                    pressed: true,
-                    ..
-                } => moved = true,
-                _ => {}
-            }
-        }
-        (typed, moved)
+    let now = ui.input(|input| input.time);
+    let moved = ui.input(|input| {
+        input.events.iter().any(|event| {
+            matches!(
+                event,
+                egui::Event::Text(_)
+                    | egui::Event::Paste(_)
+                    | egui::Event::Key {
+                        key: Key::ArrowLeft
+                            | Key::ArrowRight
+                            | Key::Home
+                            | Key::End
+                            | Key::Backspace
+                            | Key::Delete,
+                        pressed: true,
+                        ..
+                    }
+            )
+        })
     });
-    let shown: Option<(usize, String, bool)> = ui.ctx().data(|data| data.get_temp(id));
-    let edited = shown.as_ref().is_some_and(|(_, last, _)| *last != text);
-    if shown
-        .as_ref()
-        .is_none_or(|(last, _, _)| edited && *last != count)
-    {
-        app.announcer
-            .say(crate::announcer::Category::Status, say(count));
-    }
-    let mut reached = shown.as_ref().is_some_and(|(_, _, reached)| *reached);
-    if typed || moved || edited {
-        reached = false;
+    let shown: Option<SuggestionSpeech> = ui.ctx().data(|data| data.get_temp(id));
+    // The list draws before the field takes this frame's keys, so an edit
+    // shows in the text a frame later: compare the text.
+    let edited = shown.as_ref().is_none_or(|shown| shown.text != text);
+    let mut reached = shown.as_ref().is_some_and(|shown| shown.reached) && !moved && !edited;
+    let mut due = shown.and_then(|shown| shown.due);
+    if edited {
+        due = Some(now + PAUSE);
     }
     if arrowed {
+        // The screen reader reads the row the arrows reach.
         reached = true;
+        due = None;
+    }
+    if let Some(at) = due {
+        if now >= at {
+            // Said in the field only: focus gone elsewhere meanwhile, as
+            // with Alt+2, it would be heard over where the reader went.
+            if ui.memory(|memory| memory.has_focus(field)) {
+                let template = crate::i18n::gettext(
+                    app.locale,
+                    // Translators: said once typing pauses above a suggestion
+                    // list; {available} is how many it holds, such as "3
+                    // people available", and {option} the one Enter or Tab
+                    // would pick.
+                    "{available}. {option} selected. Press Down to browse",
+                );
+                let said = crate::a11y::fill(
+                    &template,
+                    &[("available", &available(count)), ("option", highlighted)],
+                );
+                app.announcer.say(crate::announcer::Category::Status, said);
+            }
+            due = None;
+        } else {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(at - now));
+        }
     }
     ui.ctx()
-        .data_mut(|data| data.insert_temp(id, (count, text, reached)));
+        .data_mut(|data| data.insert_temp(id, SuggestionSpeech { text, reached, due }));
     reached
 }
 
-/// The list of `kind` is gone: the next one is announced again.
+/// What `suggestion_speech` remembers between frames.
+#[derive(Clone)]
+struct SuggestionSpeech {
+    /// The message field's text when last seen.
+    text: String,
+    /// Whether the arrows have reached the list since the last edit.
+    reached: bool,
+    /// When to describe the list, once typing has paused.
+    due: Option<f64>,
+}
+
+/// The list of `kind` is gone: the next one is described again.
 fn suggestions_gone(ui: &egui::Ui, kind: &'static str) {
     let id = egui::Id::new(("suggestion-speech", kind));
     ui.ctx()
-        .data_mut(|data| data.remove::<(usize, String, bool)>(id));
+        .data_mut(|data| data.remove::<SuggestionSpeech>(id));
 }
 
 /// Makes `ui`, which holds a suggestion list's rows, the list itself: a
@@ -1303,15 +1340,25 @@ fn emoji_suggestions(app: &mut App, ui: &mut egui::Ui, field: egui::Id) {
     }
     app.emoji_selected = app.emoji_selected.min(candidates.len() - 1);
     let locale = app.locale;
-    let reached = suggestion_speech(app, ui, "emoji", candidates.len(), down || up, |count| {
-        crate::i18n::ngettext(
-            locale,
-            "{} emoji available",
-            "{} emoji available",
-            u32::try_from(count).unwrap_or(u32::MAX),
-        )
-        .replace("{}", &count.to_string())
-    });
+    let highlighted = candidates[app.emoji_selected].name;
+    let reached = suggestion_speech(
+        app,
+        ui,
+        field,
+        "emoji",
+        candidates.len(),
+        highlighted,
+        down || up,
+        |count| {
+            crate::i18n::ngettext(
+                locale,
+                "{} emoji available",
+                "{} emoji available",
+                u32::try_from(count).unwrap_or(u32::MAX),
+            )
+            .replace("{}", &count.to_string())
+        },
+    );
     let submit = take_plain_key(ui, Key::Enter) || take_plain_key(ui, Key::Tab);
     let mut picked = submit.then(|| candidates[app.emoji_selected].clone());
     let palette = app.palette;
@@ -1449,15 +1496,26 @@ fn mention_picker(app: &mut App, ui: &mut egui::Ui, chat: &Chat, field: egui::Id
     }
     app.mention_selected = app.mention_selected.min(candidates.len() - 1);
     let locale = app.locale;
-    let reached = suggestion_speech(app, ui, "mention", candidates.len(), down || up, |count| {
-        crate::i18n::ngettext(
-            locale,
-            "{} person available",
-            "{} people available",
-            u32::try_from(count).unwrap_or(u32::MAX),
-        )
-        .replace("{}", &count.to_string())
-    });
+    let highlighted =
+        crate::a11y::without_push_marker(&candidates[app.mention_selected].1).to_owned();
+    let reached = suggestion_speech(
+        app,
+        ui,
+        field,
+        "mention",
+        candidates.len(),
+        &highlighted,
+        down || up,
+        |count| {
+            crate::i18n::ngettext(
+                locale,
+                "{} person available",
+                "{} people available",
+                u32::try_from(count).unwrap_or(u32::MAX),
+            )
+            .replace("{}", &count.to_string())
+        },
+    );
     let submit = take_plain_key(ui, Key::Enter) || take_plain_key(ui, Key::Tab);
     let mut picked = submit.then(|| candidates[app.mention_selected].clone());
     let palette = app.palette;
