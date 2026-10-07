@@ -29068,8 +29068,8 @@ mod suggestion_access_tests {
     #[test]
     fn the_field_names_the_suggestion_the_arrows_reach() {
         for (page, units) in [
-            ("mention", [" person", " people"]),
-            ("emoji-complete", [" emoji", " emoji"]),
+            ("mention", [" person available", " people available"]),
+            ("emoji-complete", [" emoji available", " emoji available"]),
         ] {
             let (mut app, ctx) = settings(page);
             if page == "mention" {

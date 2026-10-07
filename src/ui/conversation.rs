@@ -1211,6 +1211,9 @@ fn suggestion_speech(
     say: impl Fn(usize) -> String,
 ) -> bool {
     let id = egui::Id::new(("suggestion-speech", kind));
+    // The list draws before the field takes this frame's keys, so a
+    // keystroke changes the count a frame later: compare the text instead.
+    let text = app.composer.clone();
     let (typed, moved) = ui.input(|input| {
         let mut typed = false;
         let mut moved = false;
@@ -1232,27 +1235,43 @@ fn suggestion_speech(
         }
         (typed, moved)
     });
-    let shown: Option<(usize, bool)> = ui.ctx().data(|data| data.get_temp(id));
-    if shown.is_none_or(|(last, _)| typed && last != count) {
+    let shown: Option<(usize, String, bool)> = ui.ctx().data(|data| data.get_temp(id));
+    let edited = shown.as_ref().is_some_and(|(_, last, _)| *last != text);
+    if shown
+        .as_ref()
+        .is_none_or(|(last, _, _)| edited && *last != count)
+    {
         app.announcer
             .say(crate::announcer::Category::Status, say(count));
     }
-    let mut reached = shown.is_some_and(|(_, reached)| reached);
-    if typed || moved {
+    let mut reached = shown.as_ref().is_some_and(|(_, _, reached)| *reached);
+    if typed || moved || edited {
         reached = false;
     }
     if arrowed {
         reached = true;
     }
     ui.ctx()
-        .data_mut(|data| data.insert_temp(id, (count, reached)));
+        .data_mut(|data| data.insert_temp(id, (count, text, reached)));
     reached
 }
 
 /// The list of `kind` is gone: the next one is announced again.
 fn suggestions_gone(ui: &egui::Ui, kind: &'static str) {
     let id = egui::Id::new(("suggestion-speech", kind));
-    ui.ctx().data_mut(|data| data.remove::<(usize, bool)>(id));
+    ui.ctx()
+        .data_mut(|data| data.remove::<(usize, String, bool)>(id));
+}
+
+/// Makes `ui`, which holds a suggestion list's rows, the list itself: a
+/// screen reader then says its name, and takes "2 of 5" from its size.
+fn suggestion_list_node(ui: &egui::Ui, locale: crate::i18n::Locale, len: usize) {
+    let label = crate::i18n::gettext(locale, "Suggestions").into_owned();
+    ui.ctx().accesskit_node_builder(ui.unique_id(), |node| {
+        node.set_role(egui::accesskit::Role::ListBox);
+        node.set_label(label);
+        node.set_size_of_set(len);
+    });
 }
 
 /// Slack-style emoji suggestions above the composer. The composer keeps
@@ -1287,8 +1306,8 @@ fn emoji_suggestions(app: &mut App, ui: &mut egui::Ui, field: egui::Id) {
     let reached = suggestion_speech(app, ui, "emoji", candidates.len(), down || up, |count| {
         crate::i18n::ngettext(
             locale,
-            "{} emoji",
-            "{} emoji",
+            "{} emoji available",
+            "{} emoji available",
             u32::try_from(count).unwrap_or(u32::MAX),
         )
         .replace("{}", &count.to_string())
@@ -1301,6 +1320,7 @@ fn emoji_suggestions(app: &mut App, ui: &mut egui::Ui, field: egui::Id) {
     let list = widgets::raised(ui, &palette, suggestion_frame(&palette), |ui| {
         let row_height = 36.0;
         ui.spacing_mut().item_spacing.y = 0.0;
+        suggestion_list_node(ui, locale, candidates.len());
         for (index, candidate) in candidates.iter().enumerate() {
             // A fixed id per emoji, so the option a screen reader is on keeps
             // its node while typing reorders the list.
@@ -1432,8 +1452,8 @@ fn mention_picker(app: &mut App, ui: &mut egui::Ui, chat: &Chat, field: egui::Id
     let reached = suggestion_speech(app, ui, "mention", candidates.len(), down || up, |count| {
         crate::i18n::ngettext(
             locale,
-            "{} person",
-            "{} people",
+            "{} person available",
+            "{} people available",
             u32::try_from(count).unwrap_or(u32::MAX),
         )
         .replace("{}", &count.to_string())
@@ -1474,6 +1494,7 @@ fn mention_picker(app: &mut App, ui: &mut egui::Ui, chat: &Chat, field: egui::Id
             .vertical_scroll_offset(offset)
             .show_rows(ui, row_height, candidates.len(), |ui, range| {
                 ui.spacing_mut().item_spacing.y = 0.0;
+                suggestion_list_node(ui, locale, candidates.len());
                 for index in range {
                     let (id, label) = &candidates[index];
                     // A fixed id per member: the rows drawn depend on the
