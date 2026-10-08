@@ -721,6 +721,7 @@ pub async fn run(
         status: LinkStatus::Starting,
         pairing_phone: None,
         pair_code: None,
+        pairing_generation: 0,
         qr: None,
         syncing: false,
         sync_deadline: None,
@@ -1111,6 +1112,10 @@ struct Worker {
     status: LinkStatus,
     pairing_phone: Option<String>,
     pair_code: Option<String>,
+    /// Which pairing request is current. Each `PairWithPhone` and
+    /// `CancelPairing` moves it on, so the answer to an older request, which
+    /// can still arrive, is dropped rather than shown for the new one.
+    pairing_generation: u64,
     qr: Option<String>,
     syncing: bool,
     sync_deadline: Option<Instant>,
@@ -3168,11 +3173,18 @@ impl Worker {
                 let status = self.unlinked();
                 self.set_status(status);
             }
-            E::PairingCode(code) => {
-                self.pair_code = Some(code.code.clone());
-                let status = self.unlinked();
-                self.set_status(status);
-            }
+            // The request's own answer, `Command::PairCode`, brings the same
+            // code and says which request it answers; this event says
+            // neither, so a code meant for a request already replaced could
+            // be shown for the new one. It is left to the answer.
+            E::PairingCode(_) => {}
+            // Before its code comes, a request's failure is the request's own,
+            // which its answer, `Command::PairCode`, reports, matched to the
+            // request it answers. This event names none: one left from a
+            // request since withdrawn would end the next. Once a code is
+            // shown, the event is the only word that linking with it failed
+            // (the library reports a superseded code's failure for no one).
+            E::PairingCodeError(_) if self.pair_code.is_none() => {}
             E::PairingCodeError(error) => {
                 self.pair_code = None;
                 self.pairing_phone = None;
@@ -7326,6 +7338,8 @@ impl Worker {
                 };
                 self.pairing_phone = Some(phone.clone());
                 self.pair_code = None;
+                self.pairing_generation += 1;
+                let generation = self.pairing_generation;
                 let status = self.unlinked();
                 self.set_status(status);
                 let commands = self.commands.clone();
@@ -7337,10 +7351,14 @@ impl Worker {
                         })
                         .await
                         .map_err(|error| error.to_string());
-                    let _ = commands.send(Command::PairCode { result });
+                    let _ = commands.send(Command::PairCode { generation, result });
                 });
             }
-            Command::PairCode { result } => match result {
+            // A code answered after it was withdrawn, or for a request since
+            // replaced by another, is not shown.
+            Command::PairCode { generation, .. }
+                if self.pairing_phone.is_none() || generation != self.pairing_generation => {}
+            Command::PairCode { result, .. } => match result {
                 Ok(code) => {
                     self.pair_code = Some(code);
                     let status = self.unlinked();
@@ -7355,6 +7373,18 @@ impl Worker {
                     self.set_status(status);
                 }
             },
+            Command::CancelPairing => {
+                self.pairing_phone = None;
+                self.pair_code = None;
+                self.pairing_generation += 1;
+                // Done before the next command: a cancellation still under
+                // way would withdraw the request that follows it.
+                if let Some(client) = self.client.clone() {
+                    client.cancel_pair_code().await;
+                }
+                let status = self.unlinked();
+                self.set_status(status);
+            }
             Command::Unlink => {
                 if let Some(client) = self.client.clone() {
                     client.logout().await;
@@ -13975,6 +14005,161 @@ mod tests {
         assert!(matches!(events.try_recv().unwrap(), Event::Error(_)));
     }
 
+    /// A pairing code withdrawn with `CancelPairing` brings the QR code
+    /// back, and the library's answer to it, a code or an error, arriving
+    /// afterwards is dropped: it would show a code nobody asked for any more.
+    /// A code still asked for is shown.
+    #[tokio::test]
+    async fn a_code_answered_after_it_was_withdrawn_is_not_shown() {
+        let (mut worker, events, _, _) = receipt_tests::worker();
+        worker.qr = Some("2@qr".into());
+        worker.pairing_phone = Some("15550001111".into());
+        worker.status = worker.unlinked();
+        worker.handle_command(Command::CancelPairing).await;
+        let qr_again = LinkStatus::Unlinked {
+            qr: Some("2@qr".into()),
+            pair_code: None,
+            pairing_phone: None,
+        };
+        assert_eq!(worker.status, qr_again);
+        assert!(matches!(events.try_recv(), Ok(Event::Link(status)) if status == qr_again));
+        for result in [Ok("LATE1234".to_owned()), Err("timed out".to_owned())] {
+            worker
+                .handle_command(Command::PairCode {
+                    generation: 0,
+                    result,
+                })
+                .await;
+            assert_eq!(worker.status, qr_again);
+            assert!(worker.pair_code.is_none());
+            assert!(events.try_recv().is_err(), "nothing is said or shown");
+        }
+
+        worker.pairing_phone = Some("15550001111".into());
+        worker
+            .handle_command(Command::PairCode {
+                generation: worker.pairing_generation,
+                result: Ok("ABCD1234".to_owned()),
+            })
+            .await;
+        assert_eq!(worker.pair_code.as_deref(), Some("ABCD1234"));
+        assert!(matches!(
+            events.try_recv(),
+            Ok(Event::Link(LinkStatus::Unlinked {
+                pair_code: Some(_),
+                ..
+            }))
+        ));
+    }
+
+    /// The library also hands a new code over as an event, sent before its
+    /// answer. It says neither which request it answers, so it is never
+    /// shown, after a withdrawal or not: the answer brings the same code.
+    #[tokio::test]
+    async fn a_code_event_is_left_to_the_requests_answer() {
+        let (mut worker, events, _, _) = receipt_tests::worker();
+        worker.qr = Some("2@qr".into());
+        worker.pairing_phone = Some("15550001111".into());
+        worker.status = worker.unlinked();
+        let code = |code: &str| {
+            Arc::new(wa_events::Event::PairingCode(
+                wa_events::PairingCode::builder()
+                    .code(code.to_owned())
+                    .timeout(std::time::Duration::from_secs(180))
+                    .build(),
+            ))
+        };
+        worker.handle_command(Command::CancelPairing).await;
+        let qr_again = worker.unlinked();
+        assert!(matches!(events.try_recv(), Ok(Event::Link(_))));
+        worker.handle_wa_event(code("LATE1234")).await;
+        assert_eq!(worker.status, qr_again);
+        assert!(worker.pair_code.is_none());
+        assert!(events.try_recv().is_err(), "nothing is shown");
+
+        worker.pairing_phone = Some("15550001111".into());
+        worker.handle_wa_event(code("ABCD1234")).await;
+        assert!(worker.pair_code.is_none());
+        assert!(events.try_recv().is_err(), "nothing is shown");
+        worker
+            .handle_command(Command::PairCode {
+                generation: worker.pairing_generation,
+                result: Ok("ABCD1234".to_owned()),
+            })
+            .await;
+        assert_eq!(worker.pair_code.as_deref(), Some("ABCD1234"));
+        assert!(matches!(events.try_recv(), Ok(Event::Link(_))));
+    }
+
+    /// The library reports a failed request as an event too, naming no
+    /// request. While a code is awaited it is left to the request's answer,
+    /// so one left from a request withdrawn meanwhile does not end the new
+    /// one; once a code is shown, it ends that code and says so.
+    #[tokio::test]
+    async fn a_pairing_error_event_ends_only_a_shown_code() {
+        let (mut worker, events, _, _) = receipt_tests::worker();
+        worker.qr = Some("2@qr".into());
+        worker.pairing_phone = Some("15550001111".into());
+        worker.status = worker.unlinked();
+        let failed = || {
+            Arc::new(wa_events::Event::PairingCodeError(
+                wa_events::PairingCodeError::builder()
+                    .error("timed out".to_owned())
+                    .build(),
+            ))
+        };
+        worker.handle_wa_event(failed()).await;
+        assert_eq!(worker.pairing_phone.as_deref(), Some("15550001111"));
+        assert!(events.try_recv().is_err(), "nothing is said or shown");
+        worker
+            .handle_command(Command::PairCode {
+                generation: worker.pairing_generation,
+                result: Ok("ABCD1234".to_owned()),
+            })
+            .await;
+        assert!(matches!(events.try_recv(), Ok(Event::Link(_))));
+        worker.handle_wa_event(failed()).await;
+        assert!(worker.pair_code.is_none());
+        assert!(worker.pairing_phone.is_none());
+        assert!(matches!(
+            events.try_recv(),
+            Ok(Event::Error(error)) if error == "Could not link by phone number: timed out"
+        ));
+    }
+
+    /// A number asked for again replaces the request before it: the older
+    /// request's answer, a code or an error, can still come, and is dropped
+    /// rather than shown, or spoken, for the new number.
+    #[tokio::test]
+    async fn an_older_requests_answer_is_not_shown_for_the_new_one() {
+        let (mut worker, events, _, _) = receipt_tests::worker();
+        worker.qr = Some("2@qr".into());
+        worker.pairing_phone = Some("15550001111".into());
+        worker.pairing_generation = 2;
+        worker.status = worker.unlinked();
+        for result in [Ok("OLD12345".to_owned()), Err("rate limited".to_owned())] {
+            worker
+                .handle_command(Command::PairCode {
+                    generation: 1,
+                    result,
+                })
+                .await;
+            assert!(worker.pair_code.is_none());
+            assert_eq!(worker.pairing_phone.as_deref(), Some("15550001111"));
+            assert!(events.try_recv().is_err(), "nothing is said or shown");
+        }
+        worker
+            .handle_command(Command::PairCode {
+                generation: 2,
+                result: Ok("NEW12345".to_owned()),
+            })
+            .await;
+        assert_eq!(worker.pair_code.as_deref(), Some("NEW12345"));
+        // A withdrawal moves the request on too.
+        worker.handle_command(Command::CancelPairing).await;
+        assert_eq!(worker.pairing_generation, 3);
+    }
+
     #[tokio::test]
     async fn channel_mutes_from_the_server_mirror_into_the_archive() {
         let (mut worker, _events, _, _) = receipt_tests::worker();
@@ -16573,6 +16758,7 @@ mod receipt_tests {
             status: LinkStatus::Connected,
             pairing_phone: None,
             pair_code: None,
+            pairing_generation: 0,
             qr: None,
             syncing: false,
             sync_deadline: None,

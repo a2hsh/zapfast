@@ -306,6 +306,15 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
             actions.push(Action::CloseUpdate);
         } else if app.dialog.is_some() {
             actions.push(Action::CloseDialog);
+        } else if matches!(
+            app.link,
+            crate::backend::LinkStatus::Unlinked {
+                pairing_phone: Some(_),
+                ..
+            }
+        ) {
+            // From the pairing code, back to the phone number.
+            actions.push(Action::CancelPairing);
         } else if app.recording.is_some() {
             actions.push(Action::CancelRecording);
         } else if app.picker.is_some() || app.reaction_target.is_some() {

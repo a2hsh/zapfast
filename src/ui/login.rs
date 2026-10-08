@@ -349,6 +349,8 @@ fn body(app: &mut App, ui: &mut egui::Ui) {
                     palette.accent,
                     &format!("Requesting a code for +{phone}…"),
                 );
+                ui.add_space(10.0);
+                change_number(app, ui);
             } else if let Some(qr) = qr {
                 qr_view(app, ui, &qr);
             } else {
@@ -475,11 +477,49 @@ fn pair_code_view(app: &mut App, ui: &mut egui::Ui, code: &str, phone: Option<&s
         .corner_radius(CornerRadius::same(theme::RADIUS))
         .inner_margin(Margin::symmetric(22, 12))
         .show(ui, |ui| {
-            let text = theme::text(ui, &shown, theme::bold(30.0), palette.text);
-            // Spelled, so a screen reader does not read it as a word.
-            let spoken = spelled(&shown);
-            ui.ctx()
-                .accesskit_node_builder(text.id, |node| node.set_label(spoken));
+            // A read-only field, so a screen reader can read the code a
+            // character at a time with the arrows. It looks as the text did.
+            let font = theme::bold(30.0);
+            let width = ui
+                .painter()
+                .layout_no_wrap(shown.clone(), font.clone(), palette.text)
+                .size()
+                .x
+                + 4.0;
+            let mut text: &str = &shown;
+            let field = egui::TextEdit::singleline(&mut text)
+                .id(code_field_id())
+                .font(font)
+                .text_color(palette.text)
+                .frame(Frame::NONE)
+                .margin(Margin::ZERO)
+                .horizontal_align(Align::Center)
+                .desired_width(width)
+                .show(ui)
+                .response;
+            let label = crate::i18n::gettext(app.locale, "Pairing code").into_owned();
+            let described = crate::i18n::gettext(
+                app.locale,
+                "Read it with the arrow keys. Press Escape to change the phone number.",
+            )
+            .into_owned();
+            ui.ctx().accesskit_node_builder(field.id, |node| {
+                node.set_label(label);
+                node.set_description(described);
+                node.set_read_only();
+            });
+            // A new code takes focus once, for keyboard and screen reader
+            // users: it was announced, and here it can be read again.
+            let focused_id = egui::Id::new("login-code-focused");
+            let done = ui
+                .ctx()
+                .data(|data| data.get_temp::<String>(focused_id))
+                .is_some_and(|done| done == code);
+            if !done && super::keys::keyboard_or_reader(ui.ctx()) {
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(focused_id, code.to_owned()));
+                field.request_focus();
+            }
         });
     ui.add_space(8.0);
     let steps = [
@@ -492,25 +532,26 @@ fn pair_code_view(app: &mut App, ui: &mut egui::Ui, code: &str, phone: Option<&s
     ui.horizontal(|ui| {
         ui.add_space((ui.available_width() - 200.0).max(0.0) / 2.0);
         let copy = theme::soft_action_button(ui, &palette, Some(Icon::Copy), "Copy code", false);
-        let spoken = spelled(&shown);
-        ui.ctx()
-            .accesskit_node_builder(copy.id, |node| node.set_description(spoken));
-        // A new code takes focus once, for keyboard and screen reader users:
-        // the code is announced, and Copy is what they can do with it.
-        let focused_id = egui::Id::new("login-code-focused");
-        let done = ui
-            .ctx()
-            .data(|data| data.get_temp::<String>(focused_id))
-            .is_some_and(|done| done == code);
-        if !done && super::keys::keyboard_or_reader(ui.ctx()) {
-            ui.ctx()
-                .data_mut(|data| data.insert_temp(focused_id, code.to_owned()));
-            copy.request_focus();
-        }
         if copy.clicked() {
             app.actions.push(Action::CopyText(code.to_owned()));
         }
     });
+    ui.add_space(6.0);
+    change_number(app, ui);
+}
+
+/// The pairing code as a read-only field: the arrows read it.
+fn code_field_id() -> egui::Id {
+    egui::Id::new("login-pair-code")
+}
+
+/// One step back from a pairing code to the phone number, kept as it was,
+/// which Escape also takes; from there Escape goes on to the QR code.
+fn change_number(app: &mut App, ui: &mut egui::Ui) {
+    let palette = app.palette;
+    if theme::link(ui, "Change phone number", theme::medium(13.0), palette.link).clicked() {
+        app.actions.push(Action::CancelPairing);
+    }
 }
 
 /// Numbered steps, drawn as before, that a screen reader finds as a list.

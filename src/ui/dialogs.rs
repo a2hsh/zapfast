@@ -1823,7 +1823,11 @@ fn pair_with_phone(app: &mut App, ui: &mut egui::Ui) {
                 ui.ctx().accesskit_node_builder(response.id, |node| {
                     node.set_description(explained);
                 });
-                if !response.has_focus() && app.pair_phone.is_empty() {
+                // Empty when it opens, or kept when the code screen came back
+                // here: either way, the field is where to start.
+                if !response.has_focus()
+                    && (app.pair_phone.is_empty() || ui.memory(|memory| memory.focused().is_none()))
+                {
                     response.request_focus();
                 }
             });

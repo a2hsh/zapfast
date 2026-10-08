@@ -29261,6 +29261,7 @@ mod linking_access_tests {
     use super::settings_access_tests::{focused, input_frame, tree};
     use super::tests::{app, press_key, render};
     use super::*;
+    use crate::backend::Command;
     use egui::accesskit::{Node, NodeId, Role, TreeUpdate};
     use egui::{Key, Modifiers};
 
@@ -29385,7 +29386,7 @@ mod linking_access_tests {
     }
 
     /// Escape returns the enlarged QR code to the card, with focus on it,
-    /// and does nothing else: no dialog opens.
+    /// and does nothing else: no dialog opens and nothing is withdrawn.
     #[test]
     fn escape_returns_the_enlarged_qr_code_and_focus_to_it() {
         let (mut app, ctx) = linking("login");
@@ -29400,6 +29401,12 @@ mod linking_access_tests {
         assert_eq!(tree.focus, qr);
         assert_eq!(focused(&tree).label(), Some("QR code for linking"));
         assert!(app.dialog.is_none());
+        assert!(
+            !app.backend
+                .take_demo_commands()
+                .iter()
+                .any(|command| matches!(command, Command::CancelPairing))
+        );
     }
 
     /// Every text painted in a frame, with where it is.
@@ -29469,5 +29476,133 @@ mod linking_access_tests {
         );
         app.attach(&egui::Context::default());
         assert!(!app.qr_enlarged);
+    }
+
+    /// The number a code is asked for in these tests.
+    const PHONE: &str = "15550001111";
+
+    /// The pairing code's status while a code is asked for or shown.
+    fn pairing(code: Option<&str>) -> LinkStatus {
+        LinkStatus::Unlinked {
+            qr: None,
+            pair_code: code.map(str::to_owned),
+            pairing_phone: Some(PHONE.to_owned()),
+        }
+    }
+
+    /// The QR code again, as the worker shows it once a code is withdrawn.
+    fn qr_again() -> LinkStatus {
+        LinkStatus::Unlinked {
+            qr: Some(sample_qr()),
+            pair_code: None,
+            pairing_phone: None,
+        }
+    }
+
+    /// How many times the app asked the worker to withdraw the code.
+    fn withdrawn(app: &App) -> usize {
+        app.backend
+            .take_demo_commands()
+            .iter()
+            .filter(|command| matches!(command, Command::CancelPairing))
+            .count()
+    }
+
+    /// A pairing code takes focus in a read-only field named for it, whose
+    /// value is the code as shown, so the arrows read it a letter at a time;
+    /// typing does not change it.
+    #[test]
+    fn a_pairing_code_takes_focus_in_a_read_only_field() {
+        let (mut app, ctx) = linking("pair");
+        ctx.enable_accesskit();
+        render(&mut app, &ctx);
+        let field = focused(&tree(&mut app, &ctx));
+        assert_eq!(field.role(), Role::TextInput);
+        assert_eq!(field.label(), Some("Pairing code"));
+        assert_eq!(field.value(), Some("FWAP-1234"));
+        assert!(field.is_read_only());
+        assert_eq!(
+            field.description(),
+            Some("Read it with the arrow keys. Press Escape to change the phone number.")
+        );
+        input_frame(&mut app, &ctx, vec![egui::Event::Text("X".into())]);
+        render(&mut app, &ctx);
+        let field = focused(&tree(&mut app, &ctx));
+        assert_eq!(field.label(), Some("Pairing code"));
+        assert_eq!(field.value(), Some("FWAP-1234"));
+    }
+
+    /// Enter on the number closes the phone number dialog, which would cover
+    /// the code and keep focus, and asks for a code; the code takes focus
+    /// when it arrives.
+    #[test]
+    fn get_a_code_closes_the_dialog_and_the_code_takes_focus() {
+        let (mut app, ctx) = linking("phone");
+        ctx.enable_accesskit();
+        app.pair_phone = PHONE.to_owned();
+        render(&mut app, &ctx);
+        assert_eq!(focused(&tree(&mut app, &ctx)).label(), Some("Phone number"));
+        app.backend.take_demo_commands();
+        press_key(&mut app, &ctx, Key::Enter, Modifiers::NONE);
+        assert!(app.dialog.is_none());
+        assert!(
+            app.backend
+                .take_demo_commands()
+                .iter()
+                .any(|command| matches!(command, Command::PairWithPhone(phone) if phone == PHONE))
+        );
+        app.link = pairing(None);
+        render(&mut app, &ctx);
+        app.link = pairing(Some("FWAP1234"));
+        render(&mut app, &ctx);
+        let field = focused(&tree(&mut app, &ctx));
+        assert_eq!(field.label(), Some("Pairing code"));
+        assert_eq!(field.value(), Some("FWAP-1234"));
+    }
+
+    /// Escape on a pairing code withdraws it and steps back to the phone
+    /// number dialog, with the number kept and in focus; the same Escape
+    /// does not also close the dialog it opened. From there, Escape closes
+    /// the dialog only, on the QR code, with nothing more to withdraw.
+    #[test]
+    fn escape_on_a_pairing_code_steps_back_to_the_phone_number() {
+        let (mut app, ctx) = linking("pair");
+        ctx.enable_accesskit();
+        app.pair_phone = PHONE.to_owned();
+        render(&mut app, &ctx);
+        assert_eq!(focused(&tree(&mut app, &ctx)).label(), Some("Pairing code"));
+        withdrawn(&app);
+        press_key(&mut app, &ctx, Key::Escape, Modifiers::NONE);
+        assert_eq!(app.dialog, Some(Dialog::PairWithPhone));
+        assert_eq!(withdrawn(&app), 1);
+        assert_eq!(app.pair_phone, PHONE);
+        app.link = qr_again();
+        render(&mut app, &ctx);
+        assert_eq!(app.dialog, Some(Dialog::PairWithPhone));
+        let field = focused(&tree(&mut app, &ctx));
+        assert_eq!(field.label(), Some("Phone number"));
+        assert_eq!(field.value(), Some(PHONE));
+        press_key(&mut app, &ctx, Key::Escape, Modifiers::NONE);
+        assert!(app.dialog.is_none());
+        assert_eq!(withdrawn(&app), 0, "nothing left to withdraw");
+        assert!(named(&tree(&mut app, &ctx), "QR code for linking").is_some());
+    }
+
+    /// "Change phone number", under a code or while one is asked for, does
+    /// what Escape does: withdraws it and steps back to the number.
+    #[test]
+    fn change_phone_number_withdraws_the_code() {
+        for code in [Some("FWAP1234"), None] {
+            let (mut app, ctx) = linking("pair");
+            app.link = pairing(code);
+            app.pair_phone = PHONE.to_owned();
+            render(&mut app, &ctx);
+            let (_, link) = named(&tree(&mut app, &ctx), "Change phone number").expect("the link");
+            withdrawn(&app);
+            click(&mut app, &ctx, middle(&link));
+            assert_eq!(app.dialog, Some(Dialog::PairWithPhone), "{code:?}");
+            assert_eq!(withdrawn(&app), 1, "{code:?}");
+            assert_eq!(app.pair_phone, PHONE);
+        }
     }
 }

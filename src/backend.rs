@@ -795,6 +795,8 @@ pub enum Command {
         success: bool,
     },
     PairWithPhone(String),
+    /// Withdraws the pairing code and shows the QR code again.
+    CancelPairing,
     /// Unlinks the device remotely and locally.
     Unlink,
     /// Unlinks this account and deletes its local folders.
@@ -915,8 +917,9 @@ pub enum Command {
         /// snapshot older than a rename made here cannot restore the old name.
         subject_generation: u64,
     },
-    /// Internal pairing-code result.
+    /// Internal pairing-code result, for the pairing request `generation`.
     PairCode {
+        generation: u64,
         result: Result<String, String>,
     },
     /// Internal account read-receipt setting.

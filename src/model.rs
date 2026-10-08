@@ -2875,6 +2875,9 @@ pub enum Action {
     ResetZoom,
     /// Requests a pairing code for a phone number.
     PairWithPhone(String),
+    /// Drops a pairing code, asked for or shown, and returns to the phone
+    /// number, kept as it was.
+    CancelPairing,
     /// Unlinks the device remotely and locally.
     Unlink,
     /// Hides everything behind the app lock, when a password is set.

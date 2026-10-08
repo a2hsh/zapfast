@@ -9768,8 +9768,16 @@ impl App {
                         "Enter the phone number with its country code, using digits only",
                     );
                 } else {
+                    // The code shows on the screen below: the dialog would
+                    // cover it and keep focus away from it.
+                    self.dialog = None;
                     self.backend.send(Command::PairWithPhone(digits));
                 }
+            }
+            Action::CancelPairing => {
+                // One step back: the number stays, to correct or ask again.
+                self.backend.send(Command::CancelPairing);
+                self.dialog = Some(Dialog::PairWithPhone);
             }
             Action::Unlink => {
                 self.dialog = None;
