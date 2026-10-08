@@ -29261,7 +29261,7 @@ mod linking_access_tests {
     use super::settings_access_tests::{focused, input_frame, tree};
     use super::tests::{app, press_key, render};
     use super::*;
-    use crate::backend::Command;
+    use crate::backend::{Command, Event};
     use egui::accesskit::{Node, NodeId, Role, TreeUpdate};
     use egui::{Key, Modifiers};
 
@@ -29453,6 +29453,32 @@ mod linking_access_tests {
         assert!(hint.min.y > window.center().y, "{hint:?}");
     }
 
+    /// A code is timed from when its account got it, not from the window's
+    /// first look at it: one that came 160 seconds before the window showed
+    /// it has 20 left, and its warning is due at once.
+    #[test]
+    fn a_pairing_code_shown_late_is_timed_from_its_arrival() {
+        let (mut app, ctx) = linking("pair");
+        app.pair_code_arrived = Some((
+            "FWAP1234".into(),
+            std::time::Instant::now() - std::time::Duration::from_secs(160),
+        ));
+        frame_at(&mut app, &ctx, 1000.0);
+        frame_at(&mut app, &ctx, 1000.1);
+        // Said with the code, which the screen says as it opens.
+        assert!(
+            app.announcer
+                .spoken()
+                .iter()
+                .any(|spoken| spoken.contains(WARNING)),
+            "{:?}",
+            app.announcer.spoken()
+        );
+        frame_at(&mut app, &ctx, 1020.0);
+        let tree = frame_at(&mut app, &ctx, 1020.1);
+        assert!(named(&tree, "This code expired").is_some());
+    }
+
     /// The enlarged QR code holds the keys only on the linking screen that
     /// draws it: left set once linked, the window's shortcuts still work, and
     /// a new window starts with the code in its card.
@@ -29604,5 +29630,189 @@ mod linking_access_tests {
             assert_eq!(withdrawn(&app), 1, "{code:?}");
             assert_eq!(app.pair_phone, PHONE);
         }
+    }
+
+    /// The link says which number the code is for, before deciding to
+    /// change it: while a code is asked for, shown, or expired.
+    #[test]
+    fn change_phone_number_says_the_current_number() {
+        for (code, expired) in [
+            (None, false),
+            (Some("FWAP1234"), false),
+            (Some("FWAP1234"), true),
+        ] {
+            let (mut app, ctx) = linking("pair");
+            app.link = pairing(code);
+            frame_at(&mut app, &ctx, 1000.0);
+            let tree = frame_at(&mut app, &ctx, if expired { 1180.0 } else { 1001.0 });
+            assert_eq!(named(&tree, "This code expired").is_some(), expired);
+            let (_, link) = named(&tree, "Change phone number").expect("the link");
+            assert_eq!(
+                link.description(),
+                Some("Current number: +15550001111"),
+                "{code:?}, expired {expired}"
+            );
+        }
+    }
+
+    /// One frame at `time` seconds on the window's clock, with AccessKit on.
+    fn frame_at(app: &mut App, ctx: &egui::Context, time: f64) -> TreeUpdate {
+        ctx.enable_accesskit();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 780.0),
+                )),
+                time: Some(time),
+                ..Default::default()
+            },
+            |ui| {
+                let ctx = ui.ctx().clone();
+                app.background_frame(&ctx);
+                app.frame_ui(ui);
+            },
+        );
+        output.textures_delta.clear();
+        output
+            .platform_output
+            .accesskit_update
+            .expect("accessibility tree")
+    }
+
+    /// How many announcer slots say `text`.
+    fn saying(app: &App, text: &str) -> usize {
+        app.announcer
+            .spoken()
+            .iter()
+            .filter(|spoken| spoken.trim_end_matches('\u{200B}') == text)
+            .count()
+    }
+
+    const WARNING: &str = "30 seconds left to enter the code";
+
+    /// The pairing page with its code shown at `start` seconds, then run out
+    /// 180 seconds later; returns the tree once settled.
+    fn expired(app: &mut App, ctx: &egui::Context, start: f64) -> TreeUpdate {
+        frame_at(app, ctx, start);
+        frame_at(app, ctx, start + 180.0);
+        frame_at(app, ctx, start + 180.1);
+        frame_at(app, ctx, start + 180.2)
+    }
+
+    /// A code works for 180 seconds from when it arrived. A warning is said
+    /// once, 30 seconds before; at 180 the code gives way to "This code
+    /// expired", which is said, with focus on "Get a new code". Escape there
+    /// still steps back to the number.
+    #[test]
+    fn a_pairing_code_warns_at_150_seconds_and_expires_at_180() {
+        let (mut app, ctx) = linking("pair");
+        app.pair_phone = PHONE.to_owned();
+        let start = 1000.0;
+        frame_at(&mut app, &ctx, start);
+        frame_at(&mut app, &ctx, start + 149.9);
+        assert_eq!(saying(&app, WARNING), 0, "not yet");
+        frame_at(&mut app, &ctx, start + 150.0);
+        assert_eq!(saying(&app, WARNING), 1);
+        frame_at(&mut app, &ctx, start + 160.0);
+        let tree = frame_at(&mut app, &ctx, start + 179.9);
+        assert_eq!(saying(&app, WARNING), 1, "said once");
+        assert!(named(&tree, "Pairing code").is_some(), "still valid");
+        assert!(named(&tree, "This code expired").is_none());
+
+        frame_at(&mut app, &ctx, start + 180.0);
+        let tree = frame_at(&mut app, &ctx, start + 180.1);
+        assert!(named(&tree, "Pairing code").is_none(), "the code is gone");
+        let (_, heading) = named(&tree, "This code expired").expect("the heading");
+        assert_eq!(heading.role(), Role::Heading);
+        assert!(
+            named(
+                &tree,
+                "A code works for three minutes. Get a new one, then enter it on your phone."
+            )
+            .is_some()
+        );
+        assert_eq!(saying(&app, "This code expired. Get a new code."), 1);
+        assert_eq!(focused(&tree).label(), Some("Get a new code"));
+
+        withdrawn(&app);
+        press_key(&mut app, &ctx, Key::Escape, Modifiers::NONE);
+        assert_eq!(app.dialog, Some(Dialog::PairWithPhone));
+        assert_eq!(withdrawn(&app), 1);
+    }
+
+    /// "Get a new code" asks again for the same number. The new code is timed
+    /// from when it arrives, not from the one that ran out.
+    #[test]
+    fn get_a_new_code_asks_again_for_the_same_number() {
+        let (mut app, ctx) = linking("pair");
+        let start = 1000.0;
+        let tree = expired(&mut app, &ctx, start);
+        assert_eq!(focused(&tree).label(), Some("Get a new code"));
+        app.backend.take_demo_commands();
+        press_key(&mut app, &ctx, Key::Enter, Modifiers::NONE);
+        let asked: Vec<_> = app
+            .backend
+            .take_demo_commands()
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::PairWithPhone(phone) => Some(phone),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(asked, [PHONE]);
+        assert!(app.dialog.is_none());
+
+        // The worker asks, then answers with a new code.
+        app.link = pairing(None);
+        frame_at(&mut app, &ctx, start + 200.0);
+        app.link = pairing(Some("NEWC0DE2"));
+        frame_at(&mut app, &ctx, start + 210.0);
+        let tree = frame_at(&mut app, &ctx, start + 210.0 + 179.9);
+        let (_, field) = named(&tree, "Pairing code").expect("the new code works");
+        assert_eq!(field.value(), Some("NEWC-0DE2"));
+        frame_at(&mut app, &ctx, start + 210.0 + 180.0);
+        let tree = frame_at(&mut app, &ctx, start + 210.0 + 180.1);
+        assert!(named(&tree, "This code expired").is_some());
+    }
+
+    /// A refused code request steps back to the phone number dialog, with
+    /// the number kept and in focus, not to the QR code. Once it is closed,
+    /// a refreshed QR code opens nothing.
+    #[test]
+    fn a_failed_code_request_steps_back_to_the_phone_number() {
+        let (mut app, ctx) = linking("pair");
+        ctx.enable_accesskit();
+        let (backend, _commands, events) = crate::backend::Backend::recording_with_events();
+        app.backend = backend;
+        app.link = pairing(None);
+        app.pair_phone = PHONE.to_owned();
+        render(&mut app, &ctx);
+        assert!(app.dialog.is_none());
+        // As the worker reports a refusal: the error, then the QR code.
+        events
+            .send(Event::Error(
+                "Could not link by phone number: rate limited".into(),
+            ))
+            .unwrap();
+        events.send(Event::Link(qr_again())).unwrap();
+        render(&mut app, &ctx);
+        assert_eq!(app.dialog, Some(Dialog::PairWithPhone));
+        assert_eq!(app.pair_phone, PHONE);
+        let field = focused(&tree(&mut app, &ctx));
+        assert_eq!(field.label(), Some("Phone number"));
+        assert_eq!(field.value(), Some(PHONE));
+
+        press_key(&mut app, &ctx, Key::Escape, Modifiers::NONE);
+        assert!(app.dialog.is_none());
+        events
+            .send(Event::Link(LinkStatus::Unlinked {
+                qr: Some("2@another".into()),
+                pair_code: None,
+                pairing_phone: None,
+            }))
+            .unwrap();
+        render(&mut app, &ctx);
+        assert!(app.dialog.is_none(), "no request was outstanding");
     }
 }

@@ -350,7 +350,7 @@ fn body(app: &mut App, ui: &mut egui::Ui) {
                     &format!("Requesting a code for +{phone}…"),
                 );
                 ui.add_space(10.0);
-                change_number(app, ui);
+                change_number(app, ui, Some(&phone));
             } else if let Some(qr) = qr {
                 qr_view(app, ui, &qr);
             } else {
@@ -449,8 +449,62 @@ fn qr_view(app: &mut App, ui: &mut egui::Ui, code: &str) {
     }
 }
 
+/// How long a pairing code works, in seconds: whatsapp-rust's
+/// `PAIR_CODE_VALIDITY_SECS`. The library's `PairingCode` event says what is
+/// left of it, less the request's own time, but the worker hands on only the
+/// code: it is timed from when its account got it
+/// (`Account::pair_code_arrived`).
+const CODE_VALID: f64 = 180.0;
+/// One warning this long before a code runs out, for whoever types slowly.
+const CODE_WARNING: f64 = 30.0;
+// The screen's words say these times: "30 seconds left to enter the code" and
+// "A code works for three minutes". A change here changes them too.
+const _: () = assert!(CODE_VALID == 180.0 && CODE_WARNING == 30.0);
+
 fn pair_code_view(app: &mut App, ui: &mut egui::Ui, code: &str, phone: Option<&str>) {
     let palette = app.palette;
+    // Each code is timed from when its account got it, not from when a
+    // window first shows it: a window opened later, or again, shows what is
+    // left. The window's clock then counts on from there.
+    let now = ui.input(|input| input.time);
+    let clock_id = egui::Id::new("login-code-clock");
+    let (started, warned) = match ui
+        .ctx()
+        .data(|data| data.get_temp::<(String, f64, bool)>(clock_id))
+    {
+        Some((seen, started, warned)) if seen == code => (started, warned),
+        _ => {
+            let waited = app
+                .pair_code_arrived
+                .as_ref()
+                .filter(|(arrived, _)| arrived == code)
+                .map_or(0.0, |(_, at)| at.elapsed().as_secs_f64());
+            let started = now - waited;
+            ui.ctx()
+                .data_mut(|data| data.insert_temp(clock_id, (code.to_owned(), started, false)));
+            (started, false)
+        }
+    };
+    let left = CODE_VALID - (now - started);
+    if left <= 0.0 {
+        expired_view(app, ui, code, phone);
+        return;
+    }
+    if left <= CODE_WARNING && !warned {
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(clock_id, (code.to_owned(), started, true)));
+        app.announcer.say(
+            crate::announcer::Category::Status,
+            crate::i18n::gettext(app.locale, "30 seconds left to enter the code"),
+        );
+    }
+    let wake = if left > CODE_WARNING {
+        left - CODE_WARNING
+    } else {
+        left
+    };
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_secs_f64(wake.max(0.05)));
     let title = theme::text(
         ui,
         "Enter this code on your phone",
@@ -537,7 +591,54 @@ fn pair_code_view(app: &mut App, ui: &mut egui::Ui, code: &str, phone: Option<&s
         }
     });
     ui.add_space(6.0);
-    change_number(app, ui);
+    change_number(app, ui, phone);
+}
+
+/// A code that ran out: it would only fail on the phone, so it gives way to
+/// a new one for the same number, or one step back to the number.
+fn expired_view(app: &mut App, ui: &mut egui::Ui, code: &str, phone: Option<&str>) {
+    let palette = app.palette;
+    let title = theme::text(ui, "This code expired", theme::semibold(16.0), palette.text);
+    heading(ui, &title);
+    theme::paragraph(
+        ui,
+        "A code works for three minutes. Get a new one, then enter it on your phone.",
+        theme::regular(13.0),
+        palette.secondary,
+    );
+    ui.add_space(10.0);
+    let mut again = None;
+    ui.horizontal(|ui| {
+        ui.add_space((ui.available_width() - 160.0).max(0.0) / 2.0);
+        again = Some(theme::pill_button(ui, &palette, "Get a new code", true));
+    });
+    let Some(again) = again else {
+        return;
+    };
+    // Said and focused once per code that ran out.
+    let said_id = egui::Id::new("login-code-expired");
+    let said = ui
+        .ctx()
+        .data(|data| data.get_temp::<String>(said_id))
+        .is_some_and(|said| said == code);
+    if !said {
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(said_id, code.to_owned()));
+        app.announcer.say(
+            crate::announcer::Category::Status,
+            crate::i18n::gettext(app.locale, "This code expired. Get a new code."),
+        );
+        if super::keys::keyboard_or_reader(ui.ctx()) {
+            again.request_focus();
+        }
+    }
+    if again.clicked()
+        && let Some(phone) = phone
+    {
+        app.actions.push(Action::PairWithPhone(phone.to_owned()));
+    }
+    ui.add_space(6.0);
+    change_number(app, ui, phone);
 }
 
 /// The pairing code as a read-only field: the arrows read it.
@@ -547,9 +648,16 @@ fn code_field_id() -> egui::Id {
 
 /// One step back from a pairing code to the phone number, kept as it was,
 /// which Escape also takes; from there Escape goes on to the QR code.
-fn change_number(app: &mut App, ui: &mut egui::Ui) {
+fn change_number(app: &mut App, ui: &mut egui::Ui, phone: Option<&str>) {
     let palette = app.palette;
-    if theme::link(ui, "Change phone number", theme::medium(13.0), palette.link).clicked() {
+    let link = theme::link(ui, "Change phone number", theme::medium(13.0), palette.link);
+    // Which number the code is for, heard before deciding to change it.
+    if let Some(phone) = phone {
+        let current = crate::i18n::gettext(app.locale, "Current number: +{}").replace("{}", phone);
+        ui.ctx()
+            .accesskit_node_builder(link.id, |node| node.set_description(current));
+    }
+    if link.clicked() {
         app.actions.push(Action::CancelPairing);
     }
 }

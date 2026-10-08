@@ -5055,6 +5055,47 @@ impl App {
 
     /// Updates one account's link state, discarding its drafts when it is unlinked.
     fn handle_link(&mut self, status: LinkStatus, live: bool) {
+        // A pairing code is timed from when its account got it, here, on
+        // screen or not (`ui::login`).
+        match &status {
+            LinkStatus::Unlinked {
+                pair_code: Some(code),
+                ..
+            } => {
+                if self
+                    .pair_code_arrived
+                    .as_ref()
+                    .is_none_or(|(seen, _)| seen != code)
+                {
+                    self.pair_code_arrived = Some((code.clone(), Instant::now()));
+                }
+            }
+            _ => self.pair_code_arrived = None,
+        }
+        // A pairing code that failed or was refused goes one step back, to
+        // the number, kept as it was; its error is spoken on its own. The
+        // number's dialog belongs to the window, so only for the account on
+        // screen.
+        let was_pairing = matches!(
+            self.link,
+            LinkStatus::Unlinked {
+                pairing_phone: Some(_),
+                ..
+            }
+        );
+        if live
+            && was_pairing
+            && matches!(
+                status,
+                LinkStatus::Unlinked {
+                    pairing_phone: None,
+                    ..
+                }
+            )
+            && self.dialog.is_none()
+        {
+            self.dialog = Some(Dialog::PairWithPhone);
+        }
         // Only a drop after being connected is news; the startup sequence
         // (Starting, Connecting, Connected) stays silent. An account that is
         // not on screen is never announced.
@@ -12811,6 +12852,62 @@ mod tests {
         app.actions.push(Action::Open(Page::Settings));
         app.apply_actions(&ctx);
         (app, events)
+    }
+
+    /// A pairing code that fails for an account not on screen opens no
+    /// dialog: the number's dialog belongs to the window, and to the account
+    /// on screen, which goes on as it was.
+    #[test]
+    fn a_hidden_accounts_failed_pairing_opens_no_dialog() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, events) =
+            two_accounts_on_settings(directory.path(), "15550007777@s.whatsapp.net");
+        let pairing = LinkStatus::Unlinked {
+            qr: None,
+            pair_code: Some("ABCD1234".into()),
+            pairing_phone: Some("15550001111".into()),
+        };
+        let qr_again = LinkStatus::Unlinked {
+            qr: Some("2@qr".into()),
+            pair_code: None,
+            pairing_phone: None,
+        };
+        app.accounts[1].link = pairing.clone();
+        events.send(Event::Link(qr_again.clone())).unwrap();
+        app.handle_events();
+        assert_eq!(app.accounts[1].link, qr_again);
+        assert!(app.dialog.is_none(), "{:?}", app.dialog);
+        // On screen, it steps back to the number.
+        app.link = pairing;
+        app.handle_link(qr_again, true);
+        assert_eq!(app.dialog, Some(Dialog::PairWithPhone));
+    }
+
+    /// A pairing code is timed from when its account got it: the same code
+    /// again keeps its time, and none clears it.
+    #[test]
+    fn a_pairing_code_is_timed_from_its_arrival() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _events) =
+            App::headless(AppDirs::under(directory.path()), Settings::default());
+        let code = |code: Option<&str>| LinkStatus::Unlinked {
+            qr: None,
+            pair_code: code.map(str::to_owned),
+            pairing_phone: Some("15550001111".into()),
+        };
+        app.handle_link(code(Some("ABCD1234")), false);
+        let (seen, at) = app.pair_code_arrived.clone().expect("timed");
+        assert_eq!(seen, "ABCD1234");
+        app.handle_link(code(Some("ABCD1234")), false);
+        assert_eq!(app.pair_code_arrived, Some((seen, at)), "the same code");
+        app.handle_link(code(Some("EFGH5678")), false);
+        assert!(
+            app.pair_code_arrived
+                .as_ref()
+                .is_some_and(|(seen, _)| seen == "EFGH5678")
+        );
+        app.handle_link(code(None), false);
+        assert!(app.pair_code_arrived.is_none());
     }
 
     #[test]
