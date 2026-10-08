@@ -2980,6 +2980,8 @@ impl App {
     pub fn attach(&mut self, ctx: &egui::Context) {
         // A window is here, so a hidden start's wait for a panel is over.
         self.tray_wait = None;
+        // A new window shows the QR code in its card, as the first one did.
+        self.qr_enlarged = false;
         // Register transcript copy formatting once per egui context.
         ctx.add_plugin(crate::transcript::CopyAnnotator {
             rows: std::sync::Arc::clone(&self.copy_rows),

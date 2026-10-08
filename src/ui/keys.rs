@@ -20,6 +20,14 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
         sticker_view_keys(app, ctx);
         return;
     }
+    // The enlarged QR code takes Escape before anything else could. Only on
+    // the linking screen, which is the only one that draws it.
+    if app.qr_enlarged && !app.is_linked() {
+        if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape)) {
+            super::login::shrink_qr(app, ctx);
+        }
+        return;
+    }
     let editing_text = ctx.text_edit_focused();
     let find = find_action(app);
     let archive = archive_action(app);

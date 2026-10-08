@@ -170,11 +170,22 @@ fn enlarged_qr(app: &mut App, ui: &mut egui::Ui, window: egui::Rect) {
         .show(ui.ctx(), |ui| {
             ui.set_min_size(window.size());
             ui.painter().rect_filled(window, 0.0, egui::Color32::WHITE);
-            let side = (window.width().min(window.height()) - 48.0).max(64.0);
-            let rect = egui::Rect::from_center_size(window.center(), Vec2::splat(side));
+            // Room below the code for how to return, for pointer users.
+            let hint_height = 40.0;
+            let side = (window.width().min(window.height() - hint_height) - 48.0).max(64.0);
+            let center = window.center() - egui::vec2(0.0, hint_height / 2.0);
+            let rect = egui::Rect::from_center_size(center, Vec2::splat(side));
             if let Some(qr) = Qr::encode(&code) {
                 qr.paint(ui, rect, egui::Color32::BLACK, egui::Color32::WHITE);
             }
+            let hint = crate::i18n::gettext(locale, "Click anywhere or press Escape to return");
+            ui.painter().text(
+                egui::pos2(window.center().x, rect.bottom() + hint_height / 2.0 + 4.0),
+                egui::Align2::CENTER_CENTER,
+                hint,
+                theme::regular(15.0),
+                egui::Color32::from_gray(40),
+            );
             let view = ui.interact(window, qr_button_id().with("enlarged"), egui::Sense::click());
             let label = crate::i18n::gettext(locale, "QR code enlarged").into_owned();
             view.widget_info(|| {
@@ -191,16 +202,18 @@ fn enlarged_qr(app: &mut App, ui: &mut egui::Ui, window: egui::Rect) {
             if !view.has_focus() {
                 view.request_focus();
             }
-            let escape = ui.input_mut(|input| {
-                input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
-            });
-            close = escape || view.clicked();
+            // Escape is taken in `keys::handle`, before anything else could.
+            close = view.clicked();
         });
     if close {
-        app.qr_enlarged = false;
-        ui.ctx()
-            .memory_mut(|memory| memory.request_focus(qr_button_id()));
+        shrink_qr(app, ui.ctx());
     }
+}
+
+/// Returns the enlarged QR code to the card, and focus to it there.
+pub(super) fn shrink_qr(app: &mut App, ctx: &egui::Context) {
+    app.qr_enlarged = false;
+    ctx.memory_mut(|memory| memory.request_focus(qr_button_id()));
 }
 
 /// The centred card of the linking and lock screens: the logo, the name,

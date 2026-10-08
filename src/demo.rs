@@ -29383,4 +29383,91 @@ mod linking_access_tests {
             app.announcer.spoken()
         );
     }
+
+    /// Escape returns the enlarged QR code to the card, with focus on it,
+    /// and does nothing else: no dialog opens.
+    #[test]
+    fn escape_returns_the_enlarged_qr_code_and_focus_to_it() {
+        let (mut app, ctx) = linking("login");
+        ctx.enable_accesskit();
+        render(&mut app, &ctx);
+        let qr = tree(&mut app, &ctx).focus;
+        press_key(&mut app, &ctx, Key::Enter, Modifiers::NONE);
+        assert!(app.qr_enlarged);
+        press_key(&mut app, &ctx, Key::Escape, Modifiers::NONE);
+        assert!(!app.qr_enlarged, "Escape returns it");
+        let tree = tree(&mut app, &ctx);
+        assert_eq!(tree.focus, qr);
+        assert_eq!(focused(&tree).label(), Some("QR code for linking"));
+        assert!(app.dialog.is_none());
+    }
+
+    /// Every text painted in a frame, with where it is.
+    fn painted(output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
+        fn walk(shape: &egui::Shape, found: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::Shape::Text(text) => {
+                    found.push((text.galley.text().to_owned(), text.visual_bounding_rect()));
+                }
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        walk(shape, found);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut found);
+        }
+        found
+    }
+
+    /// The enlarged code says under it, for pointer users, how to return;
+    /// the card does not.
+    #[test]
+    fn the_enlarged_qr_code_says_how_to_return() {
+        const HINT: &str = "Click anywhere or press Escape to return";
+        let (mut app, ctx) = linking("login");
+        render(&mut app, &ctx);
+        let card = input_frame(&mut app, &ctx, Vec::new());
+        assert!(painted(&card).iter().all(|(text, _)| text != HINT));
+        app.qr_enlarged = true;
+        render(&mut app, &ctx);
+        let enlarged = input_frame(&mut app, &ctx, Vec::new());
+        let (_, hint) = painted(&enlarged)
+            .into_iter()
+            .find(|(text, _)| text == HINT)
+            .expect("the hint is painted");
+        // Under the code, and all of it inside the window.
+        let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1180.0, 780.0));
+        assert!(window.contains_rect(hint), "{hint:?}");
+        assert!(hint.min.y > window.center().y, "{hint:?}");
+    }
+
+    /// The enlarged QR code holds the keys only on the linking screen that
+    /// draws it: left set once linked, the window's shortcuts still work, and
+    /// a new window starts with the code in its card.
+    #[test]
+    fn an_enlarged_qr_code_left_after_linking_holds_no_keys() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        assert!(app.is_linked());
+        app.qr_enlarged = true;
+        let chats = if cfg!(target_os = "macos") {
+            Modifiers::CTRL
+        } else {
+            Modifiers::ALT
+        };
+        press_key(&mut app, &ctx, Key::Num1, chats);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::chats::chats_list_id())
+        );
+        app.attach(&egui::Context::default());
+        assert!(!app.qr_enlarged);
+    }
 }
