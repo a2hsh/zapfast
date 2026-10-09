@@ -29,7 +29,7 @@ msgstr ""
 msgid "All"
 msgstr ""
 
-#: src/model.rs:197 src/a11y.rs:303 src/a11y.rs:1736
+#: src/model.rs:197 src/a11y.rs:307 src/a11y.rs:1740
 msgid "Unread"
 msgstr ""
 
@@ -230,7 +230,7 @@ msgstr ""
 msgid "Chat list actions"
 msgstr ""
 
-#: src/ui/chats.rs:220 src/ui/chats.rs:579 src/app.rs:3988
+#: src/ui/chats.rs:220 src/ui/chats.rs:579 src/app.rs:4031
 msgid "Starred"
 msgstr ""
 
@@ -246,11 +246,11 @@ msgstr ""
 msgid "Search name or number"
 msgstr ""
 
-#: src/ui/chats.rs:361 src/ui/pane.rs:346 src/a11y.rs:802
+#: src/ui/chats.rs:361 src/ui/pane.rs:346 src/a11y.rs:806
 msgid "Search"
 msgstr ""
 
-#: src/ui/chats.rs:780 src/app.rs:9304
+#: src/ui/chats.rs:780 src/app.rs:9388
 msgid "No chats"
 msgstr ""
 
@@ -262,7 +262,7 @@ msgstr ""
 msgid "Starred messages"
 msgstr ""
 
-#: src/ui/chats.rs:1110 src/ui/chats.rs:1134 src/app.rs:2551
+#: src/ui/chats.rs:1110 src/ui/chats.rs:1134 src/app.rs:2592
 msgid "No starred messages"
 msgstr ""
 
@@ -273,7 +273,7 @@ msgstr ""
 #: src/ui/chats.rs:1246 src/ui/chats.rs:1907 src/ui/conversation.rs:2656
 #: src/ui/conversation.rs:3778 src/ui/conversation.rs:3915
 #: src/ui/conversation.rs:3972 src/ui/conversation.rs:6516 src/ui/call.rs:1022
-#: src/app/calls.rs:135 src/app.rs:3321 src/app.rs:3340 src/app.rs:5781
+#: src/app/calls.rs:135 src/app.rs:3364 src/app.rs:3383 src/app.rs:5865
 #: src/ui/pane.rs:971
 msgid "You"
 msgstr ""
@@ -303,11 +303,11 @@ msgstr ""
 msgid "Search results"
 msgstr ""
 
-#: src/ui/chats.rs:1951 src/app.rs:3339
+#: src/ui/chats.rs:1951 src/app.rs:3382
 msgid "Message yourself"
 msgstr ""
 
-#: src/ui/chats.rs:2162 src/a11y.rs:725
+#: src/ui/chats.rs:2162 src/a11y.rs:729
 msgid "Draft:"
 msgstr ""
 
@@ -634,7 +634,7 @@ msgstr ""
 msgid "Info about {name}"
 msgstr ""
 
-#: src/ui/conversation.rs:7756 src/ui/image_preview.rs:1202 src/a11y.rs:408
+#: src/ui/conversation.rs:7756 src/ui/image_preview.rs:1202 src/a11y.rs:412
 #, rust-format
 msgid "{kind} {position} of {total}"
 msgstr ""
@@ -659,7 +659,7 @@ msgstr ""
 msgid "Card {position} of {total}"
 msgstr ""
 
-#: src/ui/conversation.rs:7827 src/ui/conversation.rs:8419 src/a11y.rs:869
+#: src/ui/conversation.rs:7827 src/ui/conversation.rs:8419 src/a11y.rs:873
 msgid "Location"
 msgstr ""
 
@@ -672,7 +672,7 @@ msgid "Show votes"
 msgstr ""
 
 #: src/ui/conversation.rs:7835 src/ui/dialogs.rs:1313 src/ui/picker.rs:1225
-#: src/a11y.rs:864
+#: src/a11y.rs:868
 msgid "Sticker pack"
 msgstr ""
 
@@ -717,12 +717,12 @@ msgstr ""
 msgid "{option}, {choice}"
 msgstr ""
 
-#: src/ui/conversation.rs:8464 src/a11y.rs:892
+#: src/ui/conversation.rs:8464 src/a11y.rs:896
 msgid "Live location ended"
 msgstr ""
 
-#: src/ui/conversation.rs:8466 src/ui/conversation.rs:8717 src/a11y.rs:873
-#: src/a11y.rs:901
+#: src/ui/conversation.rs:8466 src/ui/conversation.rs:8717 src/a11y.rs:877
+#: src/a11y.rs:905
 msgid "Live location"
 msgstr ""
 
@@ -836,16 +836,16 @@ msgstr ""
 msgid "Mute"
 msgstr ""
 
-#: src/ui/conversation.rs:11014 src/ui/keys.rs:975
+#: src/ui/conversation.rs:11014 src/ui/keys.rs:992
 #, rust-format
 msgid "Speed {}"
 msgstr ""
 
-#: src/ui/conversation.rs:11584 src/a11y.rs:853 src/a11y.rs:1000
+#: src/ui/conversation.rs:11584 src/a11y.rs:857 src/a11y.rs:1004
 msgid "Audio"
 msgstr ""
 
-#: src/ui/conversation.rs:11689 src/app.rs:8454
+#: src/ui/conversation.rs:11689 src/app.rs:8538
 msgid "Recording"
 msgstr ""
 
@@ -902,7 +902,7 @@ msgstr ""
 msgid "Forward"
 msgstr ""
 
-#: src/ui/dialogs.rs:797 src/app.rs:8019
+#: src/ui/dialogs.rs:797 src/app.rs:8103
 #, rust-format
 msgid "{count} recipient selected"
 msgid_plural "{count} recipients selected"
@@ -979,7 +979,7 @@ msgid "Add to my stickers"
 msgstr ""
 
 #: src/ui/dialogs.rs:1349 src/ui/message_info.rs:28 src/ui/labels.rs:235
-#: src/ui/info.rs:254 src/ui/mod.rs:970
+#: src/ui/info.rs:254 src/ui/mod.rs:971
 msgid "Close"
 msgstr ""
 
@@ -1148,19 +1148,19 @@ msgstr ""
 msgid "Leave group and archive"
 msgstr ""
 
-#: src/ui/dialogs.rs:1823 src/ui/dialogs.rs:1966
+#: src/ui/dialogs.rs:1819 src/ui/dialogs.rs:1977
 msgid "Phone number"
 msgstr ""
 
-#: src/ui/dialogs.rs:1970 src/ui/info.rs:410
+#: src/ui/dialogs.rs:1981 src/ui/info.rs:410
 msgid "First name"
 msgstr ""
 
-#: src/ui/dialogs.rs:1972 src/ui/info.rs:412
+#: src/ui/dialogs.rs:1983 src/ui/info.rs:412
 msgid "Surname"
 msgstr ""
 
-#: src/ui/dialogs.rs:1987
+#: src/ui/dialogs.rs:1998
 msgid "Also save to your phone's contacts"
 msgstr ""
 
@@ -1177,11 +1177,11 @@ msgstr ""
 msgid "That is not a location."
 msgstr ""
 
-#: src/ui/locations.rs:102 src/app.rs:1054
+#: src/ui/locations.rs:102 src/app.rs:1056
 msgid "Not connected to WhatsApp"
 msgstr ""
 
-#: src/ui/settings.rs:282 src/a11y.rs:227
+#: src/ui/settings.rs:282 src/a11y.rs:230
 msgid "Settings"
 msgstr ""
 
@@ -1220,7 +1220,7 @@ msgstr ""
 msgid "Wallpaper"
 msgstr ""
 
-#: src/ui/settings.rs:428 src/app.rs:3844 src/ui/image_preview.rs:246
+#: src/ui/settings.rs:428 src/app.rs:3887 src/ui/image_preview.rs:246
 msgid "Image"
 msgstr ""
 
@@ -1788,7 +1788,7 @@ msgstr ""
 msgid "No answer"
 msgstr ""
 
-#: src/ui/call.rs:408 src/ui/calls.rs:121 src/app.rs:5025
+#: src/ui/call.rs:408 src/ui/calls.rs:121 src/app.rs:5109
 msgid "Connection lost"
 msgstr ""
 
@@ -1921,11 +1921,11 @@ msgstr ""
 msgid "Group video call"
 msgstr ""
 
-#: src/ui/calls.rs:170 src/app/calls.rs:112 src/a11y.rs:290
+#: src/ui/calls.rs:170 src/app/calls.rs:112 src/a11y.rs:294
 msgid "Call link"
 msgstr ""
 
-#: src/ui/calls.rs:266 src/app.rs:2524
+#: src/ui/calls.rs:266 src/app.rs:2565
 msgid "No calls yet"
 msgstr ""
 
@@ -1942,7 +1942,7 @@ msgstr ""
 msgid "Reading this account's calls."
 msgstr ""
 
-#: src/ui/calls.rs:282 src/app.rs:2522
+#: src/ui/calls.rs:282 src/app.rs:2563
 msgid "No missed calls"
 msgstr ""
 
@@ -1954,11 +1954,11 @@ msgstr ""
 msgid "Missed calls"
 msgstr ""
 
-#: src/ui/calls.rs:297 src/ui/rail.rs:328 src/a11y.rs:228
+#: src/ui/calls.rs:297 src/ui/rail.rs:328 src/a11y.rs:231
 msgid "Calls"
 msgstr ""
 
-#: src/ui/calls.rs:313 src/app.rs:2511
+#: src/ui/calls.rs:313 src/app.rs:2552
 msgid "No matching calls"
 msgstr ""
 
@@ -2005,7 +2005,7 @@ msgstr ""
 msgid "Hang up the current call first"
 msgstr ""
 
-#: src/app/calls.rs:497 src/a11y.rs:277
+#: src/app/calls.rs:497 src/a11y.rs:281
 msgid "Incoming call"
 msgstr ""
 
@@ -2070,261 +2070,265 @@ msgstr[1] ""
 msgid "No one yet"
 msgstr ""
 
-#: src/app.rs:1047
+#: src/app.rs:1049
 msgid "Could not check the number. Please try again."
 msgstr ""
 
-#: src/app.rs:1051
+#: src/app.rs:1053
 msgid "This number is not on WhatsApp"
 msgstr ""
 
-#: src/app.rs:1057 src/app.rs:8982
+#: src/app.rs:1059 src/app.rs:9066
 msgid "Enter a valid international phone number"
 msgstr ""
 
-#: src/app.rs:2156
+#: src/app.rs:1795
+msgid "Loading your chats"
+msgstr ""
+
+#: src/app.rs:2197
 msgid "Could not delete the removed account's files"
 msgstr ""
 
-#: src/app.rs:2389
+#: src/app.rs:2430
 #, rust-format
 msgid "{sender} in {group}: {text}"
 msgstr ""
 
-#: src/app.rs:2393 src/a11y.rs:717
+#: src/app.rs:2434 src/a11y.rs:721
 #, rust-format
 msgid "{sender}: {text}"
 msgstr ""
 
-#: src/app.rs:2441
+#: src/app.rs:2482
 #, rust-format
 msgid "{count} new message from {sender}"
 msgid_plural "{count} new messages from {sender}"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/app.rs:2453
+#: src/app.rs:2494
 #, rust-format
 msgid "{count} new message"
 msgid_plural "{count} new messages"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/app.rs:2516
+#: src/app.rs:2557
 #, rust-format
 msgid "{count} call"
 msgid_plural "{count} calls"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/app.rs:2557
+#: src/app.rs:2598
 #, rust-format
 msgid "{count} starred message"
 msgid_plural "{count} starred messages"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/app.rs:2571
+#: src/app.rs:2612
 msgid "Search cleared"
 msgstr ""
 
-#: src/app.rs:2578
+#: src/app.rs:2619
 msgid "No results"
 msgstr ""
 
-#: src/app.rs:2582
+#: src/app.rs:2623
 #, rust-format
 msgid "{count} result"
 msgid_plural "{count} results"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/app.rs:2612
+#: src/app.rs:2653
 #, rust-format
 msgid "More than {count} result, showing the newest {count}"
 msgid_plural "More than {count} results, showing the newest {count}"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/app.rs:2690
+#: src/app.rs:2731
 msgid "No settings match"
 msgstr ""
 
-#: src/app.rs:2693
+#: src/app.rs:2734
 #, rust-format
 msgid "{count} setting"
 msgid_plural "{count} settings"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/app.rs:2706
+#: src/app.rs:2747
 #, rust-format
 msgid "Zoom {percent}%"
 msgstr ""
 
-#: src/app.rs:2761
+#: src/app.rs:2802
 #, rust-format
 msgid "{name} is recording audio"
 msgstr ""
 
-#: src/app.rs:2763
+#: src/app.rs:2804
 #, rust-format
 msgid "{name} is typing"
 msgstr ""
 
-#: src/app.rs:2789
+#: src/app.rs:2830
 msgid "Sent"
 msgstr ""
 
-#: src/app.rs:3231
+#: src/app.rs:3274
 #, rust-format
 msgid "A label named “{name}” already exists."
 msgstr ""
 
-#: src/app.rs:3320
+#: src/app.rs:3363
 #, rust-format
 msgid "{name} (You)"
 msgstr ""
 
-#: src/app.rs:3911
+#: src/app.rs:3954
 msgid "Media cache cleared"
 msgstr ""
 
-#: src/app.rs:3990
+#: src/app.rs:4033
 msgid "Star removed"
 msgstr ""
 
-#: src/app.rs:4032
+#: src/app.rs:4075
 msgid "Pinned for 7 days"
 msgstr ""
 
-#: src/app.rs:4034
+#: src/app.rs:4077
 msgid "Pin removed"
 msgstr ""
 
-#: src/app.rs:4625
+#: src/app.rs:4668
 msgid "Loading chat history"
 msgstr ""
 
-#: src/app.rs:4719
+#: src/app.rs:4762
 msgid "Could not use this image"
 msgstr ""
 
-#: src/app.rs:4941 src/app.rs:8881
+#: src/app.rs:4984 src/app.rs:8965
 msgid "This chat already has three pinned messages"
 msgstr ""
 
-#: src/app.rs:5035
+#: src/app.rs:5119
 msgid "Connecting"
 msgstr ""
 
-#: src/app.rs:5667
+#: src/app.rs:5751
 msgid "Not sent: ZapFast is not connected to WhatsApp."
 msgstr ""
 
-#: src/app.rs:5671
+#: src/app.rs:5755
 msgid ""
 "Not sent: the message you’re replying to isn’t available on this computer. "
 "Cancel the reply to send without a quote."
 msgstr ""
 
-#: src/app.rs:6029
+#: src/app.rs:6113
 #, rust-format
 msgid "Card {number}"
 msgstr ""
 
-#: src/app.rs:6036
+#: src/app.rs:6120
 #, rust-format
 msgid "{what}: {error}"
 msgstr ""
 
-#: src/app.rs:6365
+#: src/app.rs:6449
 #, rust-format
 msgid "Recording continues in {chat}. {reason}"
 msgstr ""
 
-#: src/app.rs:6370
+#: src/app.rs:6454
 #, rust-format
 msgid "Recording continues in {chat}"
 msgstr ""
 
-#: src/app.rs:8076
+#: src/app.rs:8160
 msgid "A selected chat is no longer writable"
 msgstr ""
 
-#: src/app.rs:8635
+#: src/app.rs:8719
 msgid "Added to favorites"
 msgstr ""
 
-#: src/app.rs:8712
+#: src/app.rs:8796
 msgid "Sending the sticker pack…"
 msgstr ""
 
-#: src/app.rs:9106 src/ui/labels.rs:258
+#: src/app.rs:9190 src/ui/labels.rs:258
 #, rust-format
 msgid "You have {limit} labels, the most ZapFast keeps."
 msgstr ""
 
-#: src/app.rs:9346 src/app.rs:9409 src/ui/keys.rs:568
+#: src/app.rs:9430 src/app.rs:9493 src/ui/keys.rs:585
 msgid "No chat open"
 msgstr ""
 
-#: src/app.rs:9348 src/app.rs:10718
+#: src/app.rs:9432 src/app.rs:10810
 msgid "No unread messages"
 msgstr ""
 
-#: src/app.rs:9372
+#: src/app.rs:9456
 msgid "Loading unread messages"
 msgstr ""
 
-#: src/app.rs:9437
+#: src/app.rs:9521
 msgid "Loading the replied message"
 msgstr ""
 
 #. Translators: an announcement from an account that is not on screen:
 #. the account's name, then what it announced.
-#: src/app.rs:9872
+#: src/app.rs:9964
 #, rust-format
 msgid "{}: {}"
 msgstr ""
 
-#: src/app.rs:10245
+#: src/app.rs:10337
 msgid "App lock password saved"
 msgstr ""
 
-#: src/app.rs:10253
+#: src/app.rs:10345
 msgid "App lock turned off"
 msgstr ""
 
-#: src/app.rs:10387
+#: src/app.rs:10479
 msgid "This video opens in your system player"
 msgstr ""
 
-#: src/app.rs:10705
+#: src/app.rs:10797
 msgid "Couldn't load the unread messages"
 msgstr ""
 
-#: src/app.rs:10720
+#: src/app.rs:10812
 msgid "Can't load older messages now"
 msgstr ""
 
-#: src/app.rs:10811 src/app.rs:10868
+#: src/app.rs:10903 src/app.rs:10960
 msgid "Replied message not found"
 msgstr ""
 
-#: src/app.rs:10933
+#: src/app.rs:11025
 msgid "Recording discarded"
 msgstr ""
 
-#: src/app.rs:10998
+#: src/app.rs:11090
 msgid "Recording too short, not sent"
 msgstr ""
 
-#: src/app.rs:11357
+#: src/app.rs:11449
 msgid "Copied image"
 msgstr ""
 
-#: src/app.rs:11360 src/app.rs:11365
+#: src/app.rs:11452 src/app.rs:11457
 msgid "Failed to copy image"
 msgstr ""
 
@@ -2565,7 +2569,7 @@ msgstr ""
 msgid "Filter by date"
 msgstr ""
 
-#: src/ui/pane.rs:411 src/a11y.rs:806
+#: src/ui/pane.rs:411 src/a11y.rs:810
 #, rust-format
 msgid "Search messages with {}"
 msgstr ""
@@ -2761,13 +2765,13 @@ msgstr ""
 msgid "Play or pause the video"
 msgstr ""
 
-#: src/ui/image_preview.rs:1196 src/ui/info.rs:1068 src/a11y.rs:403
-#: src/a11y.rs:841 src/a11y.rs:996
+#: src/ui/image_preview.rs:1196 src/ui/info.rs:1068 src/a11y.rs:407
+#: src/a11y.rs:845 src/a11y.rs:1000
 msgid "Video"
 msgstr ""
 
-#: src/ui/image_preview.rs:1198 src/ui/info.rs:1070 src/a11y.rs:405
-#: src/a11y.rs:829 src/a11y.rs:1003
+#: src/ui/image_preview.rs:1198 src/ui/info.rs:1070 src/a11y.rs:409
+#: src/a11y.rs:833 src/a11y.rs:1007
 msgid "Photo"
 msgstr ""
 
@@ -2834,7 +2838,7 @@ msgstr ""
 msgid "Direct messages and groups"
 msgstr ""
 
-#: src/account.rs:308
+#: src/account.rs:312
 #, rust-format
 msgid "Account {id}"
 msgstr ""
@@ -2892,7 +2896,7 @@ msgstr ""
 msgid "Could not list the media."
 msgstr ""
 
-#: src/ui/info.rs:888 src/ui/login.rs:114
+#: src/ui/info.rs:888 src/ui/login.rs:318
 msgid "Try again"
 msgstr ""
 
@@ -2970,8 +2974,59 @@ msgstr ""
 msgid "Cancel (Escape)"
 msgstr ""
 
-#: src/ui/login.rs:125
+#: src/ui/login.rs:142
+msgid "Your chats are ready"
+msgstr ""
+
+#: src/ui/login.rs:181
+msgid "Click anywhere or press Escape to return"
+msgstr ""
+
+#: src/ui/login.rs:190
+msgid "QR code enlarged"
+msgstr ""
+
+#: src/ui/login.rs:196
+msgid ""
+"Point your phone's camera at the screen, about a forearm's length away. "
+"Press Escape to return."
+msgstr ""
+
+#: src/ui/login.rs:329
 msgid "Start over…"
+msgstr ""
+
+#: src/ui/login.rs:413
+msgid "QR code for linking"
+msgstr ""
+
+#: src/ui/login.rs:421
+msgid "Press Enter to enlarge."
+msgstr ""
+
+#: src/ui/login.rs:498
+msgid "30 seconds left to enter the code"
+msgstr ""
+
+#: src/ui/login.rs:554
+msgid "Pairing code"
+msgstr ""
+
+#: src/ui/login.rs:557
+msgid "Read it with the arrow keys. Press Escape to change the phone number."
+msgstr ""
+
+#: src/ui/login.rs:629
+msgid "This code expired. Get a new code."
+msgstr ""
+
+#: src/ui/login.rs:656
+#, rust-format
+msgid "Current number: +{}"
+msgstr ""
+
+#: src/ui/login.rs:671
+msgid "Steps"
 msgstr ""
 
 #: src/ui/rail.rs:185
@@ -2986,15 +3041,15 @@ msgstr ""
 msgid "Locked"
 msgstr ""
 
-#: src/ui/mod.rs:967
+#: src/ui/mod.rs:968
 msgid "Minimize"
 msgstr ""
 
-#: src/ui/mod.rs:968
+#: src/ui/mod.rs:969
 msgid "Maximize"
 msgstr ""
 
-#: src/ui/mod.rs:969
+#: src/ui/mod.rs:970
 msgid "Restore"
 msgstr ""
 
@@ -3022,7 +3077,7 @@ msgstr ""
 msgid "Type a message to {name}"
 msgstr ""
 
-#: src/a11y.rs:140 src/a11y.rs:313
+#: src/a11y.rs:140 src/a11y.rs:317
 #, rust-format
 msgid "replying to {name}: {text}"
 msgstr ""
@@ -3038,7 +3093,7 @@ msgstr ""
 #. Translators: the window title: where the reader is (a chat's
 #. name, "Settings", "Calls" or a call on screen), then the
 #. account's name. Keep ZapFast unchanged, at the end.
-#: src/a11y.rs:243
+#: src/a11y.rs:247
 #, rust-format
 msgid "{place} - {account} - ZapFast"
 msgstr ""
@@ -3046,103 +3101,103 @@ msgstr ""
 #. Translators: the window title: where the reader is (a chat's
 #. name, "Settings", "Calls" or a call on screen), or the
 #. account's name. Keep ZapFast unchanged, at the end.
-#: src/a11y.rs:250
+#: src/a11y.rs:254
 #, rust-format
 msgid "{name} - ZapFast"
 msgstr ""
 
 #. Translators: the window title while a call rings, with
 #. who calls.
-#: src/a11y.rs:274
+#: src/a11y.rs:278
 #, rust-format
 msgid "Incoming call from {name}"
 msgstr ""
 
 #. Translators: the window title during a call, with who it
 #. is with.
-#: src/a11y.rs:283
+#: src/a11y.rs:287
 #, rust-format
 msgid "Call with {name}"
 msgstr ""
 
 #. Translators: the window title during a call whose chat is
 #. locked, which names nobody.
-#: src/a11y.rs:288
+#: src/a11y.rs:292
 msgid "Call in progress"
 msgstr ""
 
-#: src/a11y.rs:321
+#: src/a11y.rs:325
 msgid "forwarded"
 msgstr ""
 
-#: src/a11y.rs:324
+#: src/a11y.rs:328
 msgid "edited"
 msgstr ""
 
-#: src/a11y.rs:327
+#: src/a11y.rs:331
 msgid "starred"
 msgstr ""
 
-#: src/a11y.rs:330 src/a11y.rs:739
+#: src/a11y.rs:334 src/a11y.rs:743
 msgid "pinned"
 msgstr ""
 
-#: src/a11y.rs:340
+#: src/a11y.rs:344
 #, rust-format
 msgid "reactions: {reactions}"
 msgstr ""
 
-#: src/a11y.rs:361
+#: src/a11y.rs:365
 #, rust-format
 msgid "{count} photo"
 msgid_plural "{count} photos"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/a11y.rs:367
+#: src/a11y.rs:371
 #, rust-format
 msgid "{count} video"
 msgid_plural "{count} videos"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/a11y.rs:576
+#: src/a11y.rs:580
 msgid "video"
 msgstr ""
 
-#: src/a11y.rs:577
+#: src/a11y.rs:581
 msgid "attachment"
 msgstr ""
 
-#: src/a11y.rs:583
+#: src/a11y.rs:587
 #, rust-format
 msgid "{count} option"
 msgid_plural "{count} options"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/a11y.rs:590
+#: src/a11y.rs:594
 #, rust-format
 msgid "{count} card"
 msgid_plural "{count} cards"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/a11y.rs:597
+#: src/a11y.rs:601
 #, rust-format
 msgid "{count} link"
 msgid_plural "{count} links"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/a11y.rs:606
+#: src/a11y.rs:610
 #, rust-format
 msgid "{count} phone number"
 msgid_plural "{count} phone numbers"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/a11y.rs:626
+#: src/a11y.rs:630
 #, rust-format
 msgid "{first} and {second}"
 msgstr ""
@@ -3150,194 +3205,194 @@ msgstr ""
 #. Translators: adds one more part to a list that ends
 #. with "{first}, {second} and {third}", such as "video,
 #. 2 cards" in "video, 2 cards, 3 links and 1 phone number".
-#: src/a11y.rs:637
+#: src/a11y.rs:641
 #, rust-format
 msgid "{list}, {next}"
 msgstr ""
 
-#: src/a11y.rs:642
+#: src/a11y.rs:646
 #, rust-format
 msgid "{first}, {second} and {third}"
 msgstr ""
 
-#: src/a11y.rs:694
+#: src/a11y.rs:698
 #, rust-format
 msgid "{count} unread"
 msgid_plural "{count} unread"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/a11y.rs:698
+#: src/a11y.rs:702
 msgid "marked unread"
 msgstr ""
 
-#: src/a11y.rs:701
+#: src/a11y.rs:705
 msgid "mentioned you"
 msgstr ""
 
-#: src/a11y.rs:714
+#: src/a11y.rs:718
 #, rust-format
 msgid "You: {text}"
 msgstr ""
 
-#: src/a11y.rs:728
+#: src/a11y.rs:732
 #, rust-format
 msgid "{name} is typing…"
 msgstr ""
 
-#: src/a11y.rs:731
+#: src/a11y.rs:735
 msgid "typing…"
 msgstr ""
 
-#: src/a11y.rs:742
+#: src/a11y.rs:746
 msgid "muted"
 msgstr ""
 
-#: src/a11y.rs:745
+#: src/a11y.rs:749
 msgid "favorite"
 msgstr ""
 
-#: src/a11y.rs:748
+#: src/a11y.rs:752
 msgid "disappearing messages on"
 msgstr ""
 
-#: src/a11y.rs:751
+#: src/a11y.rs:755
 msgid "open"
 msgstr ""
 
 #. Translators: when a message was starred, as the Starred list
 #. shows it ("Yesterday", "12:30").
-#: src/a11y.rs:788
+#: src/a11y.rs:792
 #, rust-format
 msgid "starred {moment}"
 msgstr ""
 
-#: src/a11y.rs:837 src/a11y.rs:994
+#: src/a11y.rs:841 src/a11y.rs:998
 msgid "GIF"
 msgstr ""
 
-#: src/a11y.rs:839 src/a11y.rs:995
+#: src/a11y.rs:843 src/a11y.rs:999
 msgid "Video message"
 msgstr ""
 
-#: src/a11y.rs:851 src/a11y.rs:999
+#: src/a11y.rs:855 src/a11y.rs:1003
 msgid "Voice message"
 msgstr ""
 
-#: src/a11y.rs:858 src/a11y.rs:1001
+#: src/a11y.rs:862 src/a11y.rs:1005
 msgid "Document"
 msgstr ""
 
-#: src/a11y.rs:862 src/a11y.rs:1002
+#: src/a11y.rs:866 src/a11y.rs:1006
 msgid "Sticker"
 msgstr ""
 
-#: src/a11y.rs:875
+#: src/a11y.rs:879
 msgid "Contact"
 msgstr ""
 
-#: src/a11y.rs:883
+#: src/a11y.rs:887
 #, rust-format
 msgid "Poll: {question}, {count} option"
 msgid_plural "Poll: {question}, {count} options"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/a11y.rs:893 src/a11y.rs:1734
+#: src/a11y.rs:897 src/a11y.rs:1738
 msgid "This message was deleted"
 msgstr ""
 
-#: src/a11y.rs:895
+#: src/a11y.rs:899
 #, rust-format
 msgid "Unsupported message ({what})"
 msgstr ""
 
-#: src/a11y.rs:905
+#: src/a11y.rs:909
 msgid "View once photo"
 msgstr ""
 
-#: src/a11y.rs:906
+#: src/a11y.rs:910
 msgid "View once video"
 msgstr ""
 
-#: src/a11y.rs:907
+#: src/a11y.rs:911
 msgid "View once voice message"
 msgstr ""
 
-#: src/a11y.rs:908
+#: src/a11y.rs:912
 msgid "View once audio"
 msgstr ""
 
-#: src/a11y.rs:913
+#: src/a11y.rs:917
 msgid "View once message"
 msgstr ""
 
-#: src/a11y.rs:914
+#: src/a11y.rs:918
 msgid "Message on your phone"
 msgstr ""
 
-#: src/a11y.rs:967
+#: src/a11y.rs:971
 msgid "not downloaded"
 msgstr ""
 
-#: src/a11y.rs:977
+#: src/a11y.rs:981
 msgid "downloading"
 msgstr ""
 
-#: src/a11y.rs:981
+#: src/a11y.rs:985
 msgid "download failed"
 msgstr ""
 
-#: src/a11y.rs:1012
+#: src/a11y.rs:1016
 msgid "sending"
 msgstr ""
 
-#: src/a11y.rs:1013
+#: src/a11y.rs:1017
 msgid "sent"
 msgstr ""
 
-#: src/a11y.rs:1014
+#: src/a11y.rs:1018
 msgid "delivered"
 msgstr ""
 
-#: src/a11y.rs:1015
+#: src/a11y.rs:1019
 msgid "read"
 msgstr ""
 
-#: src/a11y.rs:1016
+#: src/a11y.rs:1020
 msgid "played"
 msgstr ""
 
-#: src/a11y.rs:1017
+#: src/a11y.rs:1021
 msgid "not sent"
 msgstr ""
 
-#: src/ui/keys.rs:580
+#: src/ui/keys.rs:597
 msgid "Save or cancel the edit to record"
 msgstr ""
 
-#: src/ui/keys.rs:582
+#: src/ui/keys.rs:599
 msgid "Send or clear the message to record"
 msgstr ""
 
-#: src/ui/keys.rs:590
+#: src/ui/keys.rs:607
 msgid "Send or discard the unsent voice message to record"
 msgstr ""
 
-#: src/ui/keys.rs:948
+#: src/ui/keys.rs:965
 #, rust-format
 msgid "unavailable: {reason}"
 msgstr ""
 
-#: src/ui/keys.rs:968
+#: src/ui/keys.rs:985
 msgid "Muted"
 msgstr ""
 
-#: src/ui/keys.rs:970
+#: src/ui/keys.rs:987
 msgid "Unmuted"
 msgstr ""
 
-#: src/ui/keys.rs:981
+#: src/ui/keys.rs:998
 #, rust-format
 msgid "{time} of {duration}"
 msgstr ""
