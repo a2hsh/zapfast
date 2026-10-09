@@ -810,28 +810,33 @@ sticker on its own card or a document (downloading it first when needed, or
 retrying a download that failed, and saying why if that download fails), or
 opens a link, a link preview, a location's map, a shared contact's chat or a
 carousel card's picture, or votes for a poll option. Where clicking does
-nothing, as on a plain text message, Space and Enter do nothing either. A
-message with several of these (a file, links, cards, poll options) says how many at the end of
-its label; Left and Right move between the message's items, its file, links,
-cards or poll options, and say each one ("Link 2 of 3, example.com"), and
-Space or Enter plays or pauses, opens or votes for the selected one. An album is one
-message whose items are its photos and videos, each followed by the links in
-its caption: Space or Enter opens the selected one in the viewer, and
-Shift+F10 and the other keys act on it. A call in the chat has only a menu
-to call back, which Space and Enter open too. In a voice message or video, Left and Right instead seek 5 seconds in the clip that is
-playing or paused, or in a voice message that played to its end, without
-starting or stopping it, and announce the position; Ctrl+Left and Ctrl+Right
-(Command on macOS) move between the items of any message. The keyboard's
+nothing, as on a plain text message, Space and Enter do nothing either. On a
+phone number, Space or Enter opens the number's menu (Message, Copy number) with focus on its first
+item, as clicking the number does; Tab, Up and Down move through it, and
+Escape closes it and returns to the list. A message with several of these (a
+file, links, phone numbers, cards, poll options) says how many at the end of
+its label ("1 link and 2 phone numbers"); Left and Right move between the
+message's items, its file, links, phone numbers, cards or poll options, and
+say each one ("Link 2 of 3, example.com", "Phone number 3 of 3, +1 (555)
+010-2040"), and Space or Enter plays or pauses, opens or votes for the selected one.
+An album is one message whose items are its photos and videos, each
+followed by the links and phone numbers in its caption: Space or Enter opens
+the selected one in the viewer, and Shift+F10 and the other keys act on it. A
+call in the chat has only a menu to call back, which Space and Enter open too.
+In a voice message or video, Left and Right instead seek 5 seconds in the clip
+that is playing or paused, or in a voice message that played to its end,
+without starting or stopping it, and announce the position; Ctrl+Left and
+Ctrl+Right (Command on macOS) move between the items of any message. The keyboard's
 message menu also offers what is about the message rather than in it: going
 to the replied message and the sender's info in a group. S cycles the speed
 of a voice message, or of a video that is playing or paused, through 1x,
 1.5x and 2x, and M mutes or unmutes such a video; both say the result.
 
-In the chat view, Tab moves through the message input and its buttons, phone
-numbers in messages, chat search, the chat info panel, the message list, the
-rail, the chat list's header, search and the chat filters, then returns to the
-input. Shift+Tab goes back; hidden controls are skipped. Single messages,
-reactions and chat rows are not stops. The React and Reply buttons that
-appear beside a hovered message are for the pointer only; keyboard and
+In the chat view, Tab moves through the message input and its buttons, chat
+search, the chat info panel, the message list, the rail, the chat list's
+header, search and the chat filters, then returns to the input. Shift+Tab goes
+back; hidden controls are skipped. Single messages, their links and phone
+numbers, reactions and chat rows are not stops. The React and Reply buttons
+that appear beside a hovered message are for the pointer only; keyboard and
 screen-reader users reach both from the message menu. Alt+Up/Down switches
 conversations.

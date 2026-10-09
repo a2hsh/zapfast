@@ -596,6 +596,12 @@ fn message_keys(app: &mut App, ctx: &egui::Context, chat: &str, id: &str) -> Vec
             .map(|_| *index),
         _ => None,
     };
+    // A phone number: Space or Enter opens its menu, as clicking it does,
+    // with focus on its first item.
+    let phone_menu = match targets.get(current) {
+        Some(crate::a11y::KeyTarget::Phone { url, .. }) => Some(url.clone()),
+        _ => None,
+    };
     let mut opened_card = None;
     let mut actions = Vec::new();
     let mut said = None;
@@ -620,6 +626,13 @@ fn message_keys(app: &mut App, ctx: &egui::Context, chat: &str, id: &str) -> Vec
         {
             actions.push(Action::OpenMessageMenu(id.to_owned()));
             opened_card = Some(index);
+        } else if let Some(url) = &phone_menu
+            && take_space_or_enter(input)
+        {
+            actions.push(Action::OpenPhoneMenu {
+                message: id.to_owned(),
+                url: url.clone(),
+            });
         } else if !primary.is_empty() && take_space_or_enter(input) {
             // What clicking the current target does. Play and pause are not
             // announced: the player's own state is the feedback.
@@ -1334,7 +1347,7 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ),
     (
         "← / →",
-        "Seek 5 seconds in a voice message or video, otherwise move between the items of a message: its file, links, cards or poll options (in the message list)",
+        "Seek 5 seconds in a voice message or video, otherwise move between the items of a message: its file, links, phone numbers, cards or poll options (in the message list)",
     ),
     (
         "Ctrl+← / Ctrl+→",
@@ -1671,6 +1684,33 @@ mod tests {
             app.message_cursor.get(&chat).map(String::as_str),
             Some("one"),
             "the list stays on the album"
+        );
+    }
+
+    /// Phone numbers are items between the links, in the order the text has
+    /// them; Space on one asks for its menu, never a `tel:` address to open.
+    #[test]
+    fn space_on_a_phone_number_asks_for_its_menu() {
+        let (_root, mut app, chat) = app_with(vec![(
+            "text",
+            crate::model::Content::text("see https://a.org or call +1 (555) 010-2040"),
+        )]);
+        let (_, spoken) = message_key(&mut app, &chat, "text", Key::ArrowRight);
+        assert_eq!(spoken, "Phone number 2 of 2, +1 (555) 010-2040");
+        let (actions, spoken) = message_key(&mut app, &chat, "text", Key::Space);
+        assert_eq!(
+            actions,
+            [Action::OpenPhoneMenu {
+                message: "text".into(),
+                url: "tel:+15550102040".into(),
+            }]
+        );
+        assert_eq!(spoken, "", "the menu speaks for itself");
+        let (actions, _) = message_key(&mut app, &chat, "text", Key::ArrowLeft);
+        assert!(actions.is_empty());
+        assert_eq!(
+            opens(&message_key(&mut app, &chat, "text", Key::Space).0),
+            ["https://a.org"]
         );
     }
 
@@ -2090,6 +2130,15 @@ mod tests {
             (
                 "an album item to fetch",
                 album.to_vec(),
+                vec![Key::ArrowRight],
+                false,
+            ),
+            (
+                "a phone number",
+                vec![(
+                    "m",
+                    Content::text("see https://a.org or call +1 (555) 010-2040"),
+                )],
                 vec![Key::ArrowRight],
                 false,
             ),
