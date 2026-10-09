@@ -32,6 +32,9 @@ struct Frame {
     /// What a reader says of the effective node: a change while it keeps
     /// focus is read out again.
     spoken: String,
+    /// The effective node's ancestors as `describe` names them, nearest
+    /// first, such as the menu an item is in.
+    ancestor_names: Vec<String>,
     /// What this frame's update says of the node the reader was on in the
     /// frame before, empty when it is gone. A screen reader takes a change
     /// to it in the update that moves focus away before the focus change,
@@ -178,6 +181,7 @@ impl Trace {
             .accesskit_update
             .expect("accessibility tree");
         let effective = effective(&tree);
+        let ancestors = ancestors(&tree, effective);
         let left = self
             .frames
             .last()
@@ -190,7 +194,8 @@ impl Trace {
             action: self.action,
             focus: tree.focus,
             effective,
-            ancestors: ancestors(&tree, effective),
+            ancestor_names: ancestors.iter().map(|id| describe(&tree, *id)).collect(),
+            ancestors,
             name: describe(&tree, effective),
             spoken: spoken(&tree, effective),
             egui: self.ctx.memory(|memory| memory.focused()),
@@ -435,6 +440,45 @@ fn arrowing_the_message_list_never_reports_the_window() {
         trace.press("Down", egui::Key::ArrowDown, egui::Modifiers::NONE);
     }
     trace.assert_clean(from, "arrows in the message list");
+}
+
+/// In the message menu, the reactions are one stop of Up and Down: they
+/// land on an emoji, Left and Right move between the emoji, and Up and Down
+/// leave the row, which they come back to on the emoji left last.
+#[test]
+fn the_reactions_are_one_stop_of_the_message_menu() {
+    let mut trace = Trace::new(app());
+    focus_stop(&mut trace, Stop::Messages);
+    let from = trace.mark();
+    let heard = |trace: &mut Trace, step: &str, key: egui::Key| {
+        trace.press(step, key, egui::Modifiers::NONE);
+        trace.last().name.clone()
+    };
+    trace.press("Shift+F10", egui::Key::F10, egui::Modifiers::SHIFT);
+    let reply = trace.last().name.clone();
+    assert_eq!(reply, "MenuItem \"Reply\"", "{}", trace.dump(from));
+    let first = heard(&mut trace, "Up", egui::Key::ArrowUp);
+    assert!(first.starts_with("Button"), "Up lands on an emoji: {first}");
+    let second = heard(&mut trace, "Right", egui::Key::ArrowRight);
+    assert!(second.starts_with("Button") && second != first, "{second}");
+    let third = heard(&mut trace, "Right", egui::Key::ArrowRight);
+    assert!(third.starts_with("Button") && third != second, "{third}");
+    assert_eq!(heard(&mut trace, "Left", egui::Key::ArrowLeft), second);
+    // Up from the row, the first stop, wraps to the last item, not to the
+    // emoji before.
+    let last = heard(&mut trace, "Up", egui::Key::ArrowUp);
+    assert!(
+        last.starts_with("MenuItem") && last != reply,
+        "Up leaves the row: {last}\n{}",
+        trace.dump(from)
+    );
+    assert_eq!(
+        heard(&mut trace, "Down", egui::Key::ArrowDown),
+        second,
+        "back on the emoji left last"
+    );
+    assert_eq!(heard(&mut trace, "Down", egui::Key::ArrowDown), reply);
+    trace.assert_clean(from, "the reactions in the message menu");
 }
 
 /// Home and End reach messages far from the view, which are not laid out
@@ -1527,7 +1571,8 @@ fn menus_opened_from_the_keys_are_heard_in_the_next_frame() {
         // layer, in the frame after the key.
         let next = &trace.frames[press + 1];
         assert!(
-            next.egui.is_some()
+            next.name.starts_with("MenuItem")
+                && next.egui.is_some()
                 && next.egui == trace.last().egui
                 && next.layer != trace.frames[press].layer,
             "{scenario}: the menu is heard in the next frame\n{}",
@@ -1681,4 +1726,142 @@ fn the_chat_menus_dialog_gives_focus_back_to_the_row() {
     trace.assert_clean(from, "Delete chat, closed");
     assert_eq!(trace.last().egui, Some(crate::ui::chats::chats_list_id()));
     assert_eq!(trace.last().effective, row.effective, "back on the chat");
+}
+
+/// Where a menu item is in its menu, as a screen reader hears it: its
+/// position (from 0) and the menu's size.
+fn menu_position(frame: &Frame) -> (Option<usize>, Option<usize>) {
+    let number = |part: Option<&str>| -> Option<usize> {
+        part?.strip_prefix("Some(")?.strip_suffix(')')?.parse().ok()
+    };
+    let mut parts = frame.spoken.rsplitn(3, '|');
+    let size = number(parts.next());
+    let position = number(parts.next());
+    (position, size)
+}
+
+/// A menu the keys opened from `opener` in the frame `press` behaves as
+/// every keyboard menu does: it is heard in the frame after the key, as a
+/// menu named `menu`, on its first item, whose role and name start with
+/// `first`, said to be the first of its items; Up and Down walk its items
+/// and wrap, Home and End go to its ends, Tab and Shift+Tab stay among its
+/// items, and Escape closes it and puts the reader back on `opener`, each
+/// key heard once.
+fn walks_like_a_menu(
+    trace: &mut Trace,
+    opener: &Frame,
+    press: usize,
+    menu: &str,
+    first: &str,
+    scenario: &str,
+) {
+    trace.assert_clean(press, scenario);
+    let opened = trace.frames[press + 1].clone();
+    assert!(
+        opened.name.starts_with(first),
+        "{scenario}: on the first item, {first}, in the frame after the key\n{}",
+        trace.dump(press)
+    );
+    assert!(
+        opened
+            .ancestor_names
+            .iter()
+            .any(|name| *name == format!("Menu {menu:?}")),
+        "{scenario}: in a menu named {menu}: {:?}",
+        opened.ancestor_names
+    );
+    let (position, size) = menu_position(&opened);
+    assert_eq!(position, Some(0), "{scenario}: {}", opened.spoken);
+    let size = size.unwrap_or_else(|| panic!("{scenario}: no size: {}", opened.spoken));
+    let at = |trace: &Trace| menu_position(trace.last()).0;
+    let from = trace.mark();
+    trace.press("Up", egui::Key::ArrowUp, egui::Modifiers::NONE);
+    assert_eq!(
+        at(trace),
+        Some(size - 1),
+        "{scenario}: Up wraps to the last"
+    );
+    let last = trace.last().effective;
+    trace.press("Down", egui::Key::ArrowDown, egui::Modifiers::NONE);
+    assert_eq!(
+        trace.last().effective,
+        opened.effective,
+        "{scenario}: Down wraps to the first"
+    );
+    trace.press("End", egui::Key::End, egui::Modifiers::NONE);
+    assert_eq!(trace.last().effective, last, "{scenario}: End");
+    trace.press("Home", egui::Key::Home, egui::Modifiers::NONE);
+    assert_eq!(trace.last().effective, opened.effective, "{scenario}: Home");
+    trace.press("Down", egui::Key::ArrowDown, egui::Modifiers::NONE);
+    assert_eq!(at(trace), Some(1 % size), "{scenario}: Down");
+    trace.press("Tab", egui::Key::Tab, egui::Modifiers::NONE);
+    assert_eq!(
+        at(trace),
+        Some(2 % size),
+        "{scenario}: Tab stays in the menu"
+    );
+    trace.press("Shift+Tab", egui::Key::Tab, egui::Modifiers::SHIFT);
+    assert_eq!(at(trace), Some(1 % size), "{scenario}: Shift+Tab");
+    trace.assert_clean(from, scenario);
+    let escape = tap(trace, "Escape", egui::Key::Escape, egui::Modifiers::NONE);
+    trace.assert_clean(escape, &format!("{scenario}, Escape"));
+    assert!(!egui::Popup::is_any_open(&trace.ctx), "{scenario}: closed");
+    assert_eq!(
+        trace.last().egui,
+        opener.egui,
+        "{scenario}: Escape puts the reader back on the opener\n{}",
+        trace.dump(escape)
+    );
+}
+
+/// The chat menu, opened from the chat list's Shift+F10, walks as every
+/// keyboard menu does, Home and End included.
+#[test]
+fn the_chat_menu_walks_like_the_other_menus() {
+    let mut trace = Trace::new(app());
+    focus_stop(&mut trace, Stop::ChatList);
+    let row = trace.last().clone();
+    let press = tap(
+        &mut trace,
+        "Shift+F10",
+        egui::Key::F10,
+        egui::Modifiers::SHIFT,
+    );
+    walks_like_a_menu(
+        &mut trace,
+        &row,
+        press,
+        "Chat",
+        "MenuItem \"Mark as",
+        "the chat menu",
+    );
+    assert_eq!(trace.last().effective, row.effective, "back on the chat");
+}
+
+/// Home and End reach the ends of the message menu: its first stop, the
+/// reactions, on an emoji, and its last item.
+#[test]
+fn home_and_end_reach_the_ends_of_the_message_menu() {
+    let mut trace = Trace::new(app());
+    focus_stop(&mut trace, Stop::Messages);
+    let row = trace.last().clone();
+    trace.press("Shift+F10", egui::Key::F10, egui::Modifiers::SHIFT);
+    let from = trace.mark();
+    trace.press("End", egui::Key::End, egui::Modifiers::NONE);
+    let (position, size) = menu_position(trace.last());
+    assert!(
+        trace.last().name.starts_with("MenuItem")
+            && position.is_some()
+            && position == size.map(|size| size - 1),
+        "End: {}",
+        trace.last().spoken
+    );
+    trace.press("Home", egui::Key::Home, egui::Modifiers::NONE);
+    assert!(
+        trace.last().name.starts_with("Button"),
+        "Home lands on an emoji: {}",
+        trace.last().name
+    );
+    trace.assert_clean(from, "Home and End in the message menu");
+    escape_back_to_the_list(&mut trace, &row, "the message menu");
 }

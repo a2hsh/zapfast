@@ -1956,7 +1956,8 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat, slot: Option<Slot>) -> egu
     if force {
         app.actions.push(Action::ChatMenuOpened);
     }
-    let key_menu = super::list_nav::KeyMenu::begin(ui.ctx(), popup_id, force, false);
+    let key_menu = super::list_nav::KeyMenu::begin(ui.ctx(), popup_id, force, false)
+        .menu(crate::i18n::gettext(app.locale, "Chat"));
     // A menu opened without the pointer stays beside its row for as long as
     // it is open: the pointer-anchored placement has no position to go to.
     let at_row_id = popup_id.with("at-row");

@@ -4737,6 +4737,7 @@ fn speed_menu_row(
         |ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             ui.add_space(6.0);
+            let mut pills = Vec::new();
             for option in crate::audio::SPEEDS {
                 let selected = option == speed;
                 let response = speed_pill(
@@ -4747,6 +4748,7 @@ fn speed_menu_row(
                     selected,
                     preparing && selected,
                 );
+                pills.push(response.id);
                 ui.ctx().data_mut(|data| {
                     data.insert_temp(
                         speed_button_id(&view.chat.id, &message.id, option),
@@ -4758,6 +4760,12 @@ fn speed_menu_row(
                     ui.close();
                 }
             }
+            // One stop in the menu's Up and Down, as the reactions are.
+            super::list_nav::menu_row(
+                ui,
+                &crate::i18n::gettext(view.locale, "Playback speed"),
+                &pills,
+            );
         },
     );
 }
@@ -5081,7 +5089,8 @@ fn bubble_frame(
     }
     // Opened by the message list's keys: focus goes into the menu, stays in
     // it, and returns to the list when it closes.
-    let key_menu = super::list_nav::KeyMenu::begin(ui.ctx(), popup_id, force_menu, reacting);
+    let key_menu = super::list_nav::KeyMenu::begin(ui.ctx(), popup_id, force_menu, reacting)
+        .menu(crate::i18n::gettext(view.locale, "Message"));
     let was_open = key_menu.was_open();
     // A menu opened without the pointer stays beside its message for as
     // long as it is open, not only in the frame that opened it: the
@@ -5098,7 +5107,7 @@ fn bubble_frame(
     // Opened from the keys, the menu also lists what only a click reaches
     // in the bubble (`inner_entries`), and is wide enough for it. A menu
     // opened with the pointer is as it was.
-    let keys_menu = key_menu.opened_by_keys();
+    let keys_menu = key_menu.from_keys();
     ui.ctx()
         .data_mut(|data| data.insert_temp(keys_menu_id(popup_id), keys_menu));
     let width = if keys_menu {
@@ -6214,10 +6223,12 @@ fn context_menu(
         Layout::left_to_right(Align::Center),
         |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
+            let mut buttons = Vec::new();
             for emoji in quick_reactions(message, view.reaction_emoji) {
                 let chosen = mine == Some(emoji);
                 let line = widgets::line(ui, emoji, theme::regular(20.0), palette.text, 40.0, 1);
                 let (rect, response) = ui.allocate_exact_size(Vec2::splat(34.0), Sense::click());
+                buttons.push(response.id);
                 // Screen readers speak the emoji's name.
                 response.widget_info(|| {
                     egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), emoji)
@@ -6253,6 +6264,14 @@ fn context_menu(
                 }
             }
             let (rect, response) = ui.allocate_exact_size(Vec2::splat(34.0), Sense::click());
+            buttons.push(response.id);
+            // One stop in the menu's Up and Down, walked with Left and Right,
+            // that a screen reader names before the emoji.
+            super::list_nav::menu_row(
+                ui,
+                &crate::i18n::gettext(view.locale, "Reactions"),
+                &buttons,
+            );
             // The tooltip doubles as the screen reader's label.
             let more = crate::i18n::gettext(view.locale, "React with any emoji").into_owned();
             response.widget_info(|| {
@@ -9359,7 +9378,9 @@ fn rich_body(
                 // Opened once: from here on the menu closes as any menu does.
                 actions.push(Action::PhoneMenuOpened);
             }
-            let key_menu = super::list_nav::KeyMenu::begin(ui.ctx(), popup_id, requested, false);
+            // A menu named by the number, as the text writes it.
+            let key_menu = super::list_nav::KeyMenu::begin(ui.ctx(), popup_id, requested, false)
+                .menu(copy_text.clone());
             let popup = egui::Popup::menu(&link);
             let popup = if requested {
                 popup.open_memory(egui::SetOpenCommand::Bool(true))
