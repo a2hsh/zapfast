@@ -212,6 +212,154 @@ pub fn take_step(ctx: &egui::Context, page: impl FnOnce() -> usize) -> Option<St
     })
 }
 
+/// Whether focus last moved by keyboard.
+fn keyboard(ctx: &egui::Context) -> bool {
+    ctx.data(|data| {
+        data.get_temp::<bool>(crate::theme::keyboard_focus_id())
+            .unwrap_or(false)
+    })
+}
+
+/// Whether keyboard focus is on one of the items of the popup `popup` (true),
+/// on a widget elsewhere (false), or on nothing drawn (None, as between two
+/// items while Tab moves on).
+fn focus_in(ctx: &egui::Context, popup: egui::Id) -> Option<bool> {
+    ctx.memory(|memory| memory.focused())
+        .and_then(|id| ctx.read_response(id))
+        .map(|response| response.layer_id.id == popup)
+}
+
+/// The context menu of a list's current item, as the list's keys open it
+/// (Shift+F10), or a phone number's menu, which Space or Enter on the number
+/// opens in the message list. Opened that way, focus goes to its first item,
+/// Tab stays among its items, Up and Down walk them in order, focus leaving
+/// closes it, and Escape or a chosen item returns focus to the list. A menu
+/// opened with the pointer is left as it was.
+///
+/// [`KeyMenu::begin`] runs before the popup is shown, [`KeyMenu::finish`]
+/// after it.
+pub struct KeyMenu {
+    popup: egui::Id,
+    pending: egui::Id,
+    /// Some(true) while the first item is still to be focused, Some(false)
+    /// once it was; None for a menu the keys did not open.
+    state: Option<bool>,
+    was_open: bool,
+}
+
+impl KeyMenu {
+    /// `requested` is true in the pass the list asks for the menu: it then
+    /// opens once, and from there on closes as any menu does. `hold` keeps
+    /// focus on a layer beside the menu, such as the reaction picker.
+    pub fn begin(ctx: &egui::Context, popup: egui::Id, requested: bool, hold: bool) -> Self {
+        let pending = popup.with("from-keys");
+        let was_open = egui::Popup::is_id_open(ctx, popup);
+        // Only after keyboard navigation: a demo page that opens the menu
+        // moves no focus.
+        if requested && keyboard(ctx) {
+            ctx.data_mut(|data| data.insert_temp(pending, true));
+        }
+        let state = ctx.data(|data| data.get_temp::<bool>(pending));
+        if state == Some(false) && was_open && !hold && focus_in(ctx, popup) == Some(true) {
+            // Up and Down walk the items in order and wrap, as Tab does, as
+            // in any desktop menu. egui's own arrow moves go to the nearest
+            // widget on screen, which can be one under the menu.
+            let step = ctx.input_mut(|input| {
+                if super::keys::take_plain(input, egui::Key::ArrowDown) {
+                    Some(egui::FocusDirection::Next)
+                } else if super::keys::take_plain(input, egui::Key::ArrowUp) {
+                    Some(egui::FocusDirection::Previous)
+                } else {
+                    None
+                }
+            });
+            if let Some(step) = step {
+                ctx.memory_mut(|memory| memory.move_focus(step));
+            }
+        }
+        Self {
+            popup,
+            pending,
+            state,
+            was_open,
+        }
+    }
+
+    /// Whether the menu was open before this pass.
+    pub fn was_open(&self) -> bool {
+        self.was_open
+    }
+
+    /// Whether the keys opened the menu, for as long as it stays open.
+    pub fn opened_by_keys(&self) -> bool {
+        self.state.is_some()
+    }
+
+    /// After the popup was shown on `layer` (None when it was not drawn),
+    /// with `first` its first item drawn in this pass. Focus returns to
+    /// `list` when the menu closes. Returns whether the menu is open now.
+    pub fn finish(
+        self,
+        ctx: &egui::Context,
+        layer: Option<egui::LayerId>,
+        hold: bool,
+        first: Option<egui::Id>,
+        list: egui::Id,
+    ) -> bool {
+        let open = egui::Popup::is_id_open(ctx, self.popup);
+        let Some(focus_pending) = self.state else {
+            return open;
+        };
+        if open && !focus_pending && !hold && focus_in(ctx, self.popup) == Some(false) {
+            // A shortcut (Ctrl+L, Ctrl+K, Alt+1, Alt+2) took focus out of
+            // the menu: it closes, as a desktop menu does when focus leaves,
+            // rather than staying open unseen and holding on to the arrows,
+            // Tab and the next Escape. Focus stays where the shortcut put it.
+            egui::Popup::close_id(ctx, self.popup);
+            ctx.data_mut(|data| data.remove::<bool>(self.pending));
+            return false;
+        }
+        if !open {
+            ctx.data_mut(|data| data.remove::<bool>(self.pending));
+            // Closed in this pass by Escape or a chosen item: back to the
+            // list, drawn earlier in this pass. A click elsewhere keeps the
+            // focus it gave. A menu that went away unseen, its item not drawn
+            // (another chat, Settings), returns nothing: focus has moved on
+            // since.
+            if self.was_open
+                && !ctx.input(|input| input.pointer.any_pressed() || input.pointer.any_click())
+            {
+                let item = ctx.memory(|memory| memory.focused());
+                super::overlay::hand_back(ctx, list, item);
+            }
+        } else if let Some(layer) = layer
+            && !hold
+        {
+            // Tab stays among the menu's items. Not beside the reaction
+            // picker, whose own layer must keep its focus.
+            ctx.memory_mut(|memory| memory.set_modal_layer(layer));
+            // The first item, drawn in this pass, takes focus once. A
+            // popup's first pass is drawn hidden and gives no widget focus:
+            // the item takes it in the pass that shows it. That pass is
+            // asked for at once, in this frame, rather than in the next: the
+            // reader hears the menu a frame sooner, and the pointer's menus,
+            // which never wait for focus, keep egui's own pace.
+            if focus_pending
+                && let Some(first) = first
+                && ctx
+                    .read_response(first)
+                    .is_none_or(|response| response.visible())
+            {
+                ctx.memory_mut(|memory| memory.request_focus(first));
+                ctx.data_mut(|data| data.insert_temp(self.pending, false));
+            } else if focus_pending && !self.was_open {
+                ctx.request_discard("a menu the keys opened takes focus in the pass that shows it");
+            }
+        }
+        open
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

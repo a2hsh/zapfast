@@ -1486,3 +1486,34 @@ fn a_clip_opened_in_the_viewer_takes_focus_on_its_frame() {
     );
     trace.app.video.stop();
 }
+
+/// The message menu and the chat menu, opened from the keys, are heard in
+/// the frame after the key: the menu's hidden first pass is redone in that
+/// frame to show it, rather than shown a frame later.
+#[test]
+fn menus_opened_from_the_keys_are_heard_in_the_next_frame() {
+    for (stop, step, key, modifiers) in [
+        (
+            Stop::Messages,
+            "Shift+F10",
+            egui::Key::F10,
+            egui::Modifiers::SHIFT,
+        ),
+    ] {
+        let mut trace = Trace::new(app());
+        focus_stop(&mut trace, stop);
+        let press = tap(&mut trace, step, key, modifiers);
+        let scenario = format!("{step} on {stop:?}");
+        trace.assert_clean(press, &scenario);
+        // The item the menu settles on already has focus, on the menu's own
+        // layer, in the frame after the key.
+        let next = &trace.frames[press + 1];
+        assert!(
+            next.egui.is_some()
+                && next.egui == trace.last().egui
+                && next.layer != trace.frames[press].layer,
+            "{scenario}: the menu is heard in the next frame\n{}",
+            trace.dump(press)
+        );
+    }
+}
