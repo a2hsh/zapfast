@@ -29023,6 +29023,54 @@ mod suggestion_access_tests {
         egui::Id::new("composer-text")
     }
 
+    /// The row that mentions everyone shows a group icon beside "all". It is
+    /// read as what that icon says, has its place in the list's size like any
+    /// row, and the count says it apart from the people.
+    #[test]
+    fn the_everyone_suggestion_is_named_and_counted_apart_from_the_people() {
+        let (mut app, ctx) = settings("mention-everyone");
+        let chat = app.open_chat.clone().expect("a group is open");
+        let group = app.chat(&chat).expect("the group");
+        let candidates = app.mention_candidates(group, "");
+        assert_eq!(candidates[0].0, crate::mentions::ALL_ID);
+        let people = candidates.len() - 1;
+        assert!(people > 1, "{candidates:?}");
+        let end = app.composer.chars().count();
+        let mut state = egui::TextEdit::load_state(&ctx, field()).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(end),
+            )));
+        state.store(&ctx, field());
+        ctx.memory_mut(|memory| memory.request_focus(field()));
+        render(&mut app, &ctx);
+        let shown = tree(&mut app, &ctx);
+        let everyone = node(
+            &shown,
+            field()
+                .with(("mention-option", crate::mentions::ALL_ID))
+                .accesskit_id(),
+        );
+        assert_eq!(everyone.role(), Role::ListBoxOption);
+        assert_eq!(everyone.label(), Some("@all, everyone in the group"));
+        assert_eq!(everyone.position_in_set(), Some(0));
+        assert_eq!(everyone.size_of_set(), Some(candidates.len()));
+        // Each frame here is 1/60 s; the list is described once typing has
+        // paused for 0.4 s.
+        for _ in 0..40 {
+            render(&mut app, &ctx);
+        }
+        let described = format!(
+            "@all and {people} people available. @all, everyone in the group selected. Press Down to browse"
+        );
+        assert!(
+            super::settings_access_tests::spoke(&app, &described),
+            "{:?}",
+            app.announcer.spoken()
+        );
+    }
+
     /// Up from the first suggestion wraps to the last, which the list has
     /// to draw before the field can name it: with more rows than the list
     /// shows, it scrolls there first.
@@ -29141,7 +29189,10 @@ mod suggestion_access_tests {
                         && units.iter().any(|unit| {
                             spoken
                                 .split_once(&format!("{unit}. "))
-                                .is_some_and(|(count, _)| count.parse::<usize>().is_ok())
+                                // "@all and 3 people available" counts the
+                                // people after the row that mentions everyone.
+                                .and_then(|(count, _)| count.rsplit(' ').next())
+                                .is_some_and(|count| count.parse::<usize>().is_ok())
                         })
                 })
             };

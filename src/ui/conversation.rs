@@ -1469,6 +1469,53 @@ fn emoji_suggestions(app: &mut App, ui: &mut egui::Ui, field: egui::Id) {
     }
 }
 
+/// A mention suggestion's spoken name: the member's name, or for the row
+/// that mentions everyone, which shows a group icon beside "all", what that
+/// icon says: "@all, everyone in the group".
+fn mention_option_name(locale: crate::i18n::Locale, id: &str, label: &str) -> String {
+    let label = crate::a11y::without_push_marker(label);
+    if id == crate::mentions::ALL_ID {
+        // Translators: a screen reader's name for the suggestion that
+        // mentions everyone in a group; {} is the mention, such as @all.
+        crate::i18n::gettext(locale, "{}, everyone in the group")
+            .replace("{}", &format!("@{label}"))
+    } else {
+        label.to_owned()
+    }
+}
+
+/// How many mention suggestions there are, `count` in all. The row that
+/// mentions everyone is not a person, so it is said apart from them.
+fn mentions_available(locale: crate::i18n::Locale, count: usize, everyone: bool) -> String {
+    use crate::i18n::{gettext, ngettext};
+    let all = format!("@{}", crate::mentions::ALL_USER);
+    if !everyone {
+        return ngettext(
+            locale,
+            "{} person available",
+            "{} people available",
+            u32::try_from(count).unwrap_or(u32::MAX),
+        )
+        .replace("{}", &count.to_string());
+    }
+    let people = count.saturating_sub(1);
+    if people == 0 {
+        // Translators: the only mention suggestion is {all}, such as @all,
+        // which mentions everyone in the group.
+        return gettext(locale, "{all} available").replace("{all}", &all);
+    }
+    ngettext(
+        locale,
+        // Translators: mention suggestions: {all}, such as @all, which
+        // mentions everyone in the group, and {count} people.
+        "{all} and {count} person available",
+        "{all} and {count} people available",
+        u32::try_from(people).unwrap_or(u32::MAX),
+    )
+    .replace("{all}", &all)
+    .replace("{count}", &people.to_string())
+}
+
 /// Group-member suggestions above the composer.
 fn mention_picker(app: &mut App, ui: &mut egui::Ui, chat: &Chat, field: egui::Id) {
     let cursor = egui::TextEdit::load_state(ui.ctx(), field)
@@ -1496,8 +1543,11 @@ fn mention_picker(app: &mut App, ui: &mut egui::Ui, chat: &Chat, field: egui::Id
     }
     app.mention_selected = app.mention_selected.min(candidates.len() - 1);
     let locale = app.locale;
-    let highlighted =
-        crate::a11y::without_push_marker(&candidates[app.mention_selected].1).to_owned();
+    let (highlighted_id, highlighted_label) = &candidates[app.mention_selected];
+    let highlighted = mention_option_name(locale, highlighted_id, highlighted_label);
+    let everyone = candidates
+        .iter()
+        .any(|(id, _)| id == crate::mentions::ALL_ID);
     let reached = suggestion_speech(
         app,
         ui,
@@ -1506,15 +1556,7 @@ fn mention_picker(app: &mut App, ui: &mut egui::Ui, chat: &Chat, field: egui::Id
         candidates.len(),
         &highlighted,
         down || up,
-        |count| {
-            crate::i18n::ngettext(
-                locale,
-                "{} person available",
-                "{} people available",
-                u32::try_from(count).unwrap_or(u32::MAX),
-            )
-            .replace("{}", &count.to_string())
-        },
+        |count| mentions_available(locale, count, everyone),
     );
     let submit = take_plain_key(ui, Key::Enter) || take_plain_key(ui, Key::Tab);
     let mut picked = submit.then(|| candidates[app.mention_selected].clone());
@@ -1563,7 +1605,7 @@ fn mention_picker(app: &mut App, ui: &mut egui::Ui, chat: &Chat, field: egui::Id
                     super::list_nav::mark_row(
                         ui.ctx(),
                         row,
-                        crate::a11y::without_push_marker(label).to_owned(),
+                        mention_option_name(locale, id, label),
                         index,
                         candidates.len(),
                         rect,
@@ -11917,6 +11959,31 @@ fn chat_of(chat: &ChatId) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The row that mentions everyone is no person: the count says it apart,
+    /// and alone it is said by itself.
+    #[test]
+    fn mention_counts_say_the_everyone_row_apart() {
+        let locale = crate::i18n::Locale::English;
+        assert_eq!(mentions_available(locale, 3, false), "3 people available");
+        assert_eq!(mentions_available(locale, 1, true), "@all available");
+        assert_eq!(
+            mentions_available(locale, 2, true),
+            "@all and 1 person available"
+        );
+        assert_eq!(
+            mentions_available(locale, 4, true),
+            "@all and 3 people available"
+        );
+        assert_eq!(
+            mention_option_name(locale, crate::mentions::ALL_ID, "all"),
+            "@all, everyone in the group"
+        );
+        assert_eq!(
+            mention_option_name(locale, "1@s.whatsapp.net", "Ada"),
+            "Ada"
+        );
+    }
 
     /// Each reason the keyboard menu speaks for an unavailable card button
     /// goes through gettext as its own literal, so translators get it; no
