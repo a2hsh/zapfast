@@ -786,7 +786,11 @@ shortcuts.
 ## Screen readers
 
 ZapFast announces confirmations, errors, connection changes and history loading
-through the screen reader without moving focus. While the app is locked, only
+through the screen reader without moving focus. While the window is focused,
+the open chat also announces new messages with their sender, a quick burst as
+a count such as "3 new messages from Ada", someone starting to type or record
+audio, and "Sent" when WhatsApp accepts your message. A message that fails to
+send is announced as an error with its reason. While the app is locked, only
 connection and history changes are announced.
 
 Each message, or album, is exposed as one item that reads its sender, text,

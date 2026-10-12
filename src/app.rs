@@ -939,7 +939,33 @@ pub struct App {
     announced_offline: bool,
     /// "Connecting" is spoken once per offline episode, not on every retry.
     announced_connecting: bool,
+    /// When each (chat, sender) was last heard typing, and whether it was a
+    /// voice message, while announced: someone who keeps typing, or pauses
+    /// briefly, is announced once rather than at every refresh.
+    typing_announced: HashMap<(ChatId, String), (Instant, bool)>,
+    /// The latest incoming-message announcement, while a burst can still be
+    /// folded into it as a count.
+    incoming_burst: Option<IncomingBurst>,
+    /// A queued "Sent", so sends acknowledged together are said once.
+    sent_announced: Option<crate::announcer::Queued>,
 }
+
+/// Incoming messages in the open chat announced as one, see
+/// `App::announce_incoming`.
+struct IncomingBurst {
+    chat: ChatId,
+    /// The one sender so far; `None` once several people wrote.
+    sender: Option<String>,
+    count: u32,
+    /// When the latest message of the burst came.
+    at: Instant,
+    queued: crate::announcer::Queued,
+}
+
+/// Messages closer together than this are counted instead of read.
+const INCOMING_BURST: Duration = Duration::from_millis(1500);
+/// How long someone stays announced as typing after they were last heard.
+const TYPING_REPEAT: Duration = Duration::from_secs(15);
 
 /// A message that flashes after a jump to it, as WhatsApp does.
 #[derive(Clone, Debug, PartialEq)]
@@ -1637,6 +1663,9 @@ impl App {
             announcer: Default::default(),
             announced_offline: false,
             announced_connecting: false,
+            typing_announced: HashMap::new(),
+            incoming_burst: None,
+            sent_announced: None,
         };
         // A hand-edited speed snaps to a supported one, so a speed control
         // always shows the speed that plays.
@@ -1872,6 +1901,8 @@ impl App {
         self.open_chat_menu = None;
         // Alt+3's wait for older history is the previous account's chat's.
         self.unread_jump = None;
+        // Typing announced in the previous account's chat starts over.
+        self.typing_announced.clear();
     }
 
     fn add_account(&mut self) {
@@ -2175,6 +2206,177 @@ impl App {
         }
     }
 
+    /// Whether the user has `chat_id` in front of them: the window focused
+    /// with that chat open, on the chats' page or on the Calls tab beside
+    /// the call history, which in a narrow window can be shown over it.
+    fn reading(&self, chat_id: &str) -> bool {
+        // Another account's chat is never the one on screen.
+        !self.events_hidden
+            && !self.window_hidden
+            && self.window_focused
+            && self.chat_view()
+            && self.open_chat.as_deref() == Some(chat_id)
+    }
+
+    /// Speaks a live message in the chat being read, as a desktop
+    /// notification would for any other chat. Messages that come closer
+    /// together than `INCOMING_BURST`, before the first is spoken, become a
+    /// count instead of a flood of text.
+    fn announce_incoming(&mut self, chat_id: &str, message: &Message, now: Instant) {
+        if message.from_me || !self.reading(chat_id) {
+            return;
+        }
+        let locale = self.locale;
+        let sender = crate::a11y::spoken(
+            &self.display_name_or(&message.sender, message.sender_name.as_deref()),
+        );
+        if let Some(burst) = &mut self.incoming_burst
+            && burst.chat == chat_id
+            && now.saturating_duration_since(burst.at) <= INCOMING_BURST
+        {
+            let count = burst.count + 1;
+            let one_sender = burst.sender.as_deref() == Some(message.sender.as_str());
+            let text = if one_sender {
+                crate::a11y::fill(
+                    &crate::i18n::ngettext(
+                        locale,
+                        "{count} new message from {sender}",
+                        "{count} new messages from {sender}",
+                        count,
+                    ),
+                    &[("count", &count.to_string()), ("sender", &sender)],
+                )
+            } else {
+                crate::a11y::fill(
+                    &crate::i18n::ngettext(
+                        locale,
+                        "{count} new message",
+                        "{count} new messages",
+                        count,
+                    ),
+                    &[("count", &count.to_string())],
+                )
+            };
+            // A burst whose first message was already spoken is not counted
+            // on: the new message is read in full below.
+            if self.announcer.replace(burst.queued, text) {
+                burst.count = count;
+                burst.at = now;
+                if !one_sender {
+                    burst.sender = None;
+                }
+                return;
+            }
+        }
+        let body = crate::a11y::spoken(&self.spoken_content(message));
+        let group = self
+            .chat(chat_id)
+            .filter(|chat| chat.is_group())
+            .map(|chat| crate::a11y::spoken(&self.chat_title(chat)));
+        let text = match group {
+            Some(group) => crate::a11y::fill(
+                &crate::i18n::gettext(locale, "{sender} in {group}: {text}"),
+                &[("sender", &sender), ("group", &group), ("text", &body)],
+            ),
+            None => crate::a11y::fill(
+                &crate::i18n::gettext(locale, "{sender}: {text}"),
+                &[("sender", &sender), ("text", &body)],
+            ),
+        };
+        self.incoming_burst = self
+            .announcer
+            .say_queued(crate::announcer::Category::Message, text)
+            .map(|queued| IncomingBurst {
+                chat: chat_id.to_owned(),
+                sender: Some(message.sender.clone()),
+                count: 1,
+                at: now,
+                queued,
+            });
+    }
+
+    /// A message's content as its message-list label describes it: the
+    /// text or caption, after the kind of media.
+    fn spoken_content(&self, message: &Message) -> String {
+        let text = match &message.content {
+            Content::Text { text, .. } | Content::Interactive { text, .. } => Some(text),
+            Content::Image { caption, .. }
+            | Content::Video { caption, .. }
+            | Content::Document { caption, .. } => caption.as_ref(),
+            _ => None,
+        };
+        let text = text.map_or_else(String::new, |text| {
+            crate::markup::plain(text, &self.mention_list(message))
+        });
+        crate::a11y::content_description(self.locale, &message.content, &text)
+    }
+
+    /// Speaks "Ada is typing" in the chat being read, once per stretch of
+    /// typing: an entry stays fresh while typing events keep coming, so only
+    /// someone heard from `TYPING_REPEAT` ago or more, or who switched
+    /// between text and a voice message, is announced again.
+    fn announce_typing(
+        &mut self,
+        chat_id: &str,
+        sender: &str,
+        composing: bool,
+        recording: bool,
+        now: Instant,
+    ) {
+        if !self.reading(chat_id) {
+            return;
+        }
+        self.typing_announced
+            .retain(|_, (at, _)| now.saturating_duration_since(*at) < TYPING_REPEAT);
+        let key = (chat_id.to_owned(), sender.to_owned());
+        let previous = self.typing_announced.get(&key).map(|(_, kind)| *kind);
+        if !composing {
+            // A pause keeps the stretch going without announcing anything.
+            if let Some(kind) = previous {
+                self.typing_announced.insert(key, (now, kind));
+            }
+            return;
+        }
+        self.typing_announced.insert(key, (now, recording));
+        if previous == Some(recording) {
+            return;
+        }
+        // The name as the chat list shows it while someone types.
+        let name = crate::a11y::spoken(self.display_name(sender).trim_start_matches('~'));
+        let template = if recording {
+            crate::i18n::gettext(self.locale, "{name} is recording audio")
+        } else {
+            crate::i18n::gettext(self.locale, "{name} is typing")
+        };
+        let text = crate::a11y::fill(&template, &[("name", &name)]);
+        self.announcer.say(crate::announcer::Category::Typing, text);
+    }
+
+    /// Speaks "Sent" when WhatsApp accepts one of our messages in the chat
+    /// being read. Delivered and read are not news, and a failure is already
+    /// spoken, with its reason, by the error the backend reports with it.
+    fn announce_sent(&mut self, chat_id: &str, from_me: bool, before: Delivery, after: Delivery) {
+        // A receipt can overtake the server's acknowledgement, so a pending
+        // message that jumps straight to delivered was accepted too.
+        let accepted = matches!(
+            after,
+            Delivery::Sent | Delivery::Delivered | Delivery::Read | Delivery::Played
+        );
+        if !from_me || before != Delivery::Pending || !accepted || !self.reading(chat_id) {
+            return;
+        }
+        let text = crate::i18n::gettext(self.locale, "Sent").into_owned();
+        // Several sends acknowledged in one frame say "Sent" once.
+        if let Some(queued) = self.sent_announced
+            && self.announcer.replace(queued, text.clone())
+        {
+            return;
+        }
+        self.sent_announced = self
+            .announcer
+            .say_queued(crate::announcer::Category::Sent, text);
+    }
+
     fn clear_chat_notifications(&mut self, chat: &str) {
         let account = self.account().id.clone();
         self.notifications.clear(&account, chat);
@@ -2198,12 +2400,7 @@ impl App {
         if !notification_eligible(chat, now, message.timestamp) {
             return;
         }
-        let reading = !self.events_hidden
-            && !self.window_hidden
-            && self.window_focused
-            && self.chat_view()
-            && self.open_chat.as_deref() == Some(chat_id);
-        if reading {
+        if self.reading(chat_id) {
             return;
         }
         // A limited chat notifies once, then waits; opening it ends the wait.
@@ -3604,7 +3801,11 @@ impl App {
                         .collect();
                 }
             }
-            Event::Incoming { chat, message } => self.maybe_notify(&chat, &message),
+            Event::Incoming { chat, message } => {
+                // Spoken whether or not desktop notifications are on.
+                self.announce_incoming(&chat, &message, Instant::now());
+                self.maybe_notify(&chat, &message);
+            }
             Event::Picked {
                 chat,
                 paths,
@@ -3696,9 +3897,15 @@ impl App {
                     }
                     self.reload_lists();
                 }
+                let (chat, from_me, after) =
+                    (message.chat.clone(), message.from_me, message.status);
+                // The status this update replaces, read before the update
+                // overwrites it.
+                let mut before = None;
                 if let Some(conversation) = self.conversations.get_mut(&message.chat)
                     && let Some(existing) = conversation.message_mut(&message.id)
                 {
+                    before = Some(existing.status);
                     let state = existing.content.media().map(|media| media.state.clone());
                     let motion_state = match &existing.content {
                         Content::Image {
@@ -3739,6 +3946,9 @@ impl App {
                         motion.state = state;
                     }
                 }
+                if let Some(before) = before {
+                    self.announce_sent(&chat, from_me, before, after);
+                }
             }
             Event::Contacts(contacts) => {
                 if live {
@@ -3752,7 +3962,9 @@ impl App {
                 chat,
                 sender,
                 composing,
+                recording,
             } => {
+                self.announce_typing(&chat, &sender, composing, recording, Instant::now());
                 let typers = self.typing.entry(chat).or_default();
                 typers.retain(|(who, _)| *who != sender);
                 if composing {
@@ -10952,6 +11164,348 @@ mod tests {
         assert_eq!(app.announcer.spoken(), ["", ""]);
     }
 
+    const ADA: &str = "15550001@s.whatsapp.net";
+    const GRACE: &str = "15550002@s.whatsapp.net";
+    const FAMILY: &str = "123-456@g.us";
+
+    /// A focused window on the Chats page with `chat` open, knowing Ada and
+    /// Grace by their saved names.
+    fn reading(chat: &str, name: &str) -> (App, std::sync::mpsc::Sender<Event>, tempfile::TempDir) {
+        let root = tempfile::tempdir().unwrap();
+        let (mut app, events) = App::headless(AppDirs::under(root.path()), Settings::default());
+        app.chats = vec![Chat::new(chat.into(), name.into())];
+        app.open_chat = Some(chat.into());
+        app.page = Page::Chats;
+        app.window_focused = true;
+        app.window_hidden = false;
+        for (id, name) in [(ADA, "Ada"), (GRACE, "Grace")] {
+            app.contacts.insert(
+                id.into(),
+                crate::model::Contact {
+                    id: id.into(),
+                    full_name: Some(name.into()),
+                    ..Default::default()
+                },
+            );
+        }
+        (app, events, root)
+    }
+
+    /// What the next frame speaks, if anything.
+    fn speak(app: &mut App) -> Option<String> {
+        let before: Vec<String> = app.announcer.spoken().map(String::from).into();
+        app.announcer.show(&egui::Context::default(), true);
+        before
+            .iter()
+            .zip(app.announcer.spoken())
+            .find(|(old, new)| old.as_str() != *new)
+            .map(|(_, new)| new.trim_end_matches('\u{200B}').to_owned())
+    }
+
+    fn incoming_from(chat: &str, sender: &str, id: &str, text: &str) -> Event {
+        let mut message = message(chat, id, crate::util::now());
+        message.sender = sender.into();
+        message.content = Content::text(text);
+        Event::Incoming {
+            chat: chat.into(),
+            message: Box::new(message),
+        }
+    }
+
+    /// The open chat beside the call history is in front of the reader
+    /// too: its messages are spoken there as on the chats' page.
+    #[test]
+    fn incoming_beside_the_call_history_is_announced() {
+        let (mut app, events, _root) = reading(ADA, "Ada");
+        app.page = Page::Calls;
+        events
+            .send(incoming_from(ADA, ADA, "m1", "calling you back"))
+            .unwrap();
+        app.handle_events();
+        assert_eq!(speak(&mut app).as_deref(), Some("Ada: calling you back"));
+    }
+
+    #[test]
+    fn incoming_in_open_focused_chat_is_announced() {
+        let (mut app, events, _root) = reading(ADA, "Ada");
+        // Even with desktop notifications off: these are not notifications.
+        app.settings.notifications = false;
+        events
+            .send(incoming_from(ADA, ADA, "m1", "see you\n   at 5"))
+            .unwrap();
+        app.handle_events();
+        assert_eq!(speak(&mut app).as_deref(), Some("Ada: see you at 5"));
+
+        let (mut app, events, _root) = reading(FAMILY, "Family");
+        events
+            .send(incoming_from(FAMILY, GRACE, "m2", "dinner at 8"))
+            .unwrap();
+        app.handle_events();
+        assert_eq!(
+            speak(&mut app).as_deref(),
+            Some("Grace in Family: dinner at 8")
+        );
+
+        // Media reads as the message list describes it.
+        let mut photo = message(FAMILY, "m3", crate::util::now());
+        photo.sender = GRACE.into();
+        photo.content = Content::Image {
+            motion: None,
+            caption: Some("the cake".into()),
+            media: Media {
+                mime: "image/jpeg".into(),
+                size: 100,
+                width: None,
+                height: None,
+                path: None,
+                state: MediaState::Idle,
+                album: None,
+            },
+        };
+        events
+            .send(Event::Incoming {
+                chat: FAMILY.into(),
+                message: Box::new(photo),
+            })
+            .unwrap();
+        app.handle_events();
+        assert_eq!(
+            speak(&mut app).as_deref(),
+            Some("Grace in Family: Photo, the cake")
+        );
+
+        // Our own messages, and other chats, say nothing.
+        let mut mine = message(FAMILY, "m4", crate::util::now());
+        mine.from_me = true;
+        events
+            .send(Event::Incoming {
+                chat: FAMILY.into(),
+                message: Box::new(mine),
+            })
+            .unwrap();
+        events
+            .send(incoming_from(ADA, ADA, "m5", "elsewhere"))
+            .unwrap();
+        app.handle_events();
+        assert_eq!(speak(&mut app), None);
+    }
+
+    #[test]
+    fn incoming_while_window_unfocused_is_not_announced() {
+        let (mut app, events, _root) = reading(ADA, "Ada");
+        app.window_focused = false;
+        events.send(incoming_from(ADA, ADA, "m1", "hello")).unwrap();
+        app.handle_events();
+        assert_eq!(speak(&mut app), None);
+        // Nor while the window is hidden or another page is up.
+        app.window_focused = true;
+        app.window_hidden = true;
+        events.send(incoming_from(ADA, ADA, "m2", "hello")).unwrap();
+        app.handle_events();
+        assert_eq!(speak(&mut app), None);
+        app.window_hidden = false;
+        app.page = Page::Settings;
+        events.send(incoming_from(ADA, ADA, "m3", "hello")).unwrap();
+        app.handle_events();
+        assert_eq!(speak(&mut app), None);
+    }
+
+    #[test]
+    fn history_and_bursts_do_not_flood_announcements() {
+        let (mut app, events, _root) = reading(ADA, "Ada");
+        let history = (0..20)
+            .map(|index| message(ADA, &format!("h{index}"), 1_000 + index))
+            .collect();
+        events
+            .send(Event::Messages {
+                chat: ADA.into(),
+                messages: history,
+                older: false,
+                complete: true,
+            })
+            .unwrap();
+        for index in 0..5 {
+            events
+                .send(incoming_from(ADA, ADA, &format!("m{index}"), "hello"))
+                .unwrap();
+        }
+        app.handle_events();
+        assert_eq!(speak(&mut app).as_deref(), Some("5 new messages from Ada"));
+        assert_eq!(speak(&mut app), None);
+
+        // Once spoken, the next message is read in full, not counted on.
+        events
+            .send(incoming_from(ADA, ADA, "m5", "still there?"))
+            .unwrap();
+        app.handle_events();
+        assert_eq!(speak(&mut app).as_deref(), Some("Ada: still there?"));
+
+        // Mixed senders in a group are only counted.
+        let (mut app, events, _root) = reading(FAMILY, "Family");
+        for (index, sender) in [ADA, GRACE, ADA].into_iter().enumerate() {
+            events
+                .send(incoming_from(FAMILY, sender, &format!("g{index}"), "hi"))
+                .unwrap();
+        }
+        app.handle_events();
+        assert_eq!(speak(&mut app).as_deref(), Some("3 new messages"));
+
+        // A message that comes more than the burst window later stands alone,
+        // even before the earlier one is spoken.
+        events
+            .send(incoming_from(FAMILY, ADA, "g3", "one"))
+            .unwrap();
+        app.handle_events();
+        if let Some(burst) = &mut app.incoming_burst {
+            burst.at = burst.at.checked_sub(Duration::from_secs(2)).unwrap();
+        }
+        events
+            .send(incoming_from(FAMILY, ADA, "g4", "two"))
+            .unwrap();
+        app.handle_events();
+        assert_eq!(
+            speak(&mut app).as_deref(),
+            Some("Ada in Family: one. Ada in Family: two")
+        );
+    }
+
+    #[test]
+    fn typing_announced_once_per_15_seconds() {
+        let (mut app, events, _root) = reading(FAMILY, "Family");
+        let typing = |sender: &str, composing: bool, recording: bool| Event::Typing {
+            chat: FAMILY.into(),
+            sender: sender.into(),
+            composing,
+            recording,
+        };
+        events.send(typing(ADA, true, false)).unwrap();
+        app.handle_events();
+        assert_eq!(speak(&mut app).as_deref(), Some("Ada is typing"));
+        // Pausing and resuming at once is the same stretch of typing.
+        events.send(typing(ADA, false, false)).unwrap();
+        events.send(typing(ADA, true, false)).unwrap();
+        app.handle_events();
+        assert_eq!(speak(&mut app), None);
+        // Someone else typing is news.
+        events.send(typing(GRACE, true, false)).unwrap();
+        app.handle_events();
+        assert_eq!(speak(&mut app).as_deref(), Some("Grace is typing"));
+        // Switching to a voice message is news too.
+        events.send(typing(ADA, true, true)).unwrap();
+        app.handle_events();
+        assert_eq!(speak(&mut app).as_deref(), Some("Ada is recording audio"));
+
+        // Fifteen seconds after Ada was last heard from, it is new again.
+        for at in app.typing_announced.values_mut() {
+            at.0 = at.0.checked_sub(Duration::from_secs(16)).unwrap();
+        }
+        events.send(typing(ADA, true, false)).unwrap();
+        app.handle_events();
+        assert_eq!(speak(&mut app).as_deref(), Some("Ada is typing"));
+
+        // Nothing for chats not being read.
+        app.window_focused = false;
+        for at in app.typing_announced.values_mut() {
+            at.0 = at.0.checked_sub(Duration::from_secs(16)).unwrap();
+        }
+        events.send(typing(ADA, true, false)).unwrap();
+        app.handle_events();
+        assert_eq!(speak(&mut app), None);
+    }
+
+    /// A send refused while WhatsApp is not connected never becomes a
+    /// pending message, so it is never "Sent": its text goes back to the
+    /// message field and the refusal is spoken as the error it is.
+    #[test]
+    fn a_send_refused_offline_is_spoken_as_not_sent() {
+        let (mut app, events, _root) = reading(ADA, "Ada");
+        events
+            .send(Event::SendRefused {
+                chat: ADA.into(),
+                quoting: None,
+                unsent: crate::backend::Unsent::Text("On my way".into()),
+                reason: crate::backend::Refusal::Offline,
+            })
+            .unwrap();
+        app.handle_events();
+        assert_eq!(app.composer, "On my way");
+        assert_eq!(
+            speak(&mut app).as_deref(),
+            Some("Not sent: ZapFast is not connected to WhatsApp.")
+        );
+        assert_eq!(speak(&mut app), None, "nothing says Sent after it");
+    }
+
+    #[test]
+    fn sent_and_failed_are_announced() {
+        let (mut app, events, _root) = reading(ADA, "Ada");
+        let mine = |id: &str, status: Delivery| {
+            let mut message = message(ADA, id, 1_000);
+            message.from_me = true;
+            message.status = status;
+            message
+        };
+        events
+            .send(Event::Messages {
+                chat: ADA.into(),
+                messages: vec![
+                    mine("a", Delivery::Pending),
+                    mine("b", Delivery::Pending),
+                    mine("c", Delivery::Pending),
+                ],
+                older: false,
+                complete: true,
+            })
+            .unwrap();
+        app.handle_events();
+        events
+            .send(Event::MessageUpdated(Box::new(mine("a", Delivery::Sent))))
+            .unwrap();
+        app.handle_events();
+        assert_eq!(speak(&mut app).as_deref(), Some("Sent"));
+        // Delivered and read are not news.
+        for status in [Delivery::Delivered, Delivery::Read] {
+            events
+                .send(Event::MessageUpdated(Box::new(mine("a", status))))
+                .unwrap();
+        }
+        app.handle_events();
+        assert_eq!(speak(&mut app), None);
+
+        // A failed send is spoken once, assertively, by the backend's error
+        // that comes with it; the status change adds no second "not sent".
+        events
+            .send(Event::MessageUpdated(Box::new(mine("b", Delivery::Failed))))
+            .unwrap();
+        events
+            .send(Event::Error("Message not sent: timed out".into()))
+            .unwrap();
+        app.handle_events();
+        assert_eq!(
+            speak(&mut app).as_deref(),
+            Some("Message not sent: timed out")
+        );
+
+        // Two sends acknowledged together say "Sent" once.
+        let (mut app, events, _root) = reading(ADA, "Ada");
+        events
+            .send(Event::Messages {
+                chat: ADA.into(),
+                messages: vec![mine("a", Delivery::Pending), mine("c", Delivery::Pending)],
+                older: false,
+                complete: true,
+            })
+            .unwrap();
+        app.handle_events();
+        for id in ["a", "c"] {
+            events
+                .send(Event::MessageUpdated(Box::new(mine(id, Delivery::Sent))))
+                .unwrap();
+        }
+        app.handle_events();
+        assert_eq!(speak(&mut app).as_deref(), Some("Sent"));
+    }
+
     fn app() -> App {
         let root = std::env::temp_dir().join(format!("zapfast-app-{}", std::process::id()));
         App::headless(AppDirs::under(&root), Settings::default()).0
@@ -12567,6 +13121,54 @@ mod tests {
         });
         app.apply(Action::SwitchAccount(AccountId::parse("2").unwrap()), &ctx);
         assert!(app.unread_jump.is_none());
+    }
+
+    /// A hidden account's new messages and typing are never spoken, even
+    /// in a chat of the same id as the one on screen.
+    #[test]
+    fn a_hidden_accounts_messages_and_typing_are_never_spoken() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _commands) = two_accounts(directory.path());
+        app.window_focused = true;
+        app.window_hidden = false;
+        app.page = Page::Chats;
+        let chat = "15550007777@s.whatsapp.net";
+        app.accounts[0].open_chat = Some(chat.into());
+        app.accounts[1].open_chat = Some(chat.into());
+        app.accounts[1]
+            .chats
+            .push(Chat::new(chat.into(), "Grace".into()));
+        app.active = 1;
+        app.events_hidden = true;
+        app.apply_backend_event(
+            Event::Typing {
+                chat: chat.into(),
+                sender: chat.into(),
+                composing: true,
+                recording: false,
+            },
+            false,
+        );
+        app.apply_backend_event(incoming_from(chat, chat, "hidden", "Hello"), false);
+        app.events_hidden = false;
+        app.active = 0;
+        assert!(app.typing_announced.is_empty());
+        app.announcer.show(&egui::Context::default(), true);
+        assert_eq!(app.announcer.spoken(), ["", ""]);
+    }
+
+    /// Typing heard in one account's chat is announced afresh in the next.
+    #[test]
+    fn switching_accounts_starts_typing_announcements_over() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _commands) = two_accounts(directory.path());
+        let ctx = egui::Context::default();
+        app.typing_announced.insert(
+            ("15550007777@s.whatsapp.net".into(), "someone".into()),
+            (Instant::now(), false),
+        );
+        app.apply(Action::SwitchAccount(AccountId::parse("2").unwrap()), &ctx);
+        assert!(app.typing_announced.is_empty());
     }
 
     #[test]

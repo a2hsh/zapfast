@@ -55,6 +55,17 @@ pub struct Announcer {
     /// private category.
     slots: [(String, bool, bool); 2],
     next: usize,
+    /// How many times `show` has drained the queue, so a `Queued` handle
+    /// from before the last drain is known to be spoken already.
+    drained: u64,
+}
+
+/// An announcement still waiting in the queue, which `Announcer::replace`
+/// can reword until the next `show` speaks it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Queued {
+    drained: u64,
+    index: usize,
 }
 
 pub fn announcer_id(slot: usize) -> egui::Id {
@@ -63,20 +74,33 @@ pub fn announcer_id(slot: usize) -> egui::Id {
 
 impl Announcer {
     pub fn say(&mut self, category: Category, text: impl Into<String>) {
-        let text = text.into();
-        if !text.trim().is_empty() {
-            let now = Instant::now();
-            // While no frame speaks them, stale items must not pile up.
-            self.queue
-                .retain(|(category, _, at)| fresh(*category, *at, now));
-            self.queue.push((category, text, now));
+        self.push(category, text.into());
+    }
+
+    /// Queues `text` unless it is blank; true when it was queued, last.
+    fn push(&mut self, category: Category, text: String) -> bool {
+        if text.trim().is_empty() {
+            return false;
         }
+        let now = Instant::now();
+        // While no frame speaks them, stale items must not pile up.
+        let before = self.queue.len();
+        self.queue
+            .retain(|(category, _, at)| fresh(*category, *at, now));
+        if self.queue.len() != before {
+            // Dropped items shift the queue, so no `Queued` handle may reach it.
+            self.drained += 1;
+        }
+        self.queue.push((category, text, now));
+        true
     }
 
     /// Drops the private text waiting to be spoken and empties the slots
     /// that hold some, so it is no longer readable in the tree: behind the
     /// lock screen, or once another account is on screen.
     pub fn forget_private(&mut self) {
+        // Dropped items shift the queue, so no `Queued` handle may reach it.
+        self.drained += 1;
         self.queue.retain(|(category, _, _)| !category.private());
         for slot in &mut self.slots {
             if slot.2 {
@@ -85,8 +109,34 @@ impl Announcer {
         }
     }
 
+    /// Queues `text` like `say` and returns a handle to reword it before it
+    /// is spoken; `None` when there was nothing to say.
+    pub fn say_queued(&mut self, category: Category, text: impl Into<String>) -> Option<Queued> {
+        // Taken after `push`, which may drop stale items ahead of this one.
+        self.push(category, text.into()).then(|| Queued {
+            drained: self.drained,
+            index: self.queue.len() - 1,
+        })
+    }
+
+    /// Rewords a queued announcement, keeping its category. False once it
+    /// has been spoken: a message already read cannot be taken back.
+    pub fn replace(&mut self, queued: Queued, text: impl Into<String>) -> bool {
+        if queued.drained != self.drained {
+            return false;
+        }
+        match self.queue.get_mut(queued.index) {
+            Some(item) => {
+                item.1 = text.into();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Emits both announcer nodes; call once per frame.
     pub fn show(&mut self, ctx: &egui::Context, private_allowed: bool) {
+        self.drained += 1;
         let now = Instant::now();
         let items: Vec<_> = std::mem::take(&mut self.queue)
             .into_iter()
@@ -246,6 +296,52 @@ mod tests {
         announcer.say(Category::Status, "Connection lost");
         frame(&mut announcer, false);
         assert_eq!(announcer.spoken()[0], "Connection lost");
+    }
+
+    #[test]
+    fn queued_text_can_be_reworded_until_it_is_spoken() {
+        let mut announcer = Announcer::default();
+        let first = announcer.say_queued(Category::Message, "Ada: hi").unwrap();
+        announcer.say(Category::Status, "Copied");
+        assert!(announcer.replace(first, "2 new messages from Ada"));
+        frame(&mut announcer, true);
+        assert_eq!(announcer.spoken()[0], "2 new messages from Ada. Copied");
+        // Once spoken, the old handle no longer reaches anything, not even an
+        // item queued later at the same position.
+        announcer.say(Category::Message, "Grace: hello");
+        assert!(!announcer.replace(first, "3 new messages from Ada"));
+        frame(&mut announcer, true);
+        assert_eq!(announcer.spoken()[1], "Grace: hello");
+        assert!(announcer.say_queued(Category::Message, "  ").is_none());
+    }
+
+    #[test]
+    fn a_handle_to_a_stale_item_reaches_nothing() {
+        let mut announcer = Announcer::default();
+        let first = announcer.say_queued(Category::Message, "Ada: hi").unwrap();
+        announcer.age(FRESH);
+        // Saying more drops the stale item, so a later one takes its place,
+        // and that one is not the item the handle was for.
+        announcer.say(Category::Message, "Grace: hello");
+        assert!(!announcer.replace(first, "2 new messages from Ada"));
+        frame(&mut announcer, true);
+        assert_eq!(announcer.spoken()[0], "Grace: hello");
+    }
+
+    #[test]
+    fn a_handle_reaches_its_item_after_stale_ones_ahead_are_dropped() {
+        let mut announcer = Announcer::default();
+        announcer.say(Category::Toast, "Copied");
+        announcer.say(Category::Error, "Could not send");
+        announcer.age(FRESH);
+        // "Copied" goes, the error waits: the new item moves up one.
+        let first = announcer.say_queued(Category::Message, "Ada: hi").unwrap();
+        assert!(announcer.replace(first, "2 new messages from Ada"));
+        frame(&mut announcer, true);
+        assert_eq!(
+            announcer.spoken()[0],
+            "Could not send. 2 new messages from Ada"
+        );
     }
 
     #[test]
