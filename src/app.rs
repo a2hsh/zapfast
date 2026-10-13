@@ -6357,6 +6357,8 @@ impl App {
             return message.to_owned();
         }
         let account = self.account().display_label(self.locale);
+        // Translators: an announcement from an account that is not on screen:
+        // the account's name, then what it announced.
         let template = crate::i18n::gettext(self.locale, "{}: {}");
         let mut parts = template.splitn(3, "{}");
         format!(
