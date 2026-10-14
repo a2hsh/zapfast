@@ -1192,12 +1192,19 @@ fn take_matching_exactly(input: &mut egui::InputState, modifiers: Modifiers, key
 /// Tab, Enter, Space and Up/Down stay for the preview's own controls.
 fn preview_keys(app: &mut App, ctx: &egui::Context) {
     let mut actions = Vec::new();
+    // A menu the keys opened on the picture takes Escape itself, and closes;
+    // the pointer's menu closes with the preview, as it always did.
+    let key_menu = crate::ui::list_nav::key_menu_open(ctx);
     ctx.input_mut(|input| {
-        if input.consume_key(Modifiers::NONE, Key::Escape) {
+        if !key_menu && input.consume_key(Modifiers::NONE, Key::Escape) {
             actions.push(Action::CloseImagePreview);
         }
-        let copy_shortcut = input.consume_key(Modifiers::COMMAND, Key::C)
-            || input.consume_key(Modifiers::CTRL, Key::C);
+        // Under that menu the keys leave the picture alone: stepping to
+        // another one, zooming or copying would happen behind the menu,
+        // which then acts on a picture the reader did not open it on.
+        let copy_shortcut = !key_menu
+            && (input.consume_key(Modifiers::COMMAND, Key::C)
+                || input.consume_key(Modifiers::CTRL, Key::C));
         // The header leaves the copy action out while a clip is on screen, so
         // the shortcut does the same: copying a clip would decode a video as an
         // image and fail.
@@ -1209,7 +1216,7 @@ fn preview_keys(app: &mut App, ctx: &egui::Context) {
             actions.push(Action::CopyImage(path.to_owned()));
         }
         let mut event_actions = Vec::new();
-        for event in &input.events {
+        for event in input.events.iter().filter(|_| !key_menu) {
             if let egui::Event::Key {
                 key,
                 modifiers,
@@ -1237,9 +1244,27 @@ fn preview_keys(app: &mut App, ctx: &egui::Context) {
             });
         }
         actions.extend(event_actions);
-        input
-            .events
-            .retain(|event| !crate::image_preview::consumes_key(event));
+        // Shift+F10, which the Applications key also arrives as, stays for
+        // the focused picture's menu, and Escape for that menu once open.
+        input.events.retain(|event| {
+            !crate::image_preview::consumes_key(event)
+                || matches!(
+                    event,
+                    egui::Event::Key {
+                        key: Key::F10,
+                        modifiers,
+                        ..
+                    } if *modifiers == Modifiers::SHIFT
+                )
+                || (key_menu
+                    && matches!(
+                        event,
+                        egui::Event::Key {
+                            key: Key::Escape,
+                            ..
+                        }
+                    ))
+        });
     });
     app.actions.extend(actions);
 }

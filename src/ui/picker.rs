@@ -1679,49 +1679,76 @@ fn sticker_grid(
                 let (rect, response) = ui.allocate_exact_size(Vec2::splat(cell), Sense::click());
                 // A sticker has no words of its own: the tile says where it is.
                 let number = row_index * columns + offset + 1;
-                widgets::name_button(
-                    &response,
-                    &crate::a11y::fill(&sticker, &[("number", &number.to_string())]),
-                );
+                let name = crate::a11y::fill(&sticker, &[("number", &number.to_string())]);
+                widgets::name_button(&response, &name);
                 if Some(path) == stickers.first() {
                     ui.ctx()
                         .data_mut(|data| data.insert_temp(first_tile_id(), rect));
                 }
                 paint_tile(ui, palette, path, rect, response.hovered(), animate);
+                // Shift+F10, or the Applications key, on the tile opens its
+                // menu from the keys, beside it: focus goes into the menu
+                // and back to the tile as it closes. The pointer's menu is
+                // unchanged.
+                let requested = super::list_nav::take_menu_key(&response);
+                let key_menu = super::list_nav::KeyMenu::begin(
+                    ui.ctx(),
+                    egui::Popup::default_response_id(&response),
+                    requested,
+                    false,
+                )
+                .menu(name);
+                let mut first = None;
                 // The background takes clicks, not focus: a focusable one
                 // is a nameless Tab stop.
-                egui::Popup::context_menu(&response)
+                let popup = egui::Popup::context_menu(&response)
                     .sense(Sense::CLICK)
                     .width(menu_width)
-                    .frame(widgets::menu_frame(palette))
-                    .show(|ui| {
-                        if shelf == Shelf::Favorites {
-                            if widgets::menu_item(ui, palette, Some(Icon::StarOff), &remove_label) {
-                                choices.forget = Some(path.clone());
+                    .frame(widgets::menu_frame(palette));
+                let shown = key_menu.place(popup, &response, requested).show(|ui| {
+                    // The first item, whichever it is, is where the keys
+                    // put focus; a popup's first pass only measures it.
+                    let mut item = |ui: &mut egui::Ui, icon, label: &str| {
+                        let item =
+                            widgets::menu_item_response(ui, palette, Some(icon), label, true);
+                        if !ui.is_sizing_pass() {
+                            first.get_or_insert(item.id);
+                        }
+                        item.clicked()
+                    };
+                    if shelf == Shelf::Favorites {
+                        if item(ui, Icon::StarOff, &remove_label) {
+                            choices.forget = Some(path.clone());
+                        }
+                    } else if item(ui, Icon::Star, &save_label) {
+                        choices.save = Some(path.clone());
+                    }
+                    if shelf == Shelf::Recent
+                        && widgets::menu_item(ui, palette, Some(Icon::X), &unrecent_label)
+                    {
+                        choices.unrecent = Some(path.clone());
+                    }
+                    if !grid.local.is_empty() {
+                        widgets::menu_separator(ui, palette);
+                        let hash = content_hash(ui.ctx(), path);
+                        for pack in grid.local {
+                            // A checked entry is a member: picking it again
+                            // takes the sticker back out.
+                            let member = hash.as_deref().is_some_and(|hash| pack_holds(pack, hash));
+                            let icon = member.then_some(Icon::Check);
+                            if widgets::menu_item(ui, palette, icon, &pack.name) {
+                                choices.pack = Some((pack.dir.clone(), path.clone(), !member));
                             }
-                        } else if widgets::menu_item(ui, palette, Some(Icon::Star), &save_label) {
-                            choices.save = Some(path.clone());
                         }
-                        if shelf == Shelf::Recent
-                            && widgets::menu_item(ui, palette, Some(Icon::X), &unrecent_label)
-                        {
-                            choices.unrecent = Some(path.clone());
-                        }
-                        if !grid.local.is_empty() {
-                            widgets::menu_separator(ui, palette);
-                            let hash = content_hash(ui.ctx(), path);
-                            for pack in grid.local {
-                                // A checked entry is a member: picking it again
-                                // takes the sticker back out.
-                                let member =
-                                    hash.as_deref().is_some_and(|hash| pack_holds(pack, hash));
-                                let icon = member.then_some(Icon::Check);
-                                if widgets::menu_item(ui, palette, icon, &pack.name) {
-                                    choices.pack = Some((pack.dir.clone(), path.clone(), !member));
-                                }
-                            }
-                        }
-                    });
+                    }
+                });
+                key_menu.finish(
+                    ui.ctx(),
+                    shown.map(|shown| shown.response.layer_id),
+                    false,
+                    first,
+                    response.id,
+                );
                 if response
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()

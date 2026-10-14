@@ -928,17 +928,44 @@ fn filter_chips(app: &mut App, ui: &mut egui::Ui) {
                             .iter()
                             .filter(|chat| chat.is_channel())
                             .all(|chat| chat.muted(now));
-                        chip.context_menu(|ui| {
+                        // Shift+F10, or the Applications key, on the chip
+                        // opens its menu from the keys, beside it: focus
+                        // goes into the menu and back to the chip as it
+                        // closes. The pointer's menu is unchanged.
+                        let requested = super::list_nav::take_menu_key(&chip);
+                        let key_menu = super::list_nav::KeyMenu::begin(
+                            ui.ctx(),
+                            egui::Popup::default_response_id(&chip),
+                            requested,
+                            false,
+                        )
+                        .menu(filter.label(app.locale));
+                        let mut first = None;
+                        // The background takes clicks, not focus: a
+                        // focusable one is a nameless Tab stop.
+                        let popup = egui::Popup::context_menu(&chip).sense(Sense::CLICK);
+                        let shown = key_menu.place(popup, &chip, requested).show(|ui| {
                             let (icon, label) = if all_muted {
                                 (Icon::Bell, "Unmute all channels")
                             } else {
                                 (Icon::BellOff, "Mute all channels")
                             };
-                            if widgets::menu_item(ui, &palette, Some(icon), label) {
+                            let item =
+                                widgets::menu_item_response(ui, &palette, Some(icon), label, true);
+                            // A popup's first pass only measures it.
+                            first = (!ui.is_sizing_pass()).then_some(item.id);
+                            if item.clicked() {
                                 app.actions.push(Action::MuteAllChannels(!all_muted));
                                 ui.close();
                             }
                         });
+                        key_menu.finish(
+                            ui.ctx(),
+                            shown.map(|shown| shown.response.layer_id),
+                            false,
+                            first,
+                            chip.id,
+                        );
                         chip
                     } else {
                         chip

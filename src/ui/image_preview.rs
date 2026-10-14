@@ -648,46 +648,74 @@ fn still(
                                 true,
                             )
                             .max(180.0);
+                            // Shift+F10, or the Applications key, on the
+                            // picture opens its menu from the keys, beside
+                            // it: focus goes into the menu and back to the
+                            // picture as it closes. The pointer's menu is
+                            // unchanged.
+                            let requested = crate::ui::list_nav::take_menu_key(&image_response);
+                            let key_menu = crate::ui::list_nav::KeyMenu::begin(
+                                ui.ctx(),
+                                egui::Popup::default_response_id(&image_response),
+                                requested,
+                                false,
+                            )
+                            .menu(crate::i18n::gettext(app.locale, "Picture"));
+                            let mut first = None;
                             // The background takes clicks, not focus: a
                             // focusable one is a nameless Tab stop.
-                            egui::Popup::context_menu(&image_response)
+                            let popup = egui::Popup::context_menu(&image_response)
                                 .sense(egui::Sense::CLICK)
                                 .width(menu_width)
-                                .frame(crate::ui::widgets::menu_frame(&palette))
-                                .show(|ui| {
-                                    if crate::ui::widgets::menu_item(
-                                        ui,
-                                        &palette,
-                                        Some(Icon::Copy),
-                                        &copy_label,
-                                    ) {
-                                        app.actions.push(Action::CopyImage(path.to_owned()));
-                                    }
-                                    if crate::ui::widgets::menu_item(
-                                        ui,
-                                        &palette,
-                                        Some(Icon::Download),
-                                        &save_label,
-                                    ) {
-                                        let name = path
-                                            .file_name()
-                                            .and_then(|name| name.to_str())
-                                            .unwrap_or("image.png")
-                                            .to_owned();
-                                        app.actions.push(Action::SaveAttachmentAs {
-                                            path: path.to_owned(),
-                                            name,
-                                        });
-                                    }
-                                    if crate::ui::widgets::menu_item(
-                                        ui,
-                                        &palette,
-                                        Some(Icon::ExternalLink),
-                                        &open_label,
-                                    ) {
-                                        app.actions.push(Action::OpenFile(path.to_owned()));
-                                    }
-                                });
+                                .frame(crate::ui::widgets::menu_frame(&palette));
+                            let shown =
+                                key_menu
+                                    .place(popup, &image_response, requested)
+                                    .show(|ui| {
+                                        let copy = crate::ui::widgets::menu_item_response(
+                                            ui,
+                                            &palette,
+                                            Some(Icon::Copy),
+                                            &copy_label,
+                                            true,
+                                        );
+                                        // A popup's first pass only measures it.
+                                        first = (!ui.is_sizing_pass()).then_some(copy.id);
+                                        if copy.clicked() {
+                                            app.actions.push(Action::CopyImage(path.to_owned()));
+                                        }
+                                        if crate::ui::widgets::menu_item(
+                                            ui,
+                                            &palette,
+                                            Some(Icon::Download),
+                                            &save_label,
+                                        ) {
+                                            let name = path
+                                                .file_name()
+                                                .and_then(|name| name.to_str())
+                                                .unwrap_or("image.png")
+                                                .to_owned();
+                                            app.actions.push(Action::SaveAttachmentAs {
+                                                path: path.to_owned(),
+                                                name,
+                                            });
+                                        }
+                                        if crate::ui::widgets::menu_item(
+                                            ui,
+                                            &palette,
+                                            Some(Icon::ExternalLink),
+                                            &open_label,
+                                        ) {
+                                            app.actions.push(Action::OpenFile(path.to_owned()));
+                                        }
+                                    });
+                            key_menu.finish(
+                                ui.ctx(),
+                                shown.map(|shown| shown.response.layer_id),
+                                false,
+                                first,
+                                image_response.id,
+                            );
                             (
                                 ui.layout()
                                     .align_size_within_rect(size, image_response.rect),

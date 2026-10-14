@@ -3563,3 +3563,226 @@ fn the_first_recording_of_a_session_returns_to_the_field() {
         }
     }
 }
+
+/// Whether every channel is muted.
+fn channels_muted(app: &App) -> bool {
+    let now = crate::util::now();
+    app.chats
+        .iter()
+        .filter(|chat| chat.is_channel())
+        .all(|chat| chat.muted(now))
+}
+
+/// The Channels filter's menu, which only a right-click opened, opens from
+/// Shift+F10 on the chip as every keyboard menu opens, and its item acts
+/// with the reader back on the chip.
+#[test]
+fn the_channels_filters_menu_opens_from_the_keys() {
+    let mut trace = Trace::new(app());
+    focus_stop(&mut trace, Stop::Filters);
+    let chip = move_to(&mut trace, egui::Key::ArrowRight, "Channels");
+    let press = tap(
+        &mut trace,
+        "Shift+F10",
+        egui::Key::F10,
+        egui::Modifiers::SHIFT,
+    );
+    walks_like_a_menu(
+        &mut trace,
+        &chip,
+        press,
+        "Channels",
+        "MenuItem \"",
+        "the Channels filter",
+    );
+    let muted = channels_muted(&trace.app);
+    trace.press("Shift+F10", egui::Key::F10, egui::Modifiers::SHIFT);
+    let from = tap(&mut trace, "Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    trace.assert_clean(from, "the Channels filter, its item");
+    assert_ne!(channels_muted(&trace.app), muted, "the item acts");
+    assert_eq!(trace.last().egui, chip.egui, "back on the chip");
+}
+
+/// The Applications key on the Channels filter opens its menu as Shift+F10
+/// does.
+#[cfg(target_os = "windows")]
+#[test]
+fn the_applications_key_opens_the_channels_filters_menu() {
+    let mut trace = Trace::new(app());
+    focus_stop(&mut trace, Stop::Filters);
+    move_to(&mut trace, egui::Key::ArrowRight, "Channels");
+    let from = trace.mark();
+    applications_key(&mut trace);
+    trace.assert_clean(from, "the Applications key on the Channels filter");
+    assert!(
+        trace.last().name.starts_with("MenuItem"),
+        "{}",
+        trace.dump(from)
+    );
+}
+
+/// The image preview, opened from the message list's Space, with its
+/// picture decoded and drawn, which a pointer can then reach.
+fn picture_preview() -> Trace {
+    let mut trace = Trace::new(photo_chat());
+    focus_stop(&mut trace, Stop::Messages);
+    tap(&mut trace, "Space", egui::Key::Space, egui::Modifiers::NONE);
+    assert!(trace.app.image_preview.is_some());
+    for _ in 0..300 {
+        if !trace.ctx.has_pending_images() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        trace.settle("loading", 1);
+    }
+    trace.settle("loaded", 2);
+    trace
+}
+
+/// The previewed picture's menu (Copy, Save as, Open in another app), which
+/// only a right-click opened, opens from Shift+F10 on the picture as every
+/// keyboard menu opens. Escape closes the menu, not the preview, and Copy
+/// image copies with the reader back on the picture.
+#[test]
+fn the_pictures_menu_opens_from_the_keys_as_the_other_menus_do() {
+    let mut trace = picture_preview();
+    let (backend, mut inbox) = crate::backend::Backend::recording();
+    trace.app.backend = backend;
+    let picture = move_to(&mut trace, egui::Key::Tab, "\"Picture\"");
+    let press = tap(
+        &mut trace,
+        "Shift+F10",
+        egui::Key::F10,
+        egui::Modifiers::SHIFT,
+    );
+    walks_like_a_menu(
+        &mut trace,
+        &picture,
+        press,
+        "Picture",
+        "MenuItem \"Copy image\"",
+        "the picture",
+    );
+    assert!(
+        trace.app.image_preview.is_some(),
+        "Escape leaves the preview"
+    );
+    trace.press("Shift+F10", egui::Key::F10, egui::Modifiers::SHIFT);
+    let from = tap(&mut trace, "Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    trace.assert_clean(from, "the picture, Copy image");
+    assert!(
+        sent(&mut inbox)
+            .iter()
+            .any(|command| matches!(command, crate::backend::Command::PrepareClipboardImage(_))),
+        "Copy image copies it"
+    );
+    assert_eq!(trace.last().egui, picture.egui, "back on the picture");
+}
+
+/// With the picture's menu open from the keys, the viewer's own keys leave
+/// the picture alone: + does not zoom it and Ctrl+C does not copy it behind
+/// the menu, which stays open.
+#[test]
+fn the_pictures_menu_holds_the_viewers_keys() {
+    let mut trace = picture_preview();
+    let (backend, mut inbox) = crate::backend::Backend::recording();
+    trace.app.backend = backend;
+    move_to(&mut trace, egui::Key::Tab, "\"Picture\"");
+    trace.press("Shift+F10", egui::Key::F10, egui::Modifiers::SHIFT);
+    assert!(crate::ui::list_nav::key_menu_open(&trace.ctx), "the menu");
+    let zoom = trace
+        .app
+        .image_preview
+        .as_ref()
+        .expect("the preview")
+        .zoom();
+    trace.press("+", egui::Key::Plus, egui::Modifiers::NONE);
+    trace.press("Ctrl+C", egui::Key::C, egui::Modifiers::COMMAND);
+    let preview = trace.app.image_preview.as_ref().expect("the preview");
+    assert_eq!(preview.zoom(), zoom, "no zoom behind the menu");
+    assert!(
+        !sent(&mut inbox)
+            .iter()
+            .any(|command| matches!(command, crate::backend::Command::PrepareClipboardImage(_))),
+        "no copy behind the menu"
+    );
+    assert!(crate::ui::list_nav::key_menu_open(&trace.ctx), "still open");
+}
+/// A right-click on the previewed picture opens its menu as upstream does,
+/// with a screen reader attached: no focus pushed into it, and Escape
+/// closes the preview with it.
+#[test]
+fn the_pictures_menu_opened_with_the_pointer_is_as_before() {
+    let mut trace = picture_preview();
+    let picture = move_to(&mut trace, egui::Key::Tab, "\"Picture\"");
+    let at = trace
+        .ctx
+        .read_response(picture.egui.expect("the picture has focus"))
+        .expect("the picture is drawn")
+        .rect
+        .center();
+    let button = |pressed| egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Secondary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    trace.action += 1;
+    trace.frame("right-click", vec![egui::Event::PointerMoved(at)]);
+    trace.frame("right-click", vec![button(true), button(false)]);
+    trace.settle("right-click", 4);
+    assert!(
+        egui::Popup::is_any_open(&trace.ctx),
+        "the right-click opens it"
+    );
+    let popup = picture.egui.map(|id| id.with("popup"));
+    assert_ne!(trace.last().layer, popup, "no focus pushed into it");
+    tap(
+        &mut trace,
+        "Escape",
+        egui::Key::Escape,
+        egui::Modifiers::NONE,
+    );
+    assert!(
+        trace.app.image_preview.is_none(),
+        "Escape closes the preview"
+    );
+}
+
+/// A sticker's menu in the picker, which only a right-click opened, opens
+/// from Shift+F10 on the sticker as every keyboard menu opens, and Add to
+/// favorites saves it with the reader back on the sticker.
+#[test]
+fn a_stickers_menu_opens_from_the_keys_as_the_other_menus_do() {
+    let mut app = app();
+    super::sticker_sample(&mut app, crate::model::StickerShelf::Recent, "");
+    let mut trace = Trace::new(app);
+    let (backend, mut inbox) = crate::backend::Backend::recording();
+    trace.app.backend = backend;
+    let sticker = move_to(&mut trace, egui::Key::Tab, "\"Sticker 1\"");
+    let press = tap(
+        &mut trace,
+        "Shift+F10",
+        egui::Key::F10,
+        egui::Modifiers::SHIFT,
+    );
+    walks_like_a_menu(
+        &mut trace,
+        &sticker,
+        press,
+        "Sticker 1",
+        "MenuItem \"Add to favorites\"",
+        "a sticker",
+    );
+    assert!(trace.app.picker.is_some(), "Escape leaves the picker open");
+    trace.press("Shift+F10", egui::Key::F10, egui::Modifiers::SHIFT);
+    let from = tap(&mut trace, "Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    trace.assert_clean(from, "a sticker, Add to favorites");
+    assert!(
+        sent(&mut inbox)
+            .iter()
+            .any(|command| matches!(command, crate::backend::Command::SaveSticker { .. })),
+        "Add to favorites saves it"
+    );
+    assert_eq!(trace.last().egui, sticker.egui, "back on the sticker");
+}
