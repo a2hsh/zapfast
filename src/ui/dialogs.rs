@@ -1780,12 +1780,8 @@ const NUMBER_TOO_SHORT: &str = "Enter the whole number, starting with the countr
 fn pair_with_phone(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     title(ui, app, "Link with a phone number");
-    theme::paragraph(
-        ui,
-        "Enter the WhatsApp phone number with its country code. Do not include a plus sign or leading zero. You will get a code to enter on the phone.",
-        theme::regular(13.0),
-        palette.secondary,
-    );
+    const EXPLAINED: &str = "Enter the WhatsApp phone number with its country code. Do not include a plus sign or leading zero. You will get a code to enter on the phone.";
+    theme::paragraph(ui, EXPLAINED, theme::regular(13.0), palette.secondary);
     ui.add_space(4.0);
     let id = egui::Id::new("pair-phone");
     let submit = ui.memory(|memory| memory.has_focus(id))
@@ -1822,6 +1818,11 @@ fn pair_with_phone(app: &mut App, ui: &mut egui::Ui) {
                     &response,
                     &crate::i18n::gettext(app.locale, "Phone number"),
                 );
+                // The explanation above is what the field asks for.
+                let explained = crate::i18n::gettext(app.locale, EXPLAINED).into_owned();
+                ui.ctx().accesskit_node_builder(response.id, |node| {
+                    node.set_description(explained);
+                });
                 if !response.has_focus() && app.pair_phone.is_empty() {
                     response.request_focus();
                 }
@@ -1843,6 +1844,12 @@ fn pair_with_phone(app: &mut App, ui: &mut egui::Ui) {
             if (get_code.clicked() || submit) && ready {
                 app.actions
                     .push(Action::PairWithPhone(app.pair_phone.clone()));
+            } else if submit {
+                // Enter on a short number would otherwise do nothing at all.
+                app.announcer.say(
+                    crate::announcer::Category::Error,
+                    crate::i18n::gettext(app.locale, NUMBER_TOO_SHORT),
+                );
             }
             if theme::pill_button(ui, &palette, "Cancel", false).clicked() {
                 app.actions.push(Action::CloseDialog);

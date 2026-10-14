@@ -29253,3 +29253,134 @@ mod suggestion_access_tests {
         }
     }
 }
+
+/// The linking screen with a keyboard, a screen reader and a pointer: the QR
+/// code and its enlarged view, the pairing code, and a code that runs out.
+#[cfg(test)]
+mod linking_access_tests {
+    use super::settings_access_tests::{focused, input_frame, tree};
+    use super::tests::{app, press_key, render};
+    use super::*;
+    use egui::accesskit::{Node, NodeId, Role, TreeUpdate};
+    use egui::{Key, Modifiers};
+
+    /// A linking page of `apply_flags`, before its first frame, recording
+    /// what it sends the backend.
+    fn linking(page: &str) -> (App, egui::Context) {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        apply_flags(&mut app, Some(page));
+        app.backend.record_demo_commands();
+        (app, ctx)
+    }
+
+    /// The node named `name`, if the tree has one: a label's name is its
+    /// value.
+    fn named(tree: &TreeUpdate, name: &str) -> Option<(NodeId, Node)> {
+        tree.nodes
+            .iter()
+            .find(|(_, node)| node.label().or(node.value()) == Some(name))
+            .map(|(id, node)| (*id, node.clone()))
+    }
+
+    /// The middle of a drawn node, where a pointer clicks it.
+    fn middle(node: &Node) -> egui::Pos2 {
+        let bounds = node.bounds().expect("the node is drawn");
+        egui::pos2(
+            ((bounds.x0 + bounds.x1) / 2.0) as f32,
+            ((bounds.y0 + bounds.y1) / 2.0) as f32,
+        )
+    }
+
+    /// A pointer click at `pos`: moved there, pressed and released, a frame
+    /// each, then frames to settle.
+    fn click(app: &mut App, ctx: &egui::Context, pos: egui::Pos2) {
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        input_frame(app, ctx, vec![egui::Event::PointerMoved(pos)]);
+        input_frame(app, ctx, vec![button(true)]);
+        input_frame(app, ctx, vec![button(false)]);
+        render(app, ctx);
+    }
+
+    /// Keyboard and screen reader users start on the QR code, a button that
+    /// reads the steps. Enter or Space fills the window with it, and the
+    /// enlarged code takes focus and says how to use it.
+    #[test]
+    fn the_qr_code_takes_focus_and_enter_or_space_enlarges_it() {
+        for key in [Key::Enter, Key::Space] {
+            let (mut app, ctx) = linking("login");
+            ctx.enable_accesskit();
+            render(&mut app, &ctx);
+            let qr = focused(&tree(&mut app, &ctx));
+            assert_eq!(qr.role(), Role::Button);
+            assert_eq!(qr.label(), Some("QR code for linking"));
+            assert_eq!(
+                qr.description(),
+                Some(
+                    "1. Open WhatsApp on your phone. 2. Tap Menu or Settings, then Linked \
+                     devices. 3. Tap Link a device and point the phone at this code. Press \
+                     Enter to enlarge."
+                )
+            );
+            assert!(!app.qr_enlarged);
+            press_key(&mut app, &ctx, key, Modifiers::NONE);
+            assert!(app.qr_enlarged, "{key:?} enlarges it");
+            let enlarged = focused(&tree(&mut app, &ctx));
+            assert_eq!(enlarged.role(), Role::Button);
+            assert_eq!(enlarged.label(), Some("QR code enlarged"));
+            assert_eq!(
+                enlarged.description(),
+                Some(
+                    "Point your phone's camera at the screen, about a forearm's length \
+                     away. Press Escape to return."
+                )
+            );
+        }
+    }
+
+    /// A click on the QR code enlarges it, and a click anywhere returns it
+    /// to the card, with focus back on it.
+    #[test]
+    fn a_click_enlarges_the_qr_code_and_another_anywhere_returns_it() {
+        let (mut app, ctx) = linking("login");
+        render(&mut app, &ctx);
+        let (qr, button) =
+            named(&tree(&mut app, &ctx), "QR code for linking").expect("the QR code");
+        click(&mut app, &ctx, middle(&button));
+        assert!(app.qr_enlarged);
+        // Well away from where the small code was.
+        click(&mut app, &ctx, egui::pos2(60.0, 700.0));
+        assert!(!app.qr_enlarged);
+        assert_eq!(tree(&mut app, &ctx).focus, qr);
+        assert!(app.dialog.is_none());
+    }
+
+    /// "Your chats are ready" is for an account that links: switching from
+    /// one on its linking screen to another already linked says nothing.
+    #[test]
+    fn switching_to_a_linked_account_is_no_linking() {
+        let (mut app, ctx) = linking("login,accounts-closed");
+        render(&mut app, &ctx);
+        assert!(!app.is_linked());
+        let second = app.accounts[1].id.clone();
+        app.actions
+            .push(crate::model::Action::SwitchAccount(second));
+        render(&mut app, &ctx);
+        render(&mut app, &ctx);
+        assert!(app.is_linked() && !app.chats.is_empty());
+        assert!(
+            !app.announcer
+                .spoken()
+                .iter()
+                .any(|spoken| spoken.contains("Your chats are ready")),
+            "{:?}",
+            app.announcer.spoken()
+        );
+    }
+}

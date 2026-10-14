@@ -86,6 +86,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     // The open chat's composer records its rect again below, if there is one.
     ctx.data_mut(|data| data.remove::<egui::Rect>(composer_rect_id()));
     titlebar_strip(app, ui);
+    login::follow_linking(app, ctx);
     if !app.is_linked() {
         login::show(app, ui);
         accounts::corner(app, ctx);

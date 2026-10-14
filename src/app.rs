@@ -670,6 +670,8 @@ pub struct App {
     /// album reaches messages the transcript has not paged in, so their
     /// progress and their failure have nowhere else to live.
     pub viewer_media_state: HashMap<String, MediaState>,
+    /// Whether the linking QR code fills the window, for a phone camera.
+    pub qr_enlarged: bool,
     /// Message bodies registered for transcript copy formatting.
     pub copy_rows: std::sync::Arc<std::sync::Mutex<Vec<crate::transcript::Row>>>,
     /// Previous message-list rect used by the selection hook.
@@ -1569,6 +1571,7 @@ impl App {
             viewer_media: Vec::new(),
             viewer_media_chat: None,
             viewer_media_state: HashMap::new(),
+            qr_enlarged: false,
             copy_rows: Default::default(),
             selection_view: Default::default(),
             gif_query: String::new(),
@@ -1753,8 +1756,12 @@ impl App {
                     call.group.as_ref().is_some_and(|group| group.link),
                 )
             });
-        let place = if locked || !self.is_linked() {
+        let linking;
+        let place = if locked {
             TitlePlace::Elsewhere
+        } else if !self.is_linked() {
+            linking = self.linking_title();
+            TitlePlace::Screen(&linking)
         } else if let Some((ringing, link)) = call {
             let private = self.call_is_private();
             caller = (!private).then(|| self.call_name());
@@ -1780,8 +1787,16 @@ impl App {
                 .current_chat()
                 .filter(|chat| !chat.locked)
                 .map(|chat| self.chat_title(chat));
-            chat.as_deref()
-                .map_or(TitlePlace::Elsewhere, TitlePlace::Chat)
+            match chat.as_deref() {
+                Some(chat) => TitlePlace::Chat(chat),
+                // Linked, with the chats still on their way from the phone,
+                // as the empty chat list says.
+                None if self.syncing && self.chats.is_empty() => {
+                    linking = crate::i18n::gettext(self.locale, "Loading your chats").into_owned();
+                    TitlePlace::Screen(&linking)
+                }
+                None => TitlePlace::Elsewhere,
+            }
         };
         // A call names the account it is on, which need not be the one on
         // screen.
@@ -1802,6 +1817,32 @@ impl App {
             title.push_str(" Demo");
         }
         title
+    }
+
+    /// What the linking screen is doing, for the window title: a screen
+    /// reader says the title on NVDA+T and when the window comes forward.
+    fn linking_title(&self) -> String {
+        use crate::backend::LinkStatus;
+        let title = if matches!(self.dialog, Some(crate::model::Dialog::PairWithPhone)) {
+            "Link with a phone number"
+        } else {
+            match &self.link {
+                LinkStatus::Unlinked {
+                    pair_code: Some(_), ..
+                } => "Enter the code on your phone",
+                LinkStatus::Unlinked { qr: Some(_), .. }
+                | LinkStatus::LoggedOut
+                | LinkStatus::Failed(_) => "Link your WhatsApp account",
+                // Connected and Disconnected are linked, past this screen:
+                // `window_title` titles the chats' loading.
+                LinkStatus::Starting
+                | LinkStatus::Connecting
+                | LinkStatus::Connected
+                | LinkStatus::Disconnected { .. }
+                | LinkStatus::Unlinked { .. } => "Connecting",
+            }
+        };
+        crate::i18n::gettext(self.locale, title).into_owned()
     }
 
     /// Gives the window its title when what it shows has changed, and only
@@ -25234,7 +25275,34 @@ mod window_title_tests {
         app.page = Page::Chats;
         app.link = LinkStatus::LoggedOut;
         app.chats.clear();
-        assert_eq!(app.window_title(false), "ZapFast", "the linking screen");
+        // The linking screen says what it is doing.
+        assert_eq!(
+            app.window_title(false),
+            "Link your WhatsApp account - ZapFast",
+            "the linking screen"
+        );
+        app.dialog = Some(crate::model::Dialog::PairWithPhone);
+        assert_eq!(
+            app.window_title(false),
+            "Link with a phone number - ZapFast"
+        );
+        app.dialog = None;
+        app.link = LinkStatus::Unlinked {
+            qr: None,
+            pair_code: Some("ABCD1234".into()),
+            pairing_phone: Some("15550001111".into()),
+        };
+        assert_eq!(
+            app.window_title(false),
+            "Enter the code on your phone - ZapFast"
+        );
+        // Linked, with the chats on their way: the title says so, as the
+        // empty chat list does, until they are in.
+        app.link = LinkStatus::Connected;
+        app.syncing = true;
+        assert_eq!(app.window_title(false), "Loading your chats - ZapFast");
+        app.syncing = false;
+        assert_eq!(app.window_title(false), "ZapFast");
     }
 
     /// The lock screen names nothing: no chat, no page, no account.
@@ -25280,7 +25348,11 @@ mod window_title_tests {
         let ctx = egui::Context::default();
         let first = app.account().id.clone();
         app.apply(Action::AddAccount, &ctx);
-        assert_eq!(app.window_title(false), "Account 2 - ZapFast", "linking it");
+        assert_eq!(
+            app.window_title(false),
+            "Connecting - Account 2 - ZapFast",
+            "linking it"
+        );
         app.apply(Action::SwitchAccount(first), &ctx);
         app.link = LinkStatus::Connected;
         assert!(app.has_several_accounts());
