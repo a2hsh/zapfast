@@ -2773,6 +2773,9 @@ pub enum Action {
     ChatCursor(crate::ui::list_nav::Step),
     /// Gives the chat list keyboard focus.
     FocusChats,
+    /// Makes the open chat's first unread message current and gives its
+    /// message list keyboard focus, or says why there is none (Alt+3).
+    FocusFirstUnread,
     /// Opens a chat's context menu in the chat list, from the keyboard.
     OpenChatMenu(ChatId),
     /// The menu asked for by `OpenChatMenu` is open: stop asking, so it

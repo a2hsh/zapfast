@@ -7444,6 +7444,276 @@ mod tests {
         }
     }
 
+    fn stop_id(ctx: &egui::Context, stop: crate::ui::focus::Stop) -> egui::Id {
+        crate::ui::focus::control(ctx, stop).unwrap_or_else(|| panic!("{stop:?} is drawn"))
+    }
+
+    fn keyboard_shown(ctx: &egui::Context) -> bool {
+        ctx.data(|data| {
+            data.get_temp::<bool>(crate::theme::keyboard_focus_id())
+                .unwrap_or(false)
+        })
+    }
+
+    /// F6 walks the chat list, the conversation and the composer, landing
+    /// on each section's list or field when nothing there was focused yet;
+    /// Shift+F6 walks back.
+    #[test]
+    fn f6_cycles_the_sections_with_a_chat_open() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let chat = app.open_chat.clone().unwrap();
+        let composer = egui::Id::new("composer-text");
+        let chats = crate::ui::chats::chats_list_id();
+        let messages = crate::ui::conversation::messages_list_id(&chat);
+        assert_eq!(focused(&ctx), Some(composer));
+        assert!(!keyboard_shown(&ctx));
+        for expected in [chats, messages, composer, chats] {
+            press_key(&mut app, &ctx, egui::Key::F6, egui::Modifiers::NONE);
+            assert_eq!(focused(&ctx), Some(expected));
+            assert!(keyboard_shown(&ctx), "F6 is keyboard navigation");
+        }
+        for expected in [composer, messages, chats, composer] {
+            press_key(&mut app, &ctx, egui::Key::F6, egui::Modifiers::SHIFT);
+            assert_eq!(focused(&ctx), Some(expected));
+        }
+        assert!(app.announcer.spoken().iter().all(|said| said.is_empty()));
+    }
+
+    /// The chat list and the conversation take focus back where they were
+    /// left: the search field, a toolbar's button.
+    #[test]
+    fn f6_returns_to_the_last_focused_stop_of_a_section() {
+        use crate::ui::focus::Stop;
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let chat = app.open_chat.clone().unwrap();
+        let messages = crate::ui::conversation::messages_list_id(&chat);
+        let search = stop_id(&ctx, Stop::Search);
+        ctx.memory_mut(|memory| memory.request_focus(search));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::F6, egui::Modifiers::NONE);
+        assert_eq!(focused(&ctx), Some(messages));
+        press_key(&mut app, &ctx, egui::Key::F6, egui::Modifiers::SHIFT);
+        assert_eq!(focused(&ctx), Some(search), "back to the search field");
+        // A toolbar in the conversation: its button, not the message list.
+        let actions = stop_id(&ctx, Stop::ChatActions);
+        ctx.memory_mut(|memory| memory.request_focus(actions));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::F6, egui::Modifiers::NONE);
+        assert_eq!(focused(&ctx), Some(egui::Id::new("composer-text")));
+        press_key(&mut app, &ctx, egui::Key::F6, egui::Modifiers::SHIFT);
+        assert_eq!(focused(&ctx), Some(actions), "back to the chat actions");
+        press_key(&mut app, &ctx, egui::Key::F6, egui::Modifiers::SHIFT);
+        assert_eq!(focused(&ctx), Some(search));
+    }
+
+    /// The composer is always entered on the message field, where typing
+    /// goes, even when it was left on Message actions.
+    #[test]
+    fn f6_into_the_composer_lands_on_the_message_field() {
+        use crate::ui::focus::Stop;
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let chat = app.open_chat.clone().unwrap();
+        let messages = crate::ui::conversation::messages_list_id(&chat);
+        let composer = egui::Id::new("composer-text");
+        let actions = stop_id(&ctx, Stop::MessageActions);
+        ctx.memory_mut(|memory| memory.request_focus(actions));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::F6, egui::Modifiers::SHIFT);
+        assert_eq!(focused(&ctx), Some(messages));
+        press_key(&mut app, &ctx, egui::Key::F6, egui::Modifiers::NONE);
+        assert_eq!(focused(&ctx), Some(composer), "F6 from the messages");
+        // Around the window from the chat list, too.
+        ctx.memory_mut(|memory| memory.request_focus(actions));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::F6, egui::Modifiers::NONE);
+        assert_eq!(focused(&ctx), Some(crate::ui::chats::chats_list_id()));
+        press_key(&mut app, &ctx, egui::Key::F6, egui::Modifiers::SHIFT);
+        assert_eq!(focused(&ctx), Some(composer), "Shift+F6 from the chat list");
+    }
+
+    /// With no chat open, only the chat list's section exists.
+    #[test]
+    fn f6_without_an_open_chat_stays_in_the_chat_list_section() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        app.open_chat = None;
+        render(&mut app, &ctx);
+        let chats = crate::ui::chats::chats_list_id();
+        for modifiers in [
+            egui::Modifiers::NONE,
+            egui::Modifiers::NONE,
+            egui::Modifiers::SHIFT,
+        ] {
+            press_key(&mut app, &ctx, egui::Key::F6, modifiers);
+            assert_eq!(focused(&ctx), Some(chats), "{modifiers:?}");
+        }
+    }
+
+    /// A read-only chat has no composer section.
+    #[test]
+    fn f6_skips_the_composer_of_a_read_only_chat() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let channel = channel(&app);
+        app.actions
+            .push(crate::model::Action::OpenChat(channel.clone()));
+        render(&mut app, &ctx);
+        let chats = crate::ui::chats::chats_list_id();
+        let messages = crate::ui::conversation::messages_list_id(&channel);
+        for expected in [chats, messages, chats] {
+            press_key(&mut app, &ctx, egui::Key::F6, egui::Modifiers::NONE);
+            assert_eq!(focused(&ctx), Some(expected));
+        }
+    }
+
+    /// Dialogs keep F6 to themselves: focus does not leave them.
+    #[test]
+    fn f6_does_nothing_under_a_dialog() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        app.dialog = Some(crate::model::Dialog::Shortcuts);
+        render(&mut app, &ctx);
+        let before = focused(&ctx);
+        press_key(&mut app, &ctx, egui::Key::F6, egui::Modifiers::NONE);
+        assert_eq!(focused(&ctx), before);
+        assert_ne!(focused(&ctx), Some(crate::ui::chats::chats_list_id()));
+    }
+
+    /// Alt+3, or Control+3 on macOS, goes to the open chat's first unread
+    /// message, the one under the unread divider: the message list takes
+    /// focus with that message current.
+    #[test]
+    fn alt_3_goes_to_the_first_unread_message() {
+        let mut app = app();
+        apply_flags(&mut app, Some("unread-divider"));
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let chat = app.open_chat.clone().unwrap();
+        // The page's divider stands above the third incoming message from
+        // the end.
+        let first = app.conversations[&chat]
+            .messages
+            .iter()
+            .rev()
+            .filter(|message| !message.from_me)
+            .nth(2)
+            .unwrap()
+            .id
+            .clone();
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        assert_eq!(focused(&ctx), Some(crate::ui::chats::chats_list_id()));
+        press_key(&mut app, &ctx, egui::Key::Num3, chats_shortcut());
+        assert_eq!(
+            focused(&ctx),
+            Some(crate::ui::conversation::messages_list_id(&chat))
+        );
+        assert_eq!(app.message_cursor.get(&chat), Some(&first));
+        assert!(keyboard_shown(&ctx));
+        assert!(!app.announcer.spoken().contains(&"No unread messages"));
+    }
+
+    /// On the Calls tab the open chat stays beside the call history: Alt+3
+    /// lands in its message list there, as Alt+2 does, and the history
+    /// stays.
+    #[test]
+    fn alt_3_beside_the_call_history_keeps_the_calls_page() {
+        let mut app = app();
+        apply_flags(&mut app, Some("unread-divider,calls-chat"));
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        assert_eq!(app.page, crate::model::Page::Calls);
+        let chat = app.open_chat.clone().unwrap();
+        press_key(&mut app, &ctx, egui::Key::Num3, chats_shortcut());
+        assert_eq!(app.page, crate::model::Page::Calls);
+        assert_eq!(
+            focused(&ctx),
+            Some(crate::ui::conversation::messages_list_id(&chat))
+        );
+    }
+    /// With nothing unread in the open chat, Alt+3 says so and focus stays.
+    #[test]
+    fn alt_3_without_unread_messages_says_so_and_keeps_focus() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        assert!(app.unread_divider.is_none());
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        press_key(&mut app, &ctx, egui::Key::Num3, chats_shortcut());
+        assert!(
+            app.announcer.spoken().contains(&"No unread messages"),
+            "{:?}",
+            app.announcer.spoken()
+        );
+        assert_eq!(focused(&ctx), Some(crate::ui::chats::chats_list_id()));
+    }
+
+    #[test]
+    fn alt_3_without_an_open_chat_says_so_and_keeps_focus() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        app.open_chat = None;
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        press_key(&mut app, &ctx, egui::Key::Num3, chats_shortcut());
+        assert!(
+            app.announcer.spoken().contains(&"No chat open"),
+            "{:?}",
+            app.announcer.spoken()
+        );
+        assert_eq!(focused(&ctx), Some(crate::ui::chats::chats_list_id()));
+    }
+
+    /// A read-only chat has unread messages too: Alt+3 reaches them there.
+    #[test]
+    fn alt_3_in_a_read_only_chat_goes_to_its_first_unread_message() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let channel = channel(&app);
+        app.actions
+            .push(crate::model::Action::OpenChat(channel.clone()));
+        render(&mut app, &ctx);
+        let newest = app.conversations[&channel]
+            .messages
+            .iter()
+            .rev()
+            .find(|message| !message.from_me)
+            .unwrap()
+            .id
+            .clone();
+        app.unread_divider = Some(crate::app::UnreadDivider {
+            chat: channel.clone(),
+            count: 1,
+            placed: true,
+        });
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        press_key(&mut app, &ctx, egui::Key::Num3, chats_shortcut());
+        assert_eq!(
+            focused(&ctx),
+            Some(crate::ui::conversation::messages_list_id(&channel))
+        );
+        assert_eq!(app.message_cursor.get(&channel), Some(&newest));
+    }
+
     #[test]
     fn arrows_move_the_chat_cursor_without_opening() {
         let mut app = app();

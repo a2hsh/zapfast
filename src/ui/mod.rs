@@ -23,6 +23,7 @@ pub mod pane;
 pub mod picker;
 pub mod polls;
 pub mod rail;
+pub(crate) mod sections;
 pub mod settings;
 pub(crate) mod toolbar;
 pub mod update;
@@ -77,6 +78,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         // A name typed in the info panel keeps Tab between its fields.
         && !(app.info_visible() && (app.contact_edit.is_some() || app.group_name_edit.is_some()))
         && !egui::Popup::is_any_open(ctx);
+    // F6 moves between the sections drawn in the last pass, so it runs
+    // before `focus::begin` forgets them.
+    sections::handle(app, ctx, main_navigation);
     focus::begin(ctx, main_navigation);
     // The open chat's composer records its rect again below, if there is one.
     ctx.data_mut(|data| data.remove::<egui::Rect>(composer_rect_id()));
@@ -404,7 +408,8 @@ pub fn focus_ring_id() -> egui::Id {
     egui::Id::new("focus-ring")
 }
 
-/// Tab shows where focus is; a pointer press hides it again. Widgets scroll
+/// Tab, and F6 between sections, show where focus is; a pointer press hides
+/// it again. Widgets scroll
 /// themselves into view through `theme::reveal_focus`. In a list that rings
 /// its current item (`list_nav::outline_only`), the keys that move the item
 /// count as keyboard navigation too: the reader may have reached the list by
@@ -424,6 +429,7 @@ fn track_keyboard_focus(ctx: &egui::Context) {
                     pressed: true,
                     ..
                 } if *key == egui::Key::Tab
+                    || *key == egui::Key::F6
                     || (in_list
                         && matches!(
                             key,

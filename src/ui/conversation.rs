@@ -2816,18 +2816,14 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat, under: f32) {
     };
     let mut actions = Vec::new();
     let mut anchored = false;
-    // The first unread message is the count-th incoming one from the end.
+    // The first unread message, where Alt+3 goes too.
     let divider = app
         .unread_divider
         .as_ref()
         .filter(|divider| divider.chat == chat.id)
         .and_then(|divider| {
-            conversation
-                .messages
-                .iter()
-                .rev()
-                .filter(|message| !message.from_me)
-                .nth(divider.count.saturating_sub(1) as usize)
+            divider
+                .first_unread(&conversation.messages)
                 .map(|message| (message.id.clone(), divider.count, divider.placed))
         });
     let mut divider_placed = false;

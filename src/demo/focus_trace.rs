@@ -2490,3 +2490,212 @@ fn a_screen_readers_activation_of_the_switcher_puts_the_reader_in_it() {
         trace.dump(from)
     );
 }
+
+/// Alt+3 when the first unread message is older than the loaded page: the
+/// reader hears that it is loading, focus stays until the archive's older
+/// page arrives, then moves once to that message.
+#[test]
+fn alt_3_loads_older_messages_up_to_the_first_unread() {
+    let mut app = app();
+    long_chat(&mut app, 400);
+    let chat = app.open_chat.clone().expect("the demo opens a chat");
+    let conversation = app.conversations.get_mut(&chat).expect("its messages");
+    for message in &mut conversation.messages {
+        message.from_me = false;
+    }
+    // Only the newest page is loaded; the first unread, long-250, is in the
+    // archive.
+    let older: Vec<_> = conversation
+        .messages
+        .drain(..400 - crate::app::PAGE)
+        .collect();
+    conversation.complete = false;
+    app.unread_divider = Some(crate::app::UnreadDivider {
+        chat: chat.clone(),
+        count: 150,
+        placed: true,
+    });
+    let mut trace = Trace::new(app);
+    let (backend, mut commands, events) = crate::backend::Backend::recording_with_events();
+    trace.app.backend = backend;
+    focus_stop(&mut trace, Stop::Composer);
+    let draft = trace.app.composer.clone();
+    let from = trace.mark();
+    trace.press("Alt+3", egui::Key::Num3, alt());
+    trace.assert_unchanged(from, "Alt+3 while the unread messages load");
+    assert!(
+        trace
+            .app
+            .announcer
+            .spoken()
+            .contains(&"Loading unread messages"),
+        "{:?}",
+        trace.app.announcer.spoken()
+    );
+    assert!(
+        std::iter::from_fn(|| commands.try_recv().ok())
+            .any(|command| matches!(command, crate::backend::Command::LoadChat { .. })),
+        "the archive is asked for older messages"
+    );
+    trace.action += 1;
+    let from = trace.mark();
+    events
+        .send(crate::backend::Event::Messages {
+            chat: chat.clone(),
+            messages: older,
+            older: true,
+            complete: true,
+        })
+        .expect("the app listens");
+    trace.settle("older page", 6);
+    trace.assert_clean(from, "landing on the first unread message once loaded");
+    assert_eq!(
+        trace.last().egui,
+        Some(crate::ui::conversation::messages_list_id(&chat))
+    );
+    assert_eq!(
+        trace.app.message_cursor.get(&chat).map(String::as_str),
+        Some("long-250")
+    );
+    assert!(
+        trace.last().spoken.contains("Unread"),
+        "the reader is on the unread message\n{}",
+        trace.dump(from)
+    );
+    assert_eq!(trace.app.composer, draft, "nothing typed");
+}
+
+/// Typing after Alt+3 while the unread messages load ends the jump: the
+/// older page arriving later leaves the reader in the message field, where
+/// the letters went.
+#[test]
+fn typing_after_alt_3_keeps_focus_when_the_messages_load() {
+    let mut app = app();
+    long_chat(&mut app, 400);
+    let chat = app.open_chat.clone().expect("the demo opens a chat");
+    let conversation = app.conversations.get_mut(&chat).expect("its messages");
+    for message in &mut conversation.messages {
+        message.from_me = false;
+    }
+    let older: Vec<_> = conversation
+        .messages
+        .drain(..400 - crate::app::PAGE)
+        .collect();
+    conversation.complete = false;
+    app.unread_divider = Some(crate::app::UnreadDivider {
+        chat: chat.clone(),
+        count: 150,
+        placed: true,
+    });
+    let mut trace = Trace::new(app);
+    let (backend, _commands, events) = crate::backend::Backend::recording_with_events();
+    trace.app.backend = backend;
+    focus_stop(&mut trace, Stop::Composer);
+    let draft = trace.app.composer.clone();
+    trace.press("Alt+3", egui::Key::Num3, alt());
+    trace.action += 1;
+    trace.frame("type", vec![egui::Event::Text("h".to_owned())]);
+    trace.settle("typed", 2);
+    let from = trace.mark();
+    events
+        .send(crate::backend::Event::Messages {
+            chat: chat.clone(),
+            messages: older,
+            older: true,
+            complete: true,
+        })
+        .expect("the app listens");
+    trace.settle("older page", 6);
+    trace.assert_unchanged(from, "the older page after typing");
+    assert_eq!(trace.last().egui, Some(egui::Id::new("composer-text")));
+    assert_eq!(trace.app.composer, format!("{draft}h"), "the letter typed");
+}
+
+/// Alt+3 with nothing unread says so: focus stays in the message field
+/// without a sound, and nothing is typed.
+#[test]
+fn alt_3_with_nothing_unread_only_announces() {
+    let mut trace = Trace::new(app());
+    assert!(trace.app.unread_divider.is_none());
+    focus_stop(&mut trace, Stop::Composer);
+    let draft = trace.app.composer.clone();
+    let from = trace.mark();
+    trace.press("Alt+3", egui::Key::Num3, alt());
+    trace.assert_unchanged(from, "Alt+3 in the message field");
+    assert_eq!(trace.app.composer, draft, "nothing typed");
+    assert!(
+        trace.app.announcer.spoken().contains(&"No unread messages"),
+        "{:?}",
+        trace.app.announcer.spoken()
+    );
+}
+
+/// Alt+3 with no chat open says so, and focus stays put without a sound.
+#[test]
+fn alt_3_without_a_chat_only_announces() {
+    for &stop in NO_CHAT_STOPS {
+        let mut trace = no_chat_open(stop);
+        let from = trace.mark();
+        trace.press("Alt+3", egui::Key::Num3, alt());
+        trace.assert_unchanged(from, &format!("Alt+3 without a chat on {stop:?}"));
+        assert!(
+            trace.app.announcer.spoken().contains(&"No chat open"),
+            "{:?}",
+            trace.app.announcer.spoken()
+        );
+    }
+}
+
+/// Alt+3 from the message field goes to the first unread message, far above
+/// the view: the message list takes focus with the reader on that message,
+/// read as unread and heard once, and nothing is typed.
+#[test]
+fn alt_3_goes_to_the_first_unread_message() {
+    let mut app = app();
+    long_chat(&mut app, 400);
+    let chat = app.open_chat.clone().expect("the demo opens a chat");
+    for message in &mut app
+        .conversations
+        .get_mut(&chat)
+        .expect("its messages")
+        .messages
+    {
+        message.from_me = false;
+    }
+    // The reader has already been taken past the divider, to the newest.
+    app.unread_divider = Some(crate::app::UnreadDivider {
+        chat: chat.clone(),
+        count: 150,
+        placed: true,
+    });
+    let mut trace = Trace::new(app);
+    focus_stop(&mut trace, Stop::Composer);
+    let draft = trace.app.composer.clone();
+    let from = trace.mark();
+    trace.press("Alt+3", egui::Key::Num3, alt());
+    trace.assert_clean(from, "Alt+3 to the first unread message");
+    assert_eq!(
+        trace.last().egui,
+        Some(crate::ui::conversation::messages_list_id(&chat))
+    );
+    assert_eq!(
+        trace.app.message_cursor.get(&chat).map(String::as_str),
+        Some("long-250")
+    );
+    assert!(
+        trace.last().spoken.contains("Unread"),
+        "the reader is on the unread message\n{}",
+        trace.dump(from)
+    );
+    assert_eq!(trace.app.composer, draft, "nothing typed");
+    // From inside the list, back from the newest message.
+    trace.press("End", egui::Key::End, egui::Modifiers::NONE);
+    let from = trace.mark();
+    trace.press("Alt+3", egui::Key::Num3, alt());
+    trace.assert_clean(from, "Alt+3 in the message list");
+    assert_eq!(
+        trace.app.message_cursor.get(&chat).map(String::as_str),
+        Some("long-250")
+    );
+    assert!(trace.last().spoken.contains("Unread"));
+}

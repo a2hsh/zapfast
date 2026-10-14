@@ -885,6 +885,25 @@ account switcher with focus on the first account; Up and Down move through the a
 returns to your picture. Choosing an account moves focus to its message
 field, and Add account to the new account's linking screen.
 
+The chat view has three sections: the chat list (the rail, the list's
+toolbars, search and the list), the conversation (Chat actions, the chat's
+search pane, the chat info panel and the message list) and the composer (the
+message input and Message actions). F6 moves to the next section and
+Shift+F6 to the previous one, skipping sections that are not shown: with no
+chat open only the chat list is left, and a read-only chat has no composer.
+The chat list and the conversation are entered where you left them, or on
+their list the first time; the composer is always entered on the message
+input. Alt+3 (Control+3 on macOS) moves to the open chat's first unread
+message, the one read as "Unread", in the message list. When that message is
+older than what is loaded, the screen reader says "Loading unread messages"
+and focus moves there once older history has loaded; if the phone is
+offline, or history does not arrive within 15 seconds, it says so and focus
+stays, and any key you press meanwhile cancels the wait. With nothing unread
+or no chat open, focus stays where it is and the screen reader says so. On
+macOS, Control+1 to Control+3 can also be Mission Control's "Switch to
+Desktop" shortcuts, which are off by default; while they are on, macOS takes
+these keys first.
+
 In the chat view, Tab cycles through the message input, the Message actions
 toolbar, then from the top left of the window the Navigation toolbar (the
 rail), the Chat list actions toolbar, search, the Filters toolbar, the chat

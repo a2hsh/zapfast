@@ -206,7 +206,8 @@ fn next(controls: &[(Stop, Id)], movement: Move) -> Option<Id> {
     Some(controls[index.rem_euclid(controls.len() as i32) as usize].1)
 }
 
-#[cfg(test)]
+/// The stops registered so far: in `begin`, before this pass draws any,
+/// those the last pass drew, in Tab order. `sections.rs` reads them there.
 pub fn stops(ctx: &Context) -> Vec<(Stop, Id)> {
     ctx.data(|data| {
         data.get_temp::<Order>(order_id())
