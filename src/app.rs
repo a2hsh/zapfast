@@ -912,6 +912,12 @@ pub struct App {
     /// texture each is drawn through.
     pub call_member_frames: HashMap<String, std::sync::Arc<egui::ColorImage>>,
     pub call_member_textures: HashMap<String, CallTexture>,
+    /// The title last given to this window, so it is set again only when it
+    /// changes; `None` for a window that has not been given one yet.
+    sent_title: Option<String>,
+    /// Whether this is a demo run, whose title ends in "Demo" as the window
+    /// it starts with does, so it is told apart from a real ZapFast.
+    pub demo_title: bool,
     /// Whether ZapFast starts at login, when this installation supports it.
     pub start_with_system: Option<bool>,
     /// Cross-thread window repaint handle.
@@ -1667,6 +1673,8 @@ impl App {
             call_remote_texture: None,
             call_member_frames: HashMap::new(),
             call_member_textures: HashMap::new(),
+            sent_title: None,
+            demo_title: false,
             start_with_system: None,
             waker,
             tray: None,
@@ -1720,6 +1728,53 @@ impl App {
     /// window names which one it shows.
     pub fn has_several_accounts(&self) -> bool {
         self.accounts.len() >= 2
+    }
+
+    /// The window's title for what it shows now (`a11y::window_title`). The
+    /// lock screen names nothing, and a locked chat is left out as if none
+    /// were open, so the title never gives away what the lock hides.
+    pub fn window_title(&self) -> String {
+        use crate::a11y::TitlePlace;
+        let locked = self.app_lock.is_locked();
+        let chat;
+        let place = if locked || !self.is_linked() {
+            TitlePlace::Elsewhere
+        } else if matches!(self.page, Page::Settings | Page::Wallpaper) {
+            TitlePlace::Settings
+        } else if self.page == Page::Calls {
+            // The chat left open is not on screen.
+            TitlePlace::Calls
+        } else {
+            chat = self
+                .current_chat()
+                .filter(|chat| !chat.locked)
+                .map(|chat| self.chat_title(chat));
+            chat.as_deref()
+                .map_or(TitlePlace::Elsewhere, TitlePlace::Chat)
+        };
+        let account = (!locked && self.has_several_accounts())
+            .then(|| self.account().display_label(self.locale));
+        let mut title = crate::a11y::window_title(self.locale, place, account.as_deref());
+        if self.demo_title {
+            title.push_str(" Demo");
+        }
+        title
+    }
+
+    /// Gives the window its title when what it shows has changed, and only
+    /// then: each change reaches the taskbar and screen readers as a new
+    /// window name. It runs in the logic pass too, which goes on while the
+    /// window is minimized or covered, so a lock that engages then still
+    /// takes the chat's name off the taskbar.
+    pub fn sync_window_title(&mut self, ctx: &egui::Context) {
+        if self.window_hidden {
+            return;
+        }
+        let title = self.window_title();
+        if self.sent_title.as_ref() != Some(&title) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.sent_title = Some(title);
+        }
     }
 
     /// Unread chats across every account, for the taskbar and the tray.
@@ -2879,6 +2934,9 @@ impl App {
         self.hide_intent = false;
         self.wants_show = false;
         self.reopen = false;
+        // A new window starts with the title the native options gave it,
+        // which the first frame replaces with the one for what it shows.
+        self.sent_title = None;
         // A new window starts with nothing focused: a message list that had
         // focus in the last one does not hold it back from the composer.
         self.messages_focused = false;
@@ -9936,6 +9994,7 @@ impl App {
         self.hold_media();
         self.follow_receipts();
         self.sync_badge();
+        self.sync_window_title(ctx);
         self.request_attention(ctx);
     }
 
@@ -10983,6 +11042,8 @@ impl App {
         crate::ui::show(self, ui);
         self.apply_actions(ctx);
         crate::ui::overlay::settle(self, ctx);
+        // What this pass opened or closed is named before the next one.
+        self.sync_window_title(ctx);
         // The old colours, if a change is being revealed, go over everything.
         self.theme_transition.paint(ctx);
         // Release the image caches of everything that scrolled away.
@@ -25032,5 +25093,304 @@ mod app_lock_tests {
         assert!(!actions.contains(&Action::FocusComposer));
         let mut app = app_with(settings(None));
         assert!(!press(&mut app).contains(&Action::LockApp));
+    }
+}
+
+#[cfg(test)]
+mod window_title_tests {
+    use super::*;
+    use crate::model::Contact;
+
+    const ADA: &str = "1@s.whatsapp.net";
+    const SARA: &str = "2@s.whatsapp.net";
+    const SECRET: &str = "3@s.whatsapp.net";
+
+    thread_local! {
+        /// The folders of this test's apps, removed when the test's thread
+        /// ends (each test runs on a thread of its own).
+        static ROOTS: std::cell::RefCell<Vec<tempfile::TempDir>> = const {
+            std::cell::RefCell::new(Vec::new())
+        };
+    }
+
+    /// A linked account with the app lock set but open: Ada is a saved
+    /// contact, Sara known only by her profile name, and one chat is locked.
+    fn app() -> App {
+        let root = tempfile::Builder::new()
+            .prefix("zapfast-window-title-")
+            .tempdir()
+            .unwrap();
+        let settings = Settings {
+            app_lock_hash: Some(crate::app_lock::verifier("fixture password")),
+            ..Settings::default()
+        };
+        let mut app = App::headless(AppDirs::under(root.path()), settings).0;
+        ROOTS.with(|roots| roots.borrow_mut().push(root));
+        app.app_lock.release();
+        app.link = LinkStatus::Connected;
+        app.me = Some("15550001111@s.whatsapp.net".into());
+        app.me_name = Some("Carmine".into());
+        app.contacts.insert(
+            ADA.into(),
+            Contact {
+                id: ADA.into(),
+                full_name: Some("Ada Lovelace".into()),
+                first_name: None,
+                push_name: None,
+            },
+        );
+        app.contacts.insert(
+            SARA.into(),
+            Contact {
+                id: SARA.into(),
+                full_name: None,
+                first_name: None,
+                push_name: Some("Sara".into()),
+            },
+        );
+        let mut secret = Chat::new(SECRET.into(), "Secret Club".into());
+        secret.locked = true;
+        app.chats = vec![
+            Chat::new(ADA.into(), String::new()),
+            Chat::new(SARA.into(), String::new()),
+            secret,
+        ];
+        app
+    }
+
+    /// Opens the locked-chats folder as a right code does.
+    fn open_locked_folder(app: &mut App) {
+        app.settings.chat_lock_code_hash = Some("fixture code".into());
+        app.chat_lock_session = Some("fixture code".into());
+        app.locked_folder = true;
+    }
+
+    #[test]
+    fn the_title_names_where_the_reader_is() {
+        let mut app = app();
+        assert_eq!(app.window_title(), "ZapFast", "no chat open");
+        app.open_chat = Some(ADA.into());
+        assert_eq!(app.window_title(), "Ada Lovelace - ZapFast");
+        // The header says "~Sara"; the title, like speech, drops the "~".
+        app.open_chat = Some(SARA.into());
+        assert_eq!(app.chat_title(app.current_chat().unwrap()), "~Sara");
+        assert_eq!(app.window_title(), "Sara - ZapFast");
+        app.page = Page::Settings;
+        assert_eq!(app.window_title(), "Settings - ZapFast");
+        app.page = Page::Wallpaper;
+        assert_eq!(app.window_title(), "Settings - ZapFast", "a Settings page");
+        // The Calls page shows the call history, not the chat left open.
+        app.page = Page::Calls;
+        assert_eq!(app.window_title(), "Calls - ZapFast");
+        app.page = Page::Chats;
+        app.link = LinkStatus::LoggedOut;
+        app.chats.clear();
+        assert_eq!(app.window_title(), "ZapFast", "the linking screen");
+    }
+
+    /// The lock screen names nothing: no chat, no page, no account.
+    #[test]
+    fn the_lock_screen_title_is_only_zapfast() {
+        let mut app = app();
+        app.open_chat = Some(ADA.into());
+        app.lock_app();
+        assert!(app.app_lock.is_locked());
+        assert_eq!(app.window_title(), "ZapFast");
+        // Unlocking names the chat again.
+        app.app_lock.release();
+        assert_eq!(app.window_title(), "Ada Lovelace - ZapFast");
+        app.lock_app();
+        app.page = Page::Settings;
+        assert_eq!(app.window_title(), "ZapFast");
+        app.app_lock.release();
+        app.apply(Action::AddAccount, &egui::Context::default());
+        assert!(app.has_several_accounts());
+        app.lock_app();
+        assert!(app.app_lock.is_locked());
+        assert_eq!(app.window_title(), "ZapFast");
+    }
+
+    /// A locked chat's name never reaches the title, even with the locked
+    /// folder open: the window reads as if no chat were open.
+    #[test]
+    fn a_locked_chat_is_not_named() {
+        let mut app = app();
+        open_locked_folder(&mut app);
+        app.open_chat = Some(SECRET.into());
+        assert!(app.current_chat().is_some(), "the chat is on screen");
+        assert_eq!(app.window_title(), "ZapFast");
+        app.open_chat = Some(ADA.into());
+        assert_eq!(app.window_title(), "Ada Lovelace - ZapFast");
+    }
+
+    /// With a second account here, the title names the account on screen
+    /// the way the switcher does; with one, it leaves it out.
+    #[test]
+    fn several_accounts_name_the_one_on_screen() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        let first = app.account().id.clone();
+        app.apply(Action::AddAccount, &ctx);
+        assert_eq!(app.window_title(), "Account 2 - ZapFast", "linking it");
+        app.apply(Action::SwitchAccount(first), &ctx);
+        app.link = LinkStatus::Connected;
+        assert!(app.has_several_accounts());
+        assert_eq!(app.window_title(), "Carmine - ZapFast");
+        app.open_chat = Some(ADA.into());
+        assert_eq!(app.window_title(), "Ada Lovelace - Carmine - ZapFast");
+        app.page = Page::Settings;
+        assert_eq!(app.window_title(), "Settings - Carmine - ZapFast");
+        app.page = Page::Chats;
+        open_locked_folder(&mut app);
+        app.open_chat = Some(SECRET.into());
+        assert_eq!(app.window_title(), "Carmine - ZapFast");
+    }
+
+    #[test]
+    fn a_demo_title_says_so() {
+        let mut app = app();
+        app.demo_title = true;
+        assert_eq!(app.window_title(), "ZapFast Demo");
+        app.open_chat = Some(ADA.into());
+        assert_eq!(app.window_title(), "Ada Lovelace - ZapFast Demo");
+        app.lock_app();
+        assert_eq!(app.window_title(), "ZapFast Demo");
+    }
+
+    /// The titles one frame gave the window.
+    fn titles(commands: &[egui::ViewportCommand]) -> Vec<String> {
+        commands
+            .iter()
+            .filter_map(|command| match command {
+                egui::ViewportCommand::Title(title) => Some(title.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// One shown frame, as the shell runs it: logic, then the ui.
+    fn frame(app: &mut App, ctx: &egui::Context) -> Vec<String> {
+        frame_with(app, ctx, Vec::new())
+    }
+
+    /// One shown frame carrying `events`, such as keys the ui pass handles.
+    fn frame_with(app: &mut App, ctx: &egui::Context, events: Vec<egui::Event>) -> Vec<String> {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 780.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                app.background_frame(ui.ctx());
+                app.frame_ui(ui);
+            },
+        );
+        output.textures_delta.clear();
+        titles(&output.viewport_output[&egui::ViewportId::ROOT].commands)
+    }
+
+    /// The title is set when it changes and not on the frames between, and
+    /// a new window gets it again.
+    #[test]
+    fn the_title_is_sent_only_when_it_changes() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        assert_eq!(frame(&mut app, &ctx), ["ZapFast"]);
+        assert!(frame(&mut app, &ctx).is_empty());
+        assert!(frame(&mut app, &ctx).is_empty());
+        app.actions.push(Action::OpenChat(ADA.into()));
+        assert_eq!(frame(&mut app, &ctx), ["Ada Lovelace - ZapFast"]);
+        assert!(frame(&mut app, &ctx).is_empty());
+        app.actions.push(Action::Open(Page::Settings));
+        assert_eq!(frame(&mut app, &ctx), ["Settings - ZapFast"]);
+        assert!(frame(&mut app, &ctx).is_empty());
+        // A window made again (tray, Wayland reopen) starts from its native
+        // title, so it is given the current one once.
+        app.window_gone();
+        app.attach(&ctx);
+        assert_eq!(frame(&mut app, &ctx), ["Settings - ZapFast"]);
+        assert!(frame(&mut app, &ctx).is_empty());
+    }
+
+    fn key(key: egui::Key, modifiers: egui::Modifiers) -> Vec<egui::Event> {
+        vec![egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }]
+    }
+
+    /// A window context that runs one pass per frame. egui runs a frame's
+    /// closure again when a pass asks for it, and the next pass's logic
+    /// would then send the title too; with one pass, only the ui pass's
+    /// own sync can.
+    fn single_pass(app: &mut App) -> egui::Context {
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        ctx.options_mut(|options| options.max_passes = std::num::NonZeroUsize::MIN);
+        ctx
+    }
+
+    /// A key the ui pass handles changes the title in that same pass:
+    /// Ctrl+Shift+L takes the chat's name off at once, before any later
+    /// frame.
+    #[test]
+    fn locking_from_the_keyboard_clears_the_title_in_that_frame() {
+        let mut app = app();
+        let ctx = single_pass(&mut app);
+        app.open_chat = Some(ADA.into());
+        assert_eq!(frame(&mut app, &ctx), ["Ada Lovelace - ZapFast"]);
+        let lock = key(
+            egui::Key::L,
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+        );
+        assert_eq!(frame_with(&mut app, &ctx, lock), ["ZapFast"]);
+        assert!(app.app_lock.is_locked());
+    }
+
+    /// Escape closing the chat takes its name off in that same frame.
+    #[test]
+    fn escape_closing_the_chat_clears_the_title_in_that_frame() {
+        let mut app = app();
+        let ctx = single_pass(&mut app);
+        app.open_chat = Some(ADA.into());
+        assert_eq!(frame(&mut app, &ctx), ["Ada Lovelace - ZapFast"]);
+        let escape = key(egui::Key::Escape, egui::Modifiers::NONE);
+        assert_eq!(frame_with(&mut app, &ctx, escape), ["ZapFast"]);
+        assert!(app.open_chat.is_none());
+    }
+
+    /// Minimized or covered, the window runs only its logic; a lock that
+    /// engages then still takes the chat's name off the taskbar.
+    #[test]
+    fn a_lock_while_minimized_clears_the_title() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        app.open_chat = Some(ADA.into());
+        assert_eq!(frame(&mut app, &ctx), ["Ada Lovelace - ZapFast"]);
+        app.settings.app_lock_after = crate::settings::AutoLock::OneMinute;
+        let now = std::sync::Arc::new(std::sync::Mutex::new(Instant::now()));
+        let read = std::sync::Arc::clone(&now);
+        app.app_lock
+            .set_clock(std::sync::Arc::new(move || *read.lock().unwrap()));
+        *now.lock().unwrap() += Duration::from_secs(61);
+        let output = ctx.run_logic(&egui::RawInput::default(), |ctx| {
+            app.background_frame(ctx);
+        });
+        assert!(app.app_lock.is_locked());
+        let commands = output
+            .viewport_commands
+            .get(&egui::ViewportId::ROOT)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(titles(&commands), ["ZapFast"]);
     }
 }

@@ -348,6 +348,8 @@ fn run() -> eframe::Result<()> {
         app::App::new(&waker, dirs, settings, app::AppOptions { tray: true })
             .map_err(|error| eframe::Error::AppCreation(error.into()))?
     };
+    // Every title the demo window takes says it is the demo, as its first.
+    app.demo_title = demo;
     if cli.verbose {
         app.update_arguments.push("--verbose".into());
     }

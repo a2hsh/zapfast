@@ -113,6 +113,68 @@ pub fn chat_header_label(title: &str, subtitle: &str) -> String {
     parts.join(", ")
 }
 
+/// Where the window is, as its title names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TitlePlace<'a> {
+    /// A chat is open: its name as the chat header shows it.
+    Chat(&'a str),
+    /// Settings, or the wallpaper page opened from it.
+    Settings,
+    /// The Calls page, which shows the call history in the chats' place.
+    Calls,
+    /// Anywhere else: the chat list with no chat open, the linking screen,
+    /// or a locked chat, whose name stays out of the title.
+    Elsewhere,
+}
+
+/// A name as the window title holds it: one line, with control characters
+/// as spaces (a NUL would cut a Windows title short) and without bidi
+/// embeddings, overrides or isolates, which a name written by someone else
+/// could use to turn " - ZapFast" around in the title bar.
+pub(crate) fn title_text(name: &str) -> String {
+    let text: String = name
+        .chars()
+        .filter(|c| !matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'))
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    spoken(&text)
+}
+
+/// The window's title, which a screen reader says on NVDA+T and when
+/// Alt+Tab reaches the window: where the reader is, then the account when
+/// several are here, then ZapFast ("Ahmed - Work - ZapFast"). `account` is
+/// `None` with one account, and on the lock screen, which names nothing.
+pub fn window_title(locale: Locale, place: TitlePlace<'_>, account: Option<&str>) -> String {
+    // One line each, and a name that is all marker or blank names nothing.
+    let place = match place {
+        TitlePlace::Chat(name) => Some(title_text(without_push_marker(name))),
+        TitlePlace::Settings => Some(gettext(locale, "Settings").into_owned()),
+        TitlePlace::Calls => Some(gettext(locale, "Calls").into_owned()),
+        TitlePlace::Elsewhere => None,
+    }
+    .filter(|place| !place.is_empty());
+    let account = account
+        .map(title_text)
+        .filter(|account| !account.is_empty());
+    match (place, account) {
+        (Some(place), Some(account)) => fill(
+            // Translators: the window title: where the reader is (a chat's
+            // name, or "Settings"), then the account's name. Keep ZapFast
+            // unchanged, at the end.
+            &gettext(locale, "{place} - {account} - ZapFast"),
+            &[("place", &place), ("account", &account)],
+        ),
+        (Some(name), None) | (None, Some(name)) => fill(
+            // Translators: the window title: where the reader is (a chat's
+            // name, or "Settings"), or the account's name. Keep ZapFast
+            // unchanged, at the end.
+            &gettext(locale, "{name} - ZapFast"),
+            &[("name", &name)],
+        ),
+        (None, None) => "ZapFast".to_owned(),
+    }
+}
+
 /// Joins the parts a screen reader announces for a message with ", ".
 pub fn message_label(locale: Locale, label: &MessageLabel<'_>) -> String {
     let mut parts: Vec<String> = Vec::new();
@@ -941,6 +1003,64 @@ mod tests {
             attachment: None,
             targets: None,
         }
+    }
+
+    /// Control characters become spaces and bidi formatting goes, so a
+    /// name cannot cut the title short or reorder it; other text stays.
+    #[test]
+    fn title_text_drops_controls_and_bidi_formatting() {
+        assert_eq!(title_text("Ada\u{0}Lovelace"), "Ada Lovelace");
+        assert_eq!(title_text("Ada\tLovelace\r\n"), "Ada Lovelace");
+        assert_eq!(title_text("\u{202E}Ada\u{202C}"), "Ada");
+        assert_eq!(title_text("\u{2066}Ada\u{2069} \u{202A}x\u{202B}"), "Ada x");
+        assert_eq!(
+            title_text("\u{200F}Ada"),
+            "\u{200F}Ada",
+            "a mark is not an override"
+        );
+        assert_eq!(title_text("\u{7}\u{202D}"), "");
+        assert_eq!(
+            window_title(
+                Locale::English,
+                TitlePlace::Chat("~\u{202E}Ada\u{0}"),
+                Some("Work\u{2067}\n")
+            ),
+            "Ada - Work - ZapFast"
+        );
+    }
+
+    /// The title names the place, then the account, then ZapFast, on one
+    /// line, without the push-name "~", and leaves out what is blank.
+    #[test]
+    fn the_window_title_joins_place_account_and_app() {
+        let en = Locale::English;
+        let title = |place, account| window_title(en, place, account);
+        assert_eq!(title(TitlePlace::Elsewhere, None), "ZapFast");
+        assert_eq!(title(TitlePlace::Chat("Ahmed"), None), "Ahmed - ZapFast");
+        assert_eq!(title(TitlePlace::Chat("~ Sara"), None), "Sara - ZapFast");
+        assert_eq!(
+            title(TitlePlace::Chat("Family\nand friends"), None),
+            "Family and friends - ZapFast"
+        );
+        assert_eq!(title(TitlePlace::Chat("~"), None), "ZapFast");
+        assert_eq!(title(TitlePlace::Settings, None), "Settings - ZapFast");
+        assert_eq!(title(TitlePlace::Elsewhere, Some("Work")), "Work - ZapFast");
+        assert_eq!(
+            title(TitlePlace::Chat("Ahmed"), Some("Work")),
+            "Ahmed - Work - ZapFast"
+        );
+        assert_eq!(
+            title(TitlePlace::Settings, Some("Work")),
+            "Settings - Work - ZapFast"
+        );
+        assert_eq!(
+            title(TitlePlace::Chat("{account}"), Some("Work")),
+            "{account} - Work - ZapFast"
+        );
+        assert_eq!(
+            window_title(Locale::German, TitlePlace::Settings, None),
+            "Einstellungen - ZapFast"
+        );
     }
 
     /// A name known only from a profile wears a "~" on screen; a screen

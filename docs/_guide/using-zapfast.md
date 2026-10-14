@@ -803,6 +803,13 @@ shortcuts.
 
 ## Screen readers
 
+The window's title, which NVDA+T and Alt+Tab read, names where you are:
+"Ada - ZapFast" with a chat open, "Settings - ZapFast", "Calls - ZapFast",
+or "ZapFast";
+with several accounts, the account's name comes before ZapFast. While
+ZapFast is locked the title is only "ZapFast", and a locked chat's name
+never appears in it.
+
 ZapFast announces confirmations, errors, connection changes and history loading
 through the screen reader without moving focus. While the window is focused,
 the open chat also announces new messages with their sender, a quick burst as
