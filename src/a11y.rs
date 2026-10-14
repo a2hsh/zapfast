@@ -40,7 +40,7 @@ pub struct MessageLabel<'a> {
 /// placeholders in whatever order its language needs, and a value that itself
 /// contains `{name}` is never filled again. Braces that name no value stay as
 /// written.
-fn fill(template: &str, values: &[(&str, &str)]) -> String {
+pub(crate) fn fill(template: &str, values: &[(&str, &str)]) -> String {
     let mut out = String::with_capacity(template.len());
     let mut rest = template;
     while let Some(open) = rest.find('{') {

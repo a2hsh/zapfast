@@ -3,7 +3,7 @@
 use egui::{Key, Modifiers};
 
 use crate::app::App;
-use crate::model::{Action, Chat, Dialog, InfoView, Page, Scroll};
+use crate::model::{Action, Chat, ChatId, Dialog, InfoView, Page, Scroll};
 
 /// Whether Home, End and Ctrl+End scroll the open chat rather than move the
 /// cursor of the focused text field (#456).
@@ -196,6 +196,24 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
             crate::ui::list_nav::take_step(ctx, || app.message_page_rows(ctx, &chat))
     {
         actions.push(Action::MessageCursor(step));
+    }
+    // The focused list's current message takes the keys that act on it.
+    if app.dialog.is_none()
+        && !app.show_update
+        && app.picker.is_none()
+        && app.reaction_target.is_none()
+        && app.recording.is_none()
+        && !menu_open
+        && let Some((chat, id)) = focused_message(app, ctx)
+    {
+        let taken = message_keys(app, ctx, &chat, &id);
+        if !taken.is_empty() {
+            // Acting from the keyboard is keyboard navigation, as Tab is:
+            // the focus these keys move (into the menu, the picker, the
+            // input, a dialog) is shown.
+            ctx.data_mut(|data| data.insert_temp(crate::theme::keyboard_focus_id(), true));
+            actions.extend(taken);
+        }
     }
     // PgUp/PgDn/Home/End scroll the open chat. PgUp/PgDn also work while the
     // composer has focus, since egui's TextEdit does not handle them itself;
@@ -418,6 +436,83 @@ fn is_copy_event(event: &egui::Event) -> bool {
             && !modifiers.alt && !modifiers.shift)
 }
 
+/// The open chat's current message while its message list has keyboard
+/// focus: the message the cursor names, or the newest when it names none
+/// loaded, as the list itself resolves it. An album is one row, named by
+/// its first item. The Calls tab shows the open chat beside its history, so
+/// its list counts there too; a narrow window showing only the history has
+/// no list on screen, and so none with focus.
+pub fn focused_message(app: &App, ctx: &egui::Context) -> Option<(ChatId, String)> {
+    use crate::ui::conversation::{row_of, row_starts};
+    if !app.chat_view() {
+        return None;
+    }
+    let chat = app.open_chat.as_ref()?;
+    if !ctx.memory(|memory| memory.has_focus(crate::ui::conversation::messages_list_id(chat))) {
+        return None;
+    }
+    let messages = &app.conversations.get(chat)?.messages;
+    let index = app
+        .message_cursor
+        .get(chat)
+        .and_then(|id| messages.iter().position(|message| &message.id == id))
+        .or(messages.len().checked_sub(1))?;
+    let starts = row_starts(messages, app.selecting_in(chat));
+    let first = starts.get(row_of(&starts, index)).copied().unwrap_or(index);
+    Some((chat.clone(), messages.get(first)?.id.clone()))
+}
+
+/// Takes this frame's key for the focused message `id`, if any, and returns
+/// what it does: each key is the message menu's item of the same name, with
+/// the same conditions, so the keys never offer what the menu does not.
+/// Shift+F10 opens the menu itself: egui never reports the Applications
+/// key. Enter opens no message's menu: only a call, whose menu is all it
+/// offers, opens it on Space or Enter too.
+fn message_keys(app: &App, ctx: &egui::Context, chat: &str, id: &str) -> Vec<Action> {
+    use crate::ui::conversation as view;
+    let Some(message) = app
+        .conversations
+        .get(chat)
+        .and_then(|conversation| conversation.message(id))
+    else {
+        return Vec::new();
+    };
+    // A call in the chat is a record: its menu only calls back, so Space and
+    // Enter open that menu and the other keys that act on a message leave it
+    // alone.
+    let record = matches!(message.content, crate::model::Content::Call { .. });
+    let mut actions = Vec::new();
+    ctx.input_mut(|input| {
+        if take_exact(input, Modifiers::SHIFT, Key::F10) {
+            actions.push(Action::OpenMessageMenu(id.to_owned()));
+        } else if record {
+            // Nothing else acts on a call.
+            if take_space_or_enter(input) {
+                actions.push(Action::OpenMessageMenu(id.to_owned()));
+            }
+        } else if take_plain(input, Key::R) {
+            if view::can_reply(&message.content) {
+                actions.push(Action::Reply(id.to_owned()));
+                actions.push(Action::FocusComposer);
+            }
+        } else if take_plain(input, Key::E) {
+            actions.push(view::open_reaction_picker_action(chat, id));
+        } else if take_plain(input, Key::C) {
+            let names = |mention: &str| app.mention_name(mention);
+            actions.extend(view::copy_key_action(message, &names));
+        } else if take_plain(input, Key::F) {
+            if crate::app::can_select(&message.content) {
+                actions.push(view::forward_action(chat, id));
+            }
+        } else if take_plain(input, Key::Delete) {
+            // Never a deletion: the confirmation that "Delete for me" opens.
+            // "Delete for everyone" stays in the menu.
+            actions.push(view::delete_for_me_action(chat, id));
+        }
+    });
+    actions
+}
+
 /// Takes an exact Command/Ctrl+1..9 press, leaving modified number keys alone.
 fn take_chat_number(input: &mut egui::InputState) -> Option<usize> {
     let keys = [
@@ -484,6 +579,13 @@ fn take_destination(input: &mut egui::InputState) -> Option<u8> {
 /// matches the key with Shift or Alt held, and a plain binding must leave
 /// those combinations, such as Shift+Home for text selection, alone.
 pub(crate) fn take_plain(input: &mut egui::InputState, key: Key) -> bool {
+    take_exact(input, Modifiers::NONE, key)
+}
+
+/// Removes this frame's first press of `key` with exactly `modifiers`, if
+/// any, and reports whether one was found.
+pub(crate) fn take_exact(input: &mut egui::InputState, modifiers: Modifiers, key: Key) -> bool {
+    let wanted = modifiers;
     let mut taken = false;
     input.events.retain(|event| {
         if taken {
@@ -496,12 +598,19 @@ pub(crate) fn take_plain(input: &mut egui::InputState, key: Key) -> bool {
                 pressed: true,
                 modifiers,
                 ..
-            } if *found == key && *modifiers == Modifiers::NONE
+            } if *found == key && *modifiers == wanted
         );
         taken |= matches;
         !matches
     });
     taken
+}
+
+/// Takes this frame's first plain Space or, failing that, its first plain
+/// Enter: the message list's current message takes the two alike, a held
+/// key acting on each repeat.
+fn take_space_or_enter(input: &mut egui::InputState) -> bool {
+    take_plain(input, Key::Space) || take_plain(input, Key::Enter)
 }
 
 /// Handles keys while the image preview is open. No chat shortcut runs, and
@@ -606,6 +715,13 @@ fn focus_before_escape(ctx: &egui::Context) -> Option<egui::Id> {
 /// Whether Escape keeps focus where it was: after keyboard navigation, or
 /// with a screen reader attached, which always hears where focus goes.
 fn escape_keeps_focus(ctx: &egui::Context) -> bool {
+    keyboard_or_reader(ctx)
+}
+
+/// Whether focus is followed: after keyboard navigation, or with a screen
+/// reader attached, which always hears where focus goes. A pointer user
+/// sees focus move only on a text field, as its caret and outline.
+pub(crate) fn keyboard_or_reader(ctx: &egui::Context) -> bool {
     let keyboard = ctx.data(|data| {
         data.get_temp::<bool>(crate::theme::keyboard_focus_id())
             .unwrap_or(false)
@@ -670,14 +786,42 @@ fn drop_shortcut_text(ctx: &egui::Context) {
 }
 
 /// Handles keys while the cropper covers the window: Escape leaves the
-/// staged picture alone, Enter keeps the crop.
+/// staged picture alone, Enter keeps the crop. Enter on a focused button
+/// the reader can reach, the cropper's own or the window's above it,
+/// presses that button instead, as anywhere else, so Enter on Cancel
+/// cancels and Enter on Turn left turns the picture. A control under the
+/// cropper, such as the message field it was opened over, leaves Enter to
+/// the crop, also in the cropper's first frame, before egui knows it covers
+/// that control.
 fn editor_keys(app: &mut App, ctx: &egui::Context) {
+    let focused = ctx.memory(|memory| memory.focused()).and_then(|focused| {
+        ctx.viewport(|viewport| {
+            viewport
+                .prev_pass
+                .widgets
+                .get(focused)
+                .map(|widget| (widget.layer_id, widget.sense.senses_click()))
+        })
+    });
+    let cropper = egui::LayerId::new(egui::Order::Foreground, super::image_editor::area_id());
+    let on_button = focused.is_some_and(|(layer, clicks)| {
+        clicks
+            && ctx.memory(|memory| {
+                // The cropper is the modal layer from the pass after its
+                // first: until then everything takes the pointer and the
+                // keys, the message field under it too, so only a layer
+                // drawn above every Foreground one is surely above it.
+                memory.allows_interaction(layer)
+                    && (memory.top_modal_layer() == Some(cropper)
+                        || layer.order > egui::Order::Foreground)
+            })
+    });
     let mut actions = Vec::new();
     ctx.input_mut(|input| {
         if input.consume_key(Modifiers::NONE, Key::Escape) {
             actions.push(Action::CancelPictureEdit);
         }
-        if input.consume_key(Modifiers::NONE, Key::Enter) {
+        if !on_button && input.consume_key(Modifiers::NONE, Key::Enter) {
             actions.push(Action::ApplyPictureEdit);
         }
     });
@@ -859,6 +1003,12 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
         "↑ / ↓, Home / End, PgUp / PgDn",
         "Move through messages (in the message list)",
     ),
+    ("Shift+F10", "Message menu (in the message list)"),
+    ("R", "Reply to the message (in the message list)"),
+    ("E", "React to the message (in the message list)"),
+    ("C", "Copy the message (in the message list)"),
+    ("F", "Forward the message (in the message list)"),
+    ("Delete", "Delete the message for me (in the message list)"),
     ("PgUp / PgDn", "Scroll the open chat by a page"),
     (
         "Home / End",
@@ -1082,6 +1232,72 @@ mod tests {
         app.image_preview = showing("/cache/clip.mp4", "m2");
         copy(&mut app, &ctx);
         assert!(app.actions.is_empty(), "a clip is played, not copied");
+    }
+
+    /// Under the cropper, Enter on a focused button the reader can reach
+    /// presses that button, here one above the cropper, as ZapFast's own
+    /// window buttons are; with focus on a control under the cropper, such
+    /// as the message field it was opened over, Enter keeps the crop.
+    #[test]
+    fn the_croppers_enter_presses_a_reachable_button_and_keeps_the_crop_otherwise() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = App::headless(
+            crate::paths::AppDirs::under(root.path()),
+            crate::settings::Settings::default(),
+        )
+        .0;
+        let ctx = egui::Context::default();
+        let cropper =
+            egui::LayerId::new(egui::Order::Foreground, crate::ui::image_editor::area_id());
+        let above = egui::Id::new("fixture-window-button");
+        let under = egui::Id::new("fixture-field-under");
+        let place = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(40.0, 40.0));
+        let enter = |app: &mut App, focus: egui::Id| {
+            app.actions.clear();
+            for events in [
+                Vec::new(),
+                vec![egui::Event::Key {
+                    key: Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::NONE,
+                }],
+            ] {
+                let pressed = !events.is_empty();
+                ctx.memory_mut(|memory| memory.request_focus(focus));
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        if pressed {
+                            editor_keys(app, ui.ctx());
+                        }
+                        let ctx = ui.ctx().clone();
+                        ctx.memory_mut(|memory| memory.set_modal_layer(cropper));
+                        egui::Area::new(egui::Id::new("fixture-under"))
+                            .order(egui::Order::Middle)
+                            .show(&ctx, |ui| {
+                                ui.interact(place, under, egui::Sense::click());
+                            });
+                        egui::Area::new(egui::Id::new("fixture-above"))
+                            .order(egui::Order::Tooltip)
+                            .show(&ctx, |ui| {
+                                ui.interact(place, above, egui::Sense::click());
+                            });
+                    },
+                );
+                output.textures_delta.clear();
+            }
+            std::mem::take(&mut app.actions)
+        };
+        assert!(
+            enter(&mut app, above).is_empty(),
+            "the button above the cropper takes Enter"
+        );
+        assert_eq!(enter(&mut app, under), [Action::ApplyPictureEdit]);
     }
 
     fn escape(app: &mut App, ctx: &egui::Context) {

@@ -1471,7 +1471,7 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                 }
             }
             app.prepare_composer_undo(ui.ctx());
-            let id = egui::Id::new("composer-text");
+            let id = composer_id();
             let has_focus = ui.memory(|memory| memory.has_focus(id));
             let enter_sends = app.settings.enter_sends;
             let (typed_colon, typed_at) = ui.input(|input| {
@@ -1964,6 +1964,11 @@ pub(crate) const COMPOSER_TEXT_GAP: f32 = 6.0;
 /// Width of the plus button: its 22-point icon and `icon_button`'s padding.
 const PLUS_EDGE: f32 = 34.0;
 
+/// The message field.
+pub(crate) fn composer_id() -> egui::Id {
+    egui::Id::new("composer-text")
+}
+
 /// Where the composer's text was painted in the frame's last pass, for
 /// layout tests.
 pub(crate) fn composer_text_id() -> egui::Id {
@@ -2242,7 +2247,7 @@ struct View<'a> {
     /// Whether this chat is selecting whole messages.
     selecting: bool,
     anchor: Option<&'a str>,
-    /// Demo/test: keep this message's context menu open.
+    /// Open this message's context menu (`App::open_message_menu`).
     open_menu: Option<&'a str>,
     /// Ids of the starred messages of this chat, for the mark in the footer.
     starred: Option<&'a HashSet<String>>,
@@ -4015,7 +4020,9 @@ fn reaction_affordance_visible(pointer: Option<egui::Pos2>, bubble: Rect, button
     pointer.is_some_and(|pointer| bubble.union(button).contains(pointer))
 }
 
-fn open_reaction_picker_action(chat: &str, message: &str) -> Action {
+/// Opens the reaction picker beside the message, as its hover control and
+/// the message list's E do.
+pub(crate) fn open_reaction_picker_action(chat: &str, message: &str) -> Action {
     Action::OpenReactionPicker {
         chat: chat.to_owned(),
         message: message.to_owned(),
@@ -4556,7 +4563,13 @@ pub(crate) fn callable(chat: &crate::model::Chat, me: Option<&str>) -> bool {
 /// A call's menu: calling back, in a chat that can take a call. A group's
 /// call is called back in its group while group calls are on; a call among
 /// several people with no group behind it cannot be started here.
-fn call_menu(ui: &mut egui::Ui, view: &View<'_>, group: bool, actions: &mut Vec<Action>) {
+fn call_menu(
+    ui: &mut egui::Ui,
+    view: &View<'_>,
+    message: &str,
+    group: bool,
+    actions: &mut Vec<Action>,
+) {
     let palette = view.palette;
     let chat = &view.chat.id;
     let back = match view.chat.kind {
@@ -4575,12 +4588,21 @@ fn call_menu(ui: &mut egui::Ui, view: &View<'_>, group: bool, actions: &mut Vec<
         });
         return;
     }
-    if widgets::menu_item(
+    let voice = widgets::menu_item_response(
         ui,
         &palette,
         Some(Icon::Phone),
         &crate::i18n::gettext(view.locale, "Voice call"),
-    ) {
+        true,
+    );
+    // The item a menu opened from the keyboard focuses, as the message
+    // menu's Reply; only a pass that draws the menu names it.
+    if !ui.is_sizing_pass() {
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(menu_first_item_id(chat, message), Some(voice.id));
+        });
+    }
+    if voice.clicked() {
         actions.push(Action::StartCall(chat.clone()));
     }
     if widgets::menu_item(
@@ -5066,6 +5088,54 @@ fn bubble_frame(
     let width = menu_width(ui, view.locale, view.reaction_emoji, menu_target);
     let keyboard_clicked =
         bubble.clicked() && bubble.has_focus() && !ui.input(|input| input.pointer.any_click());
+    let popup_id = bubble_id.with("popup");
+    let was_open = egui::Popup::is_id_open(ui.ctx(), popup_id);
+    // A menu opened without the pointer stays beside its message for as
+    // long as it is open, not only in the frame that opened it: the
+    // pointer-anchored placement has no position to go to.
+    let at_message_id = bubble_id.with("menu-at-message");
+    let at_message = force_menu
+        || keyboard_clicked
+        || (was_open
+            && !right_clicked
+            && ui
+                .ctx()
+                .data(|data| data.get_temp::<bool>(at_message_id))
+                .unwrap_or(false));
+    // Opened by the message list's keys: focus goes into the menu, stays in
+    // it, and returns to the list when it closes. True while the first item
+    // is still to be focused.
+    let from_keys_id = bubble_id.with("menu-from-keys");
+    if force_menu {
+        // Opened once: from here on the menu closes as any menu does.
+        actions.push(Action::MessageMenuOpened);
+        let keyboard = ui.ctx().data(|data| {
+            data.get_temp::<bool>(theme::keyboard_focus_id())
+                .unwrap_or(false)
+        });
+        if keyboard {
+            ui.ctx()
+                .data_mut(|data| data.insert_temp(from_keys_id, true));
+        }
+    }
+    let from_keys = ui.ctx().data(|data| data.get_temp::<bool>(from_keys_id));
+    if from_keys.is_some() && was_open && !reacting {
+        // Up and Down walk the items in order and wrap, as Tab does, as in
+        // any desktop menu. egui's own arrow moves go to the nearest widget
+        // on screen, which can be one under the menu.
+        let step = ui.ctx().input_mut(|input| {
+            if super::keys::take_plain(input, egui::Key::ArrowDown) {
+                Some(egui::FocusDirection::Next)
+            } else if super::keys::take_plain(input, egui::Key::ArrowUp) {
+                Some(egui::FocusDirection::Previous)
+            } else {
+                None
+            }
+        });
+        if let Some(step) = step {
+            ui.memory_mut(|memory| memory.move_focus(step));
+        }
+    }
     let open = if right_clicked || force_menu || reacting || keyboard_clicked {
         Some(egui::SetOpenCommand::Bool(true))
     } else if bubble.clicked() {
@@ -5073,7 +5143,10 @@ fn bubble_frame(
     } else {
         None
     };
+    // egui gives a popup's background a focusable sense, a nameless Tab
+    // stop; it only needs the clicks.
     let popup = egui::Popup::menu(&bubble)
+        .sense(Sense::CLICK)
         .open_memory(open)
         .close_behavior(if reacting {
             egui::PopupCloseBehavior::IgnoreClicks
@@ -5095,7 +5168,7 @@ fn bubble_frame(
             (screen.right() - width - 468.0).max(screen.left() + 8.0),
         );
         popup.at_position(pos2(x, menu.top()))
-    } else if force_menu || keyboard_clicked {
+    } else if at_message {
         popup.at_position(bubble.rect.left_top() + vec2(12.0, 8.0))
     } else {
         popup.at_pointer_fixed()
@@ -5103,13 +5176,57 @@ fn bubble_frame(
     let menu = popup.show(|ui| {
         context_menu(ui, view, menu_target, MenuOrigin::Chat, actions);
     });
-    if let Some(menu) = menu {
+    if let Some(menu) = &menu {
         ui.ctx()
             .data_mut(|data| data.insert_temp(bubble_id.with("menu-rect"), menu.response.rect));
     }
+    let open_now = egui::Popup::is_id_open(ui.ctx(), popup_id);
+    if at_message || was_open {
+        ui.ctx().data_mut(|data| {
+            if at_message && open_now {
+                data.insert_temp(at_message_id, true);
+            } else {
+                data.remove::<bool>(at_message_id);
+            }
+        });
+    }
+    if let Some(focus_pending) = from_keys {
+        if !open_now {
+            ui.ctx().data_mut(|data| data.remove::<bool>(from_keys_id));
+            // Closed by Escape or a chosen item: back to the message list,
+            // drawn earlier in this pass. A click elsewhere keeps the focus
+            // it gave.
+            if !ui.input(|input| input.pointer.any_pressed() || input.pointer.any_click()) {
+                let item = ui.memory(|memory| memory.focused());
+                super::overlay::hand_back(ui.ctx(), messages_list_id(&view.chat.id), item);
+            }
+        } else if let Some(menu) = &menu
+            && !reacting
+        {
+            // Tab stays among the menu's items. Not beside the reaction
+            // picker, whose own layer must keep its focus.
+            ui.memory_mut(|memory| memory.set_modal_layer(menu.response.layer_id));
+            // The first item, drawn in this pass, takes focus once.
+            if focus_pending
+                && let Some(first) = ui
+                    .ctx()
+                    .data(|data| {
+                        data.get_temp::<Option<egui::Id>>(menu_first_item_id(
+                            &view.chat.id,
+                            &menu_target.id,
+                        ))
+                    })
+                    .flatten()
+            {
+                ui.memory_mut(|memory| memory.request_focus(first));
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(from_keys_id, false));
+            }
+        }
+    }
     // Keep the target explicit for every menu action, not just the emoji
     // picker. Paint in the message layer so the menu itself remains above it.
-    if egui::Popup::is_id_open(ui.ctx(), bubble_id.with("popup")) {
+    if open_now {
         ui.painter().rect_stroke(
             inner.response.rect.expand(2.0),
             12.0,
@@ -6280,7 +6397,7 @@ fn context_menu(
     let palette = view.palette;
     let chat = &view.chat.id;
     if let Content::Call { group, .. } = message.content {
-        call_menu(ui, view, group, actions);
+        call_menu(ui, view, &message.id, group, actions);
         return;
     }
     let mine = own_reaction(message);
@@ -6358,13 +6475,18 @@ fn context_menu(
         },
     );
     widgets::menu_separator(ui, &palette);
-    if !matches!(message.content, Content::Revoked)
-        && widgets::menu_item(
-            ui,
-            &palette,
-            Some(Icon::Reply),
-            &crate::i18n::gettext(view.locale, "Reply"),
-        )
+    // The first item below the reactions, which a menu opened from the
+    // keyboard focuses: Reply, or whichever comes first. A deleted message
+    // has none of the rows down to Select: Delete for me, which every
+    // message menu has, is its first.
+    let mut first = None;
+    let mut item = |ui: &mut egui::Ui, icon: Icon, label: &str| {
+        let response = widgets::menu_item_response(ui, &palette, Some(icon), label, true);
+        first.get_or_insert(response.id);
+        response.clicked()
+    };
+    if can_reply(&message.content)
+        && item(ui, Icon::Reply, &crate::i18n::gettext(view.locale, "Reply"))
     {
         if matches!(origin, MenuOrigin::List) {
             actions.push(Action::OpenMessage {
@@ -6378,10 +6500,9 @@ fn context_menu(
     // private reply starts from the group the reader is looking at.
     if !matches!(origin, MenuOrigin::List)
         && message.private_reply_recipient().is_some()
-        && widgets::menu_item(
+        && item(
             ui,
-            &palette,
-            Some(Icon::Reply),
+            Icon::Reply,
             &crate::i18n::gettext(view.locale, "Reply privately"),
         )
     {
@@ -6396,9 +6517,7 @@ fn context_menu(
     } else {
         crate::i18n::gettext(view.locale, "Star")
     };
-    if !matches!(message.content, Content::Revoked)
-        && widgets::menu_item(ui, &palette, Some(Icon::Star), &star_label)
-    {
+    if !matches!(message.content, Content::Revoked) && item(ui, Icon::Star, &star_label) {
         actions.push(Action::SetStar {
             chat: chat.clone(),
             message: message.id.clone(),
@@ -6412,9 +6531,7 @@ fn context_menu(
     } else {
         crate::i18n::gettext(view.locale, "Pin message")
     };
-    if !matches!(message.content, Content::Revoked)
-        && widgets::menu_item(ui, &palette, Some(Icon::Pin), &pin_label)
-    {
+    if !matches!(message.content, Content::Revoked) && item(ui, Icon::Pin, &pin_label) {
         actions.push(Action::SetMessagePinned {
             chat: chat.clone(),
             message: message.id.clone(),
@@ -6422,26 +6539,21 @@ fn context_menu(
         });
     }
     if crate::app::can_select(&message.content)
-        && widgets::menu_item(
+        && item(
             ui,
-            &palette,
-            Some(Icon::Forward),
+            Icon::Forward,
             &crate::i18n::gettext(view.locale, "Forward"),
         )
     {
-        actions.push(Action::ShowDialog(Dialog::Forward {
-            chat: chat.clone(),
-            messages: vec![message.id.clone()],
-        }));
+        actions.push(forward_action(chat, &message.id));
     }
     // A photo opens the viewer on its own click; a clip plays in its bubble
     // there, so this is how the album is reached from a chat that holds no
     // pictures.
     if let Some(path) = viewer_file(message)
-        && widgets::menu_item(
+        && item(
             ui,
-            &palette,
-            Some(Icon::Maximize),
+            Icon::Maximize,
             &crate::i18n::gettext(view.locale, "Open in the viewer"),
         )
     {
@@ -6453,10 +6565,9 @@ fn context_menu(
         });
     }
     if crate::app::can_select(&message.content)
-        && widgets::menu_item(
+        && item(
             ui,
-            &palette,
-            Some(Icon::Check),
+            Icon::Check,
             &crate::i18n::gettext(view.locale, "Select"),
         )
     {
@@ -6468,25 +6579,7 @@ fn context_menu(
         }
         actions.push(Action::SelectMessage(message.id.clone()));
     }
-    let text = match &message.content {
-        Content::Text { text, .. } | Content::Interactive { text, .. } => Some(text.clone()),
-        Content::Image { caption, .. }
-        | Content::Video { caption, .. }
-        | Content::Document { caption, .. } => caption.clone(),
-        Content::Location {
-            latitude,
-            longitude,
-            ..
-        }
-        | Content::LiveLocation {
-            latitude,
-            longitude,
-            ..
-        } => Some(format!("{latitude},{longitude}")),
-        Content::Contact { vcard, .. } => Some(vcard.clone()),
-        _ => None,
-    };
-    if let Some(text) = text
+    if let Some(text) = copyable_text(&message.content)
         && widgets::menu_item(
             ui,
             &palette,
@@ -6534,17 +6627,22 @@ fn context_menu(
             for_everyone: true,
         }));
     }
-    if widgets::menu_item(
+    let delete_for_me = widgets::menu_item_response(
         ui,
         &palette,
         Some(Icon::EyeOff),
         &crate::i18n::gettext(view.locale, "Delete for me"),
-    ) {
-        actions.push(Action::ShowDialog(Dialog::ConfirmDeleteMessage {
-            chat: view.chat.id.clone(),
-            message: message.id.clone(),
-            for_everyone: false,
-        }));
+        true,
+    );
+    first.get_or_insert(delete_for_me.id);
+    // A popup's first pass only measures it, drawing nothing that could
+    // take focus; only a pass that draws the menu names its item.
+    let first = (!ui.is_sizing_pass()).then_some(first).flatten();
+    ui.ctx().data_mut(|data| {
+        data.insert_temp(menu_first_item_id(chat, &message.id), first);
+    });
+    if delete_for_me.clicked() {
+        actions.push(delete_for_me_action(chat, &message.id));
     }
     if let Content::Sticker { media, .. } = &message.content
         && let Some(path) = &media.path
@@ -6667,13 +6765,88 @@ fn context_menu(
     }
 }
 
+/// Where the message menu records its first item for this pass.
+fn menu_first_item_id(chat: &str, message: &str) -> egui::Id {
+    bubble_id(chat, message).with("menu-first-item")
+}
+
+/// Whether the message menu offers Reply. A call in the chat is a record,
+/// with its own menu and no replies.
+pub(crate) fn can_reply(content: &Content) -> bool {
+    !matches!(content, Content::Revoked | Content::Call { .. })
+}
+
+/// The message menu's Forward: the forward dialog for this one message.
+pub(crate) fn forward_action(chat: &str, message: &str) -> Action {
+    Action::ShowDialog(Dialog::Forward {
+        chat: chat.to_owned(),
+        messages: vec![message.to_owned()],
+    })
+}
+
+/// The message menu's "Delete for me": its confirmation, never the deletion.
+pub(crate) fn delete_for_me_action(chat: &str, message: &str) -> Action {
+    Action::ShowDialog(Dialog::ConfirmDeleteMessage {
+        chat: chat.to_owned(),
+        message: message.to_owned(),
+        for_everyone: false,
+    })
+}
+
+/// What the menu's "Copy text" copies, before mentions are resolved: the
+/// text or caption, a location's coordinates or a contact's card.
+fn copyable_text(content: &Content) -> Option<String> {
+    match content {
+        Content::Text { text, .. } | Content::Interactive { text, .. } => Some(text.clone()),
+        Content::Image { caption, .. }
+        | Content::Video { caption, .. }
+        | Content::Document { caption, .. } => caption.clone(),
+        Content::Location {
+            latitude,
+            longitude,
+            ..
+        }
+        | Content::LiveLocation {
+            latitude,
+            longitude,
+            ..
+        } => Some(format!("{latitude},{longitude}")),
+        Content::Contact { vcard, .. } => Some(vcard.clone()),
+        _ => None,
+    }
+}
+
+/// What C copies from the focused message: what the menu's first copy item
+/// copies, its text, or else a downloaded picture. "Copy message ID", a
+/// debugging aid, does not count; a message with neither copies nothing.
+pub(crate) fn copy_key_action(
+    message: &Message,
+    mention_names: &dyn Fn(&str) -> String,
+) -> Option<Action> {
+    if let Some(text) = copyable_text(&message.content) {
+        let mentions = mentions_named(message, mention_names);
+        return Some(Action::CopyText(markup::plain(&text, &mentions)));
+    }
+    match &message.content {
+        Content::Image { media, .. } => media.path.clone().map(Action::CopyImage),
+        _ => None,
+    }
+}
+
 fn mentions_of(view: &View<'_>, message: &Message) -> Vec<markup::Mention> {
+    mentions_named(message, view.mention_names)
+}
+
+fn mentions_named(
+    message: &Message,
+    mention_names: &dyn Fn(&str) -> String,
+) -> Vec<markup::Mention> {
     message
         .mentions
         .iter()
         .map(|mention| markup::Mention {
             user: mention.user.clone(),
-            name: (view.mention_names)(&mention.id),
+            name: mention_names(&mention.id),
         })
         .collect()
 }
