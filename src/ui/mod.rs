@@ -24,6 +24,7 @@ pub mod picker;
 pub mod polls;
 pub mod rail;
 pub mod settings;
+pub(crate) mod toolbar;
 pub mod update;
 pub mod widgets;
 
@@ -1318,8 +1319,17 @@ mod idle_tests {
 
         let back = ctx
             .data(|data| data.get_temp::<egui::Rect>(conversation::back_button_id()))
-            .expect("Back is drawn")
-            .center();
+            .expect("Back is drawn");
+        // Back is a button of the chat's toolbar, as its other buttons are.
+        assert!(
+            toolbar::buttons(&ctx, conversation::header_toolbar_id())
+                .iter()
+                .any(|id| ctx
+                    .read_response(*id)
+                    .is_some_and(|button| button.rect == back)),
+            "Back is in the Chat actions toolbar"
+        );
+        let back = back.center();
         let press = |pressed| egui::Event::PointerButton {
             pos: back,
             button: egui::PointerButton::Primary,

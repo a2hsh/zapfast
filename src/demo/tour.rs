@@ -190,6 +190,8 @@ enum Target {
     Sticker,
     /// An icon control without text, by its place in the Tab order.
     Stop(Stop),
+    /// A toolbar's button without text, by its toolbar and its place there.
+    Tool(fn() -> egui::Id, usize),
     /// The chat search calendar's day of the newest result.
     NewestHitDay,
     /// The oldest result in the chat search pane.
@@ -538,6 +540,9 @@ impl Tour {
                 .map(|rect| rect.center()),
             Target::Stop(stop) => ctx
                 .read_response(crate::ui::focus::control(ctx, stop)?)
+                .map(|r| r.rect.center()),
+            Target::Tool(toolbar, index) => ctx
+                .read_response(*crate::ui::toolbar::buttons(ctx, toolbar()).get(index)?)
                 .map(|r| r.rect.center()),
             Target::NewestHitDay => {
                 let day = crate::util::day_key(app.chat_search_hits.first()?.timestamp)?;

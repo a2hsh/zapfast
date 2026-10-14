@@ -864,11 +864,36 @@ a group call's menu says that group calls happen on the phone, and a call
 link's row says it has nothing to open. In the New call list, Enter or
 Shift+F10 opens a menu with Voice call and Video call.
 
-In the chat view, Tab moves through the message input and its buttons, chat
-search, the chat info panel, the message list, the rail, the chat list's
-header, search, the chat filters and the chat list, then returns to the
-input. Shift+Tab goes back; hidden controls are skipped. Single messages,
-their links and phone numbers, reactions and chat rows are not stops. The
-React and Reply buttons that appear beside a hovered message are for the
-pointer only; keyboard and screen-reader users reach both from the message
-menu. Alt+Up/Down switches conversations.
+Groups of buttons are toolbars, each a single Tab stop that a screen reader
+names on the way in: Navigation (the rail: Chats, Calls, Starred, the button
+that shows a hidden chat list, Archived, Locked, Settings and your picture),
+Chat list actions (Back, New chat, or New call on the Calls page, and hide
+the chat list), Filters (All, Unread, the other filters
+and the label chips, or All and Missed on the Calls page), Chat actions (the
+chat's info, search in the chat, the chat's menu, a one-to-one chat's voice
+and video call and, in a narrow window, Back to chats), which is named by
+what the chat header shows, the chat's name and the line under it, such as
+online or typing, and Message actions (plus, emoji, and send or record). In a
+toolbar, Left and Right move between its buttons (Up and Down in Navigation,
+which runs down the window's left edge), Home and End go to the first and
+the last, and Tab leaves it at once; coming back lands on the button you
+left. The active filter, and the rail's destination on screen, read as
+pressed. The chats' avatars between the rail's buttons are not part of
+Navigation: while the list is hidden they are the chat list, the next stop.
+Enter or Space on your picture, the last button of Navigation, opens the
+account switcher with focus on the first account; Up and Down move through the accounts and Add account, and Escape
+returns to your picture. Choosing an account moves focus to its message
+field, and Add account to the new account's linking screen.
+
+In the chat view, Tab cycles through the message input, the Message actions
+toolbar, then from the top left of the window the Navigation toolbar (the
+rail), the Chat list actions toolbar, search, the Filters toolbar, the chat
+list (the rail's avatars while the list is hidden), the Chat actions
+toolbar, the chat's search pane while it is open, the chat info panel and
+the message list, and back to the input: the composer comes last, as in the
+window. Shift+Tab reverses that order; hidden controls are skipped. Single
+messages, their links and phone numbers, reactions and chat rows are not
+stops in this cycle. The React and Reply
+buttons that appear beside a hovered message are for the pointer only;
+keyboard and screen-reader users reach both from the message menu.
+Alt+Up/Down switches conversations.

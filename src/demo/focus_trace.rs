@@ -540,6 +540,210 @@ fn alt_2_in_the_message_field_types_nothing() {
     assert_eq!(trace.app.composer, draft, "nothing typed");
 }
 
+/// The demo app with a second, linked account that has a chat open.
+fn app_with_two_accounts() -> App {
+    let mut app = app();
+    let id = crate::model::AccountId::parse("2").expect("account id");
+    let (mut work, _) = crate::account::Account::detached(
+        &app.dirs,
+        id,
+        crate::settings::AccountSettings::default(),
+    )
+    .expect("a second account");
+    work.me = Some("15550002222@s.whatsapp.net".into());
+    work.me_name = Some("Studio".into());
+    work.link = crate::backend::LinkStatus::Connected;
+    let chat = "15550003333@s.whatsapp.net";
+    work.chats
+        .push(crate::model::Chat::new(chat.into(), "Grace".into()));
+    work.open_chat = Some(chat.into());
+    app.accounts.push(work);
+    app
+}
+
+/// Choosing another account in the switcher from the keys moves focus once,
+/// straight to that account's message field: never back to "Switch account"
+/// first, and never to the window.
+#[test]
+fn choosing_an_account_from_the_keys_moves_focus_once() {
+    let mut trace = Trace::new(app_with_two_accounts());
+    let switcher = crate::ui::rail::buttons(&trace.ctx)
+        .last()
+        .copied()
+        .expect("the rail's picture");
+    trace
+        .ctx
+        .data_mut(|data| data.insert_temp(crate::theme::keyboard_focus_id(), true));
+    trace
+        .ctx
+        .memory_mut(|memory| memory.request_focus(switcher));
+    trace.settle("focus", 3);
+    assert_eq!(trace.last().egui, Some(switcher));
+    trace.press("Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    let first = trace.last().egui;
+    assert_ne!(first, Some(switcher), "focus went into the menu");
+    trace.press("Down", egui::Key::ArrowDown, egui::Modifiers::NONE);
+    assert_ne!(trace.last().egui, first, "on the second account");
+    let from = trace.mark();
+    trace.press("Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    assert_eq!(trace.app.account().id.as_str(), "2");
+    assert_eq!(trace.last().egui, Some(egui::Id::new("composer-text")));
+    trace.assert_clean(from, "choosing an account");
+    assert!(
+        trace.frames[from..]
+            .iter()
+            .all(|frame| frame.egui != Some(switcher)),
+        "focus never went back to the switcher:
+{}",
+        trace.dump(from - 1)
+    );
+}
+
+/// Add account taken from the keys moves focus once, to the new account's
+/// linking screen and its way back, Cancel: never to the window.
+#[test]
+fn adding_an_account_from_the_keys_lands_on_its_linking_screen() {
+    let mut trace = Trace::new(app());
+    let switcher = crate::ui::rail::buttons(&trace.ctx)
+        .last()
+        .copied()
+        .expect("the rail's picture");
+    trace
+        .ctx
+        .data_mut(|data| data.insert_temp(crate::theme::keyboard_focus_id(), true));
+    trace
+        .ctx
+        .memory_mut(|memory| memory.request_focus(switcher));
+    trace.settle("focus", 3);
+    trace.press("Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    trace.press("Down", egui::Key::ArrowDown, egui::Modifiers::NONE);
+    assert_eq!(trace.last().name, "MenuItem \"Add account\"");
+    let from = trace.mark();
+    trace.press("Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    assert!(trace.app.adding_account);
+    trace.assert_clean(from, "adding an account");
+    // Focus is on the way back, Cancel: Enter takes it.
+    trace.press("Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    assert!(!trace.app.adding_account, "{}", trace.dump(from - 1));
+}
+
+/// An account the phone has not linked, chosen from the keys, moves focus
+/// once, as Add account does: to its linking screen and the way back from
+/// it, "Use another account", never to the window.
+#[test]
+fn choosing_an_unlinked_account_from_the_keys_lands_on_its_linking_screen() {
+    let mut app = app();
+    let id = crate::model::AccountId::parse("2").expect("account id");
+    let (pending, _) = crate::account::Account::detached(
+        &app.dirs,
+        id,
+        crate::settings::AccountSettings::default(),
+    )
+    .expect("a second account");
+    app.accounts.push(pending);
+    let mut trace = Trace::new(app);
+    let switcher = crate::ui::rail::buttons(&trace.ctx)
+        .last()
+        .copied()
+        .expect("the rail's picture");
+    trace
+        .ctx
+        .data_mut(|data| data.insert_temp(crate::theme::keyboard_focus_id(), true));
+    trace
+        .ctx
+        .memory_mut(|memory| memory.request_focus(switcher));
+    trace.settle("focus", 3);
+    trace.press("Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    trace.press("Down", egui::Key::ArrowDown, egui::Modifiers::NONE);
+    assert!(
+        trace.last().name.contains("Not linked"),
+        "{}",
+        trace.last().name
+    );
+    let from = trace.mark();
+    trace.press("Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    assert_eq!(trace.app.account().id.as_str(), "2");
+    assert!(!trace.app.adding_account);
+    trace.assert_clean(from, "choosing an unlinked account");
+    // Focus is on the way back, "Use another account": Enter opens the
+    // switcher with focus in it.
+    trace.press("Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    assert!(
+        trace.last().name.starts_with("MenuItemRadio"),
+        "{}",
+        trace.dump(from - 1)
+    );
+}
+
+/// The linking screen's "Use another account", taken from the keys, opens
+/// the switcher with focus in it, as Enter on the switcher does.
+#[test]
+fn the_switcher_asked_for_from_the_keys_takes_focus() {
+    let mut trace = Trace::new(app_with_two_accounts());
+    trace
+        .ctx
+        .data_mut(|data| data.insert_temp(crate::theme::keyboard_focus_id(), true));
+    let from = trace.mark();
+    trace.app.account_menu = true;
+    trace.settle("Use another account", 4);
+    let popup = crate::ui::rail::buttons(&trace.ctx)
+        .last()
+        .copied()
+        .expect("the rail's picture")
+        .with("popup");
+    assert!(egui::Popup::is_id_open(&trace.ctx, popup));
+    assert!(
+        trace.last().name.starts_with("MenuItemRadio"),
+        "{}",
+        trace.last().name
+    );
+    trace.assert_clean(from, "the switcher asked for");
+}
+
+/// Tab walks the open chat as it is laid out, top to bottom: from the chat
+/// list to the chat's actions, its messages, the message field and Message
+/// actions, the window's last stop, then wraps to its first, the rail.
+/// Shift+Tab walks back. Each key is heard once.
+#[test]
+fn tab_reaches_the_composer_last() {
+    let mut trace = Trace::new(app());
+    focus_stop(&mut trace, Stop::ChatList);
+    let from = trace.mark();
+    for (modifiers, stops) in [
+        (
+            egui::Modifiers::NONE,
+            [
+                Stop::ChatActions,
+                Stop::Messages,
+                Stop::Composer,
+                Stop::MessageActions,
+                Stop::Rail,
+            ],
+        ),
+        (
+            egui::Modifiers::SHIFT,
+            [
+                Stop::MessageActions,
+                Stop::Composer,
+                Stop::Messages,
+                Stop::ChatActions,
+                Stop::ChatList,
+            ],
+        ),
+    ] {
+        for stop in stops {
+            trace.press("Tab", egui::Key::Tab, modifiers);
+            assert_eq!(
+                trace.last().egui,
+                control(&trace.ctx, stop),
+                "{modifiers:?} to {stop:?}\n{}",
+                trace.dump(from)
+            );
+        }
+    }
+    trace.assert_clean(from, "Tab through the open chat");
+}
+
 /// With the pointer, no keyboard navigation and no screen reader, Escape
 /// lets go of focus as egui always did: a clicked field loses its caret.
 #[test]
@@ -558,7 +762,13 @@ fn escape_with_the_pointer_lets_go_as_before() {
 }
 
 /// Where focus can be with no chat open: Escape and Alt+2 are tried there.
-const NO_CHAT_STOPS: &[Stop] = &[Stop::Search, Stop::ChatList];
+const NO_CHAT_STOPS: &[Stop] = &[
+    Stop::Search,
+    Stop::ChatList,
+    Stop::ChatListActions,
+    Stop::Filters,
+    Stop::Rail,
+];
 
 /// Escape with nothing to close is not heard at all.
 #[test]
@@ -618,7 +828,14 @@ fn a_deleted_current_message_leaves_the_cursor_on_the_next() {
 
 /// Where focus can be when the window goes away, one stop or more in each
 /// section.
-const REFOCUS_STOPS: &[Stop] = &[Stop::Search, Stop::Messages, Stop::Composer, Stop::ChatList];
+const REFOCUS_STOPS: &[Stop] = &[
+    Stop::Search,
+    Stop::Messages,
+    Stop::Composer,
+    Stop::ChatList,
+    Stop::Filters,
+    Stop::ChatActions,
+];
 
 /// Leaving the window and coming back puts the reader where they were, in
 /// any section.
@@ -984,8 +1201,36 @@ fn first_control(trace: &Trace, layer: egui::Id) -> egui::Pos2 {
         .expect("a control on the layer")
 }
 
+/// Chat info, chosen in the chat's toolbar, opens the info panel beside the
+/// chat, whose controls come next in Tab order, and focus stays on the
+/// button; Escape closes the panel, as upstream's own Escape does.
+#[test]
+fn chat_info_opens_the_panel_and_keeps_focus_on_its_button() {
+    let mut trace = Trace::new(app());
+    focus_stop(&mut trace, Stop::ChatActions);
+    let button = trace.last().clone();
+    assert!(button.name.contains("Chat info"), "{}", button.name);
+    let press = tap(&mut trace, "Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    let chat = trace.app.open_chat.clone();
+    assert_eq!(
+        trace.app.info.as_ref().map(|info| info.chat.clone()),
+        chat,
+        "the chat's info panel"
+    );
+    trace.assert_clean(press, "chat info opened");
+    assert_eq!(trace.last().egui, button.egui, "still on Chat info");
+    let from = tap(
+        &mut trace,
+        "Escape",
+        egui::Key::Escape,
+        egui::Modifiers::NONE,
+    );
+    assert!(trace.app.info.is_none());
+    trace.assert_clean(from, "chat info closed");
+}
+
 /// With a screen reader, or any other UIA client, attached, a mouse user
-/// opening and closing the preview with clicks gets upstream's
+/// opening and closing the preview and a dialog with clicks gets upstream's
 /// behaviour: no focus pushed into the overlay, and the caret back in the
 /// message field once it closes.
 #[test]
@@ -1022,6 +1267,26 @@ fn mouse_clicks_keep_upstream_overlay_focus_with_accesskit_on() {
     let close = first_control(&trace, crate::ui::image_preview::modal_id());
     pointer_click(&mut trace, "click Close", close);
     assert!(trace.app.image_preview.is_none(), "the click closes it");
+    assert_eq!(
+        trace.last().egui,
+        Some(crate::ui::conversation::composer_id()),
+        "the caret is back in the message field"
+    );
+
+    let info = control(&trace.ctx, Stop::ChatActions)
+        .and_then(|id| trace.ctx.read_response(id))
+        .expect("Chat info is drawn")
+        .rect
+        .center();
+    pointer_click(&mut trace, "click Chat info", info);
+    assert!(trace.app.info.is_some(), "the click opens the info panel");
+    let close = control(&trace.ctx, Stop::InfoClose)
+        .and_then(|id| trace.ctx.read_response(id))
+        .expect("the panel's Close is drawn")
+        .rect
+        .center();
+    pointer_click(&mut trace, "click Close", close);
+    assert!(trace.app.info.is_none(), "the click closes it");
     assert_eq!(
         trace.last().egui,
         Some(crate::ui::conversation::composer_id()),
@@ -1228,7 +1493,8 @@ fn the_pickers_open_without_a_window_frame() {
     escape_back_to_the_list(&mut trace, &row, "the reaction picker");
 
     let mut trace = Trace::new(app());
-    focus_stop(&mut trace, Stop::Emoji);
+    focus_stop(&mut trace, Stop::MessageActions);
+    trace.press("Right", egui::Key::ArrowRight, egui::Modifiers::NONE);
     assert!(trace.last().name.contains("Emoji"), "{}", trace.last().name);
     let press = tap(&mut trace, "Enter", egui::Key::Enter, egui::Modifiers::NONE);
     assert!(trace.app.picker.is_some());
@@ -1582,10 +1848,16 @@ fn menus_opened_from_the_keys_are_heard_in_the_next_frame() {
 }
 
 /// Escape closes the open chat and puts the reader on its row in the chat
-/// list, from the message field and from the message list alike.
+/// list, from the message field, the message list and the chat's toolbars
+/// alike.
 #[test]
 fn escape_in_an_open_chat_lands_on_its_row() {
-    for stop in [Stop::Composer, Stop::Messages] {
+    for stop in [
+        Stop::Composer,
+        Stop::Messages,
+        Stop::ChatActions,
+        Stop::MessageActions,
+    ] {
         let mut trace = Trace::new(app());
         let chat = trace.app.open_chat.clone().expect("the demo opens a chat");
         focus_stop(&mut trace, stop);
@@ -1864,4 +2136,357 @@ fn home_and_end_reach_the_ends_of_the_message_menu() {
     );
     trace.assert_clean(from, "Home and End in the message menu");
     escape_back_to_the_list(&mut trace, &row, "the message menu");
+}
+
+/// An item of a menu the keys opened from `opener`, taken with Enter after
+/// `downs` presses of Down, opens a dialog in one focus change, and the
+/// dialog's Escape puts the reader back on `opener`.
+fn item_opens_a_dialog(trace: &mut Trace, opener: &Frame, downs: usize, scenario: &str) {
+    for _ in 0..downs {
+        trace.press("Down", egui::Key::ArrowDown, egui::Modifiers::NONE);
+    }
+    let press = tap(trace, "Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    assert!(trace.app.dialog.is_some(), "{scenario} opens a dialog");
+    trace.assert_clean(press, scenario);
+    assert_eq!(
+        trace.frames[press + 1].layer,
+        Some(crate::ui::dialogs::modal_id()),
+        "{scenario}\n{}",
+        trace.dump(press)
+    );
+    let from = tap(trace, "Escape", egui::Key::Escape, egui::Modifiers::NONE);
+    assert!(trace.app.dialog.is_none(), "{scenario}, closed");
+    trace.assert_clean(from, &format!("{scenario}, closed"));
+    assert_eq!(
+        trace.last().egui,
+        opener.egui,
+        "{scenario}: back on the opener\n{}",
+        trace.dump(from)
+    );
+}
+
+/// The chat header's More, reached from the keys: Chat info, then End.
+fn header_more(trace: &mut Trace) -> Frame {
+    focus_stop(trace, Stop::ChatActions);
+    trace.press("End", egui::Key::End, egui::Modifiers::NONE);
+    let more = trace.last().clone();
+    assert_eq!(more.name, "Button \"More\"", "{}", trace.dump(0));
+    more
+}
+
+/// The chat header's More opens its menu from Enter and Space as every
+/// keyboard menu opens, and an item taken from it acts: Info opens the info
+/// panel beside the chat, with the reader back on More in one focus change.
+#[test]
+fn the_chat_headers_menu_opens_from_the_keys_as_the_other_menus_do() {
+    for (step, key) in [("Enter", egui::Key::Enter), ("Space", egui::Key::Space)] {
+        let mut trace = Trace::new(app());
+        let more = header_more(&mut trace);
+        let press = tap(&mut trace, step, key, egui::Modifiers::NONE);
+        walks_like_a_menu(
+            &mut trace,
+            &more,
+            press,
+            "Chat",
+            "MenuItem \"Info\"",
+            &format!("More, {step}"),
+        );
+    }
+    let mut trace = Trace::new(app());
+    let more = header_more(&mut trace);
+    trace.press("Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    tap(&mut trace, "Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    assert!(trace.app.info.is_some(), "More, Info opens the info panel");
+    // Not checked for a clean trace: the panel opening beside the chat lays
+    // the conversation out again under new parent nodes, as it does for
+    // anything focused in the chat.
+    assert_eq!(trace.last().egui, more.egui, "back on More");
+}
+
+/// Offline, the header menu's Clear chat is still reached by the keys, and
+/// says that it is unavailable and why; Enter on it does nothing.
+#[test]
+fn the_chat_headers_clear_chat_says_why_it_is_unavailable() {
+    let mut app = app();
+    app.link = crate::backend::LinkStatus::Connecting;
+    let mut trace = Trace::new(app);
+    header_more(&mut trace);
+    trace.press("Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    walk_to(&mut trace, "Clear chat");
+    let item = trace.last().clone();
+    assert!(
+        item.spoken
+            .contains("Clear chat, unavailable: Connect to WhatsApp to clear the chat"),
+        "{}",
+        item.spoken
+    );
+    assert_eq!(menu_position(&item).0, Some(4), "{}", item.spoken);
+    let press = tap(&mut trace, "Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    assert!(trace.app.dialog.is_none(), "nothing is cleared");
+    trace.assert_unchanged(press, "Enter on Clear chat");
+}
+
+/// A screen reader's own activation of More, an AccessKit action rather
+/// than a key, opens its menu with the reader in it, as the keys do.
+#[test]
+fn a_screen_readers_activation_of_more_puts_the_reader_in_its_menu() {
+    let mut trace = Trace::new(app());
+    let more = header_more(&mut trace);
+    trace
+        .ctx
+        .data_mut(|data| data.insert_temp(crate::theme::keyboard_focus_id(), false));
+    let from = trace.mark();
+    trace.action += 1;
+    trace.frame(
+        "activate More",
+        vec![egui::Event::AccessKitActionRequest(
+            egui::accesskit::ActionRequest {
+                action: egui::accesskit::Action::Click,
+                target_tree: egui::accesskit::TreeId::ROOT,
+                target_node: more.effective,
+                data: None,
+            },
+        )],
+    );
+    trace.settle("activate More", 4);
+    trace.assert_clean(from, "More activated by the screen reader");
+    assert_eq!(
+        trace.last().name,
+        "MenuItem \"Info\"",
+        "{}",
+        trace.dump(from)
+    );
+    let escape = tap(
+        &mut trace,
+        "Escape",
+        egui::Key::Escape,
+        egui::Modifiers::NONE,
+    );
+    trace.assert_clean(escape, "More activated, Escape");
+    assert_eq!(trace.last().egui, more.egui, "back on More");
+}
+
+/// With a screen reader or another UIA client attached, a click on More
+/// opens its menu as upstream does: no focus is pushed into it, and Tab is
+/// not kept in it.
+#[test]
+fn the_chat_headers_menu_opened_with_the_pointer_is_as_before() {
+    let mut trace = Trace::new(app());
+    focus_stop(&mut trace, Stop::Composer);
+    let more =
+        *crate::ui::toolbar::buttons(&trace.ctx, crate::ui::conversation::header_toolbar_id())
+            .last()
+            .expect("More is drawn");
+    let at = trace
+        .ctx
+        .read_response(more)
+        .expect("More is drawn")
+        .rect
+        .center();
+    pointer_click(&mut trace, "click More", at);
+    let popup = more.with("popup");
+    assert!(
+        egui::Popup::is_id_open(&trace.ctx, popup),
+        "the click opens it"
+    );
+    assert_ne!(trace.last().layer, Some(popup), "no focus pushed into it");
+    assert_eq!(
+        trace.ctx.memory(|memory| memory.top_modal_layer()),
+        None,
+        "Tab is not kept in it"
+    );
+}
+
+/// Presses `key` until the reader is on a control whose name contains
+/// `label`, and returns that frame.
+fn move_to(trace: &mut Trace, key: egui::Key, label: &str) -> Frame {
+    for _ in 0..60 {
+        if trace.last().name.contains(label) {
+            return trace.last().clone();
+        }
+        trace.press(key.name(), key, egui::Modifiers::NONE);
+    }
+    panic!("no control {label}\n{}", trace.dump(trace.mark() - 1));
+}
+
+/// The commands the app sent since the last call.
+fn sent(
+    inbox: &mut tokio::sync::mpsc::UnboundedReceiver<crate::backend::Command>,
+) -> Vec<crate::backend::Command> {
+    std::iter::from_fn(|| inbox.try_recv().ok()).collect()
+}
+
+/// The composer's plus, Attach, reached from the keys.
+fn attach(trace: &mut Trace) -> Frame {
+    focus_stop(trace, Stop::MessageActions);
+    let plus = trace.last().clone();
+    assert!(plus.name.contains("Attach"), "{}", plus.name);
+    plus
+}
+
+/// The composer's plus opens its menu from the keys as every keyboard menu
+/// opens, though it keeps its open state in the app rather than in egui:
+/// Escape closes the menu, not the chat. Create poll opens its dialog,
+/// whose Escape puts the reader back on the plus, and Send files asks for
+/// the files with the reader back on the plus.
+#[test]
+fn the_composers_attach_menu_opens_from_the_keys_as_the_other_menus_do() {
+    let mut trace = Trace::new(app());
+    let plus = attach(&mut trace);
+    let press = tap(&mut trace, "Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    walks_like_a_menu(
+        &mut trace,
+        &plus,
+        press,
+        "Attach",
+        "MenuItem \"Send files\"",
+        "Attach",
+    );
+    assert!(!trace.app.composer_tools_open, "Escape closes the menu");
+    assert!(trace.app.open_chat.is_some(), "and not the chat");
+    trace.press("Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    item_opens_a_dialog(&mut trace, &plus, 3, "Attach, Create poll");
+    assert!(!trace.app.composer_tools_open);
+
+    let mut trace = Trace::new(app());
+    let (backend, mut inbox) = crate::backend::Backend::recording();
+    trace.app.backend = backend;
+    let plus = attach(&mut trace);
+    trace.press("Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    let from = tap(&mut trace, "Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    trace.assert_clean(from, "Attach, Send files");
+    assert!(
+        sent(&mut inbox)
+            .iter()
+            .any(|command| matches!(command, crate::backend::Command::PickFiles { .. })),
+        "Send files asks for the files"
+    );
+    assert!(!trace.app.composer_tools_open);
+    assert_eq!(trace.last().egui, plus.egui, "back on the plus");
+}
+
+/// With a screen reader attached, a click on the plus opens its menu as
+/// upstream does: kept in the app only, with no focus pushed into it.
+#[test]
+fn the_composers_attach_menu_opened_with_the_pointer_is_as_before() {
+    let mut trace = Trace::new(app());
+    focus_stop(&mut trace, Stop::Composer);
+    let plus = control(&trace.ctx, Stop::MessageActions).expect("the plus is drawn");
+    let at = trace
+        .ctx
+        .read_response(plus)
+        .expect("the plus is drawn")
+        .rect
+        .center();
+    pointer_click(&mut trace, "click Attach", at);
+    assert!(trace.app.composer_tools_open, "the click opens it");
+    let popup = plus.with("composer-tools");
+    assert!(
+        !egui::Popup::is_id_open(&trace.ctx, popup),
+        "its open state stays in the app"
+    );
+    assert_ne!(trace.last().layer, Some(popup), "no focus pushed into it");
+    assert_eq!(trace.ctx.memory(|memory| memory.top_modal_layer()), None);
+}
+
+/// The group photo in a group's info panel opens its menu from the keys as
+/// every keyboard menu opens; Escape closes the menu and leaves the panel open,
+/// and Change photo asks for the picture with the reader back on the photo.
+#[test]
+fn the_group_photos_menu_opens_from_the_keys_as_the_other_menus_do() {
+    let mut app = app();
+    super::apply_flags(&mut app, Some("group-info"));
+    let mut trace = Trace::new(app);
+    let (backend, mut inbox) = crate::backend::Backend::recording();
+    trace.app.backend = backend;
+    let photo = move_to(&mut trace, egui::Key::Tab, "Change group photo");
+    let press = tap(&mut trace, "Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    walks_like_a_menu(
+        &mut trace,
+        &photo,
+        press,
+        "Change group photo",
+        "MenuItem \"Change photo\"",
+        "the group photo",
+    );
+    assert!(
+        trace.app.info.is_some(),
+        "Escape leaves the info panel open"
+    );
+    trace.press("Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    let from = tap(&mut trace, "Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    trace.assert_clean(from, "the group photo, Change photo");
+    assert!(
+        sent(&mut inbox)
+            .iter()
+            .any(|command| matches!(command, crate::backend::Command::PickGroupPicture(_))),
+        "Change photo asks for the picture"
+    );
+    assert_eq!(trace.last().egui, photo.egui, "back on the photo");
+}
+
+/// The account switcher, reached and opened from the keys, walks as every
+/// keyboard menu does.
+#[test]
+fn the_account_switcher_walks_like_the_other_menus() {
+    let mut trace = Trace::new(app_with_two_accounts());
+    let switcher = crate::ui::rail::buttons(&trace.ctx)
+        .last()
+        .copied()
+        .expect("the rail's picture");
+    trace
+        .ctx
+        .data_mut(|data| data.insert_temp(crate::theme::keyboard_focus_id(), true));
+    trace
+        .ctx
+        .memory_mut(|memory| memory.request_focus(switcher));
+    trace.settle("focus", 3);
+    let opener = trace.last().clone();
+    let press = tap(&mut trace, "Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    walks_like_a_menu(
+        &mut trace,
+        &opener,
+        press,
+        "Switch account",
+        "MenuItemRadio",
+        "the account switcher",
+    );
+}
+
+/// A screen reader's own activation of the account switcher opens it with
+/// the reader in it, as the keys do.
+#[test]
+fn a_screen_readers_activation_of_the_switcher_puts_the_reader_in_it() {
+    let mut trace = Trace::new(app_with_two_accounts());
+    let switcher = crate::ui::rail::buttons(&trace.ctx)
+        .last()
+        .copied()
+        .expect("the rail's picture");
+    trace
+        .ctx
+        .memory_mut(|memory| memory.request_focus(switcher));
+    trace.settle("focus", 3);
+    trace
+        .ctx
+        .data_mut(|data| data.insert_temp(crate::theme::keyboard_focus_id(), false));
+    let from = trace.mark();
+    trace.action += 1;
+    trace.frame(
+        "activate the switcher",
+        vec![egui::Event::AccessKitActionRequest(
+            egui::accesskit::ActionRequest {
+                action: egui::accesskit::Action::Click,
+                target_tree: egui::accesskit::TreeId::ROOT,
+                target_node: switcher.accesskit_id(),
+                data: None,
+            },
+        )],
+    );
+    trace.settle("activate the switcher", 4);
+    trace.assert_clean(from, "the switcher activated by the screen reader");
+    assert!(
+        trace.last().name.starts_with("MenuItemRadio"),
+        "{}",
+        trace.dump(from)
+    );
 }

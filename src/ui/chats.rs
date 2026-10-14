@@ -10,6 +10,7 @@ use crate::theme::{self, Icon, Palette};
 use super::conversation;
 use super::focus::{Stop, TabStop};
 use super::labels;
+use super::toolbar::{ToolbarButton, toolbar};
 use super::widgets;
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
@@ -175,72 +176,83 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                     // The title measures its room from the buttons and the
                     // caption buttons' room after them.
                     let buttons_width = header_buttons_width(ui, &buttons) + room.right;
-                    if app.page == Page::Calls && app.new_call {
-                        new_call_header(app, ui, 20.0, buttons_width);
-                    } else if app.page != Page::Calls && app.show_starred {
-                        if theme::icon_button(
-                            ui,
-                            Icon::ArrowLeft,
-                            18.0,
-                            palette.secondary,
-                            palette.text,
-                            "Back to chats",
-                        )
-                        .tab_stop(Stop::Back)
-                        .clicked()
-                        {
-                            app.actions.push(Action::ToggleStarred);
-                        }
-                        header_title(
-                            ui,
-                            crate::i18n::gettext(app.locale, "Starred").as_ref(),
-                            theme::bold(20.0),
-                            palette.text,
-                            buttons_width,
-                        );
-                    } else if app.page != Page::Calls && (app.show_archived || app.locked_folder) {
-                        if theme::icon_button(
-                            ui,
-                            Icon::ArrowLeft,
-                            18.0,
-                            palette.secondary,
-                            palette.text,
-                            "Back to chats",
-                        )
-                        .tab_stop(Stop::Back)
-                        .clicked()
-                        {
-                            app.show_archived = false;
-                            if app.locked_folder {
-                                app.actions.push(Action::CloseLockedFolder);
-                            }
-                        }
-                        header_title(
-                            ui,
-                            if app.locked_folder {
-                                "Locked chats"
+                    let label = crate::i18n::gettext(app.locale, "Chat list actions");
+                    toolbar(
+                        ui,
+                        header_toolbar_id(),
+                        &label,
+                        Stop::ChatListActions,
+                        |ui| {
+                            if app.page == Page::Calls && app.new_call {
+                                new_call_header(app, ui, 20.0, buttons_width);
+                            } else if app.page != Page::Calls && app.show_starred {
+                                if theme::icon_button(
+                                    ui,
+                                    Icon::ArrowLeft,
+                                    18.0,
+                                    palette.secondary,
+                                    palette.text,
+                                    "Back to chats",
+                                )
+                                .in_toolbar(header_toolbar_id())
+                                .clicked()
+                                {
+                                    app.actions.push(Action::ToggleStarred);
+                                }
+                                header_title(
+                                    ui,
+                                    crate::i18n::gettext(app.locale, "Starred").as_ref(),
+                                    theme::bold(20.0),
+                                    palette.text,
+                                    buttons_width,
+                                );
+                            } else if app.page != Page::Calls
+                                && (app.show_archived || app.locked_folder)
+                            {
+                                if theme::icon_button(
+                                    ui,
+                                    Icon::ArrowLeft,
+                                    18.0,
+                                    palette.secondary,
+                                    palette.text,
+                                    "Back to chats",
+                                )
+                                .in_toolbar(header_toolbar_id())
+                                .clicked()
+                                {
+                                    app.show_archived = false;
+                                    if app.locked_folder {
+                                        app.actions.push(Action::CloseLockedFolder);
+                                    }
+                                }
+                                header_title(
+                                    ui,
+                                    if app.locked_folder {
+                                        "Locked chats"
+                                    } else {
+                                        "Archived"
+                                    },
+                                    theme::bold(20.0),
+                                    palette.text,
+                                    buttons_width,
+                                );
                             } else {
-                                "Archived"
-                            },
-                            theme::bold(20.0),
-                            palette.text,
-                            buttons_width,
-                        );
-                    } else {
-                        // Our avatar and the account switcher are in the
-                        // rail beside the list.
-                        header_title(
-                            ui,
-                            &crate::i18n::gettext(app.locale, tab_title(&app.page)),
-                            theme::bold(20.0),
-                            palette.text,
-                            buttons_width,
-                        );
-                    }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.add_space(room.right);
-                        header_button_row(app, ui, &buttons, false);
-                    });
+                                // Our avatar and the account switcher are in the
+                                // rail beside the list.
+                                header_title(
+                                    ui,
+                                    &crate::i18n::gettext(app.locale, tab_title(&app.page)),
+                                    theme::bold(20.0),
+                                    palette.text,
+                                    buttons_width,
+                                );
+                            }
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.add_space(room.right);
+                                header_button_row(app, ui, &buttons, false);
+                            });
+                        },
+                    );
                 },
             );
             ui.ctx()
@@ -272,7 +284,7 @@ fn new_call_header(app: &mut App, ui: &mut egui::Ui, title: f32, buttons: f32) {
         palette.text,
         crate::i18n::gettext(app.locale, "Back to the calls").as_ref(),
     )
-    .tab_stop(Stop::Back)
+    .in_toolbar(header_toolbar_id())
     .clicked()
     {
         app.actions.push(Action::ShowNewCall(false));
@@ -401,7 +413,7 @@ fn header_button_row(app: &mut App, ui: &mut egui::Ui, buttons: &[HeaderButton],
                     palette.text,
                     if macos { "New chat (⌘N)" } else { "New chat" },
                 )
-                .tab_stop(Stop::NewChat)
+                .in_toolbar(header_toolbar_id())
                 .clicked()
                 {
                     app.actions.push(Action::ShowDialog(Dialog::NewChat));
@@ -416,7 +428,7 @@ fn header_button_row(app: &mut App, ui: &mut egui::Ui, buttons: &[HeaderButton],
                     palette.text,
                     crate::i18n::gettext(app.locale, "New call").as_ref(),
                 )
-                .tab_stop(Stop::NewChat)
+                .in_toolbar(header_toolbar_id())
                 .clicked()
                 {
                     app.actions.push(Action::ShowNewCall(true));
@@ -435,7 +447,7 @@ fn header_button_row(app: &mut App, ui: &mut egui::Ui, buttons: &[HeaderButton],
                         "Hide the chat list (Ctrl+B)"
                     },
                 )
-                .tab_stop(Stop::Sidebar)
+                .in_toolbar(header_toolbar_id())
                 .clicked()
                 {
                     app.actions.push(Action::ToggleSidebar);
@@ -495,6 +507,17 @@ pub(crate) fn header_row_id() -> egui::Id {
     egui::Id::new("chat-list-header-row")
 }
 
+/// The chat list header's toolbar: profile (or Back), hide the list, New
+/// chat and Settings.
+pub(crate) fn header_toolbar_id() -> egui::Id {
+    egui::Id::new("chat-list-actions")
+}
+
+/// The filter chips' toolbar, the label chips' row included.
+pub(crate) fn filters_toolbar_id() -> egui::Id {
+    egui::Id::new("chat-filters-toolbar")
+}
+
 fn macos_header(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     // The traffic lights sit over the rail and the start of this header.
@@ -509,71 +532,82 @@ fn macos_header(app: &mut App, ui: &mut egui::Ui) {
                 // The traffic lights reach past the rail over this header.
                 ui.add_space(super::rail::lights_overhang(ui.ctx()));
                 let buttons = list_header_buttons(app, ui.ctx());
-                if app.page == Page::Calls && app.new_call {
-                    new_call_header(app, ui, 16.0, header_buttons_width(ui, &buttons));
-                } else if app.page != Page::Calls && app.show_starred {
-                    if theme::icon_button(
-                        ui,
-                        Icon::ArrowLeft,
-                        18.0,
-                        palette.secondary,
-                        palette.text,
-                        "Back to chats",
-                    )
-                    .tab_stop(Stop::Back)
-                    .clicked()
-                    {
-                        app.actions.push(Action::ToggleStarred);
-                    }
-                    header_title(
-                        ui,
-                        crate::i18n::gettext(app.locale, "Starred").as_ref(),
-                        theme::bold(16.0),
-                        palette.text,
-                        header_buttons_width(ui, &buttons),
-                    );
-                } else if app.page != Page::Calls && (app.show_archived || app.locked_folder) {
-                    if theme::icon_button(
-                        ui,
-                        Icon::ArrowLeft,
-                        18.0,
-                        palette.secondary,
-                        palette.text,
-                        "Back to chats",
-                    )
-                    .tab_stop(Stop::Back)
-                    .clicked()
-                    {
-                        app.show_archived = false;
-                        if app.locked_folder {
-                            app.actions.push(Action::CloseLockedFolder);
-                        }
-                    }
-                    header_title(
-                        ui,
-                        if app.locked_folder {
-                            "Locked chats"
+                let label = crate::i18n::gettext(app.locale, "Chat list actions");
+                toolbar(
+                    ui,
+                    header_toolbar_id(),
+                    &label,
+                    Stop::ChatListActions,
+                    |ui| {
+                        if app.page == Page::Calls && app.new_call {
+                            new_call_header(app, ui, 16.0, header_buttons_width(ui, &buttons));
+                        } else if app.page != Page::Calls && app.show_starred {
+                            if theme::icon_button(
+                                ui,
+                                Icon::ArrowLeft,
+                                18.0,
+                                palette.secondary,
+                                palette.text,
+                                "Back to chats",
+                            )
+                            .in_toolbar(header_toolbar_id())
+                            .clicked()
+                            {
+                                app.actions.push(Action::ToggleStarred);
+                            }
+                            header_title(
+                                ui,
+                                crate::i18n::gettext(app.locale, "Starred").as_ref(),
+                                theme::bold(16.0),
+                                palette.text,
+                                header_buttons_width(ui, &buttons),
+                            );
+                        } else if app.page != Page::Calls
+                            && (app.show_archived || app.locked_folder)
+                        {
+                            if theme::icon_button(
+                                ui,
+                                Icon::ArrowLeft,
+                                18.0,
+                                palette.secondary,
+                                palette.text,
+                                "Back to chats",
+                            )
+                            .in_toolbar(header_toolbar_id())
+                            .clicked()
+                            {
+                                app.show_archived = false;
+                                if app.locked_folder {
+                                    app.actions.push(Action::CloseLockedFolder);
+                                }
+                            }
+                            header_title(
+                                ui,
+                                if app.locked_folder {
+                                    "Locked chats"
+                                } else {
+                                    "Archived"
+                                },
+                                theme::bold(16.0),
+                                palette.text,
+                                header_buttons_width(ui, &buttons),
+                            );
                         } else {
-                            "Archived"
-                        },
-                        theme::bold(16.0),
-                        palette.text,
-                        header_buttons_width(ui, &buttons),
-                    );
-                } else {
-                    // Our avatar and the account switcher are in the rail,
-                    // under the traffic lights.
-                    header_title(
-                        ui,
-                        &crate::i18n::gettext(app.locale, tab_title(&app.page)),
-                        theme::bold(20.0),
-                        palette.text,
-                        header_buttons_width(ui, &buttons),
-                    );
-                }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    header_button_row(app, ui, &buttons, true);
-                });
+                            // Our avatar and the account switcher are in the rail,
+                            // under the traffic lights.
+                            header_title(
+                                ui,
+                                &crate::i18n::gettext(app.locale, tab_title(&app.page)),
+                                theme::bold(20.0),
+                                palette.text,
+                                header_buttons_width(ui, &buttons),
+                            );
+                        }
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            header_button_row(app, ui, &buttons, true);
+                        });
+                    },
+                );
             });
             ui.ctx()
                 .data_mut(|data| data.insert_temp(header_row_id(), row.response.rect));
@@ -842,78 +876,75 @@ fn filter_chips(app: &mut App, ui: &mut egui::Ui) {
     }
     let palette = app.palette;
     ui.add_space(8.0);
-    let output = widgets::chip_scroll_row(ui, "chat-filters", |ui| {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing = vec2(4.0, 6.0);
-            for filter in ChatFilter::EVERY {
-                let count = match filter {
-                    ChatFilter::All => 0,
-                    _ => app.unread_chats(filter),
-                };
-                let selected = !app.locked_folder_open()
-                    && !app.show_archived
-                    && app.label_filter.is_none()
-                    && app.chat_filter == filter;
-                let chip = widgets::filter_chip(
-                    ui,
-                    &palette,
-                    filter.label(app.locale).as_ref(),
-                    count,
-                    selected,
-                )
-                .tab_stop(match filter {
-                    ChatFilter::All => Stop::All,
-                    ChatFilter::Unread => Stop::Unread,
-                    ChatFilter::Private => Stop::Private,
-                    ChatFilter::Favorites => Stop::Favorites,
-                    ChatFilter::Groups => Stop::Groups,
-                    ChatFilter::Channels => Stop::Channels,
-                });
-                // Store the chip rect for interaction tests.
-                ui.ctx()
-                    .data_mut(|data| data.insert_temp(filter_chip_id(filter), chip.rect));
-                let chip = if filter == ChatFilter::Channels {
-                    let now = crate::util::now();
-                    let all_muted = app
-                        .chats
-                        .iter()
-                        .filter(|chat| chat.is_channel())
-                        .all(|chat| chat.muted(now));
-                    chip.context_menu(|ui| {
-                        let (icon, label) = if all_muted {
-                            (Icon::Bell, "Unmute all channels")
-                        } else {
-                            (Icon::BellOff, "Mute all channels")
-                        };
-                        if widgets::menu_item(ui, &palette, Some(icon), label) {
-                            app.actions.push(Action::MuteAllChannels(!all_muted));
-                            ui.close();
-                        }
-                    });
-                    chip
-                } else {
-                    chip
-                };
-                if chip.clicked() {
-                    // A second click on the active chip returns to every chat.
-                    let next = if selected { ChatFilter::All } else { filter };
-                    app.actions.push(Action::SetChatFilter(next));
+    // One toolbar for the filter chips and the label chips under them.
+    let label = crate::i18n::gettext(app.locale, "Filters");
+    toolbar(ui, filters_toolbar_id(), &label, Stop::Filters, |ui| {
+        let output = widgets::chip_scroll_row(ui, "chat-filters", |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing = vec2(4.0, 6.0);
+                for filter in ChatFilter::EVERY {
+                    let count = match filter {
+                        ChatFilter::All => 0,
+                        _ => app.unread_chats(filter),
+                    };
+                    let selected = !app.locked_folder_open()
+                        && !app.show_archived
+                        && app.label_filter.is_none()
+                        && app.chat_filter == filter;
+                    let chip = widgets::filter_chip(
+                        ui,
+                        &palette,
+                        filter.label(app.locale).as_ref(),
+                        count,
+                        selected,
+                    )
+                    .in_toolbar(filters_toolbar_id());
+                    // Store the chip rect for interaction tests.
+                    ui.ctx()
+                        .data_mut(|data| data.insert_temp(filter_chip_id(filter), chip.rect));
+                    let chip = if filter == ChatFilter::Channels {
+                        let now = crate::util::now();
+                        let all_muted = app
+                            .chats
+                            .iter()
+                            .filter(|chat| chat.is_channel())
+                            .all(|chat| chat.muted(now));
+                        chip.context_menu(|ui| {
+                            let (icon, label) = if all_muted {
+                                (Icon::Bell, "Unmute all channels")
+                            } else {
+                                (Icon::BellOff, "Mute all channels")
+                            };
+                            if widgets::menu_item(ui, &palette, Some(icon), label) {
+                                app.actions.push(Action::MuteAllChannels(!all_muted));
+                                ui.close();
+                            }
+                        });
+                        chip
+                    } else {
+                        chip
+                    };
+                    if chip.clicked() {
+                        // A second click on the active chip returns to every chat.
+                        let next = if selected { ChatFilter::All } else { filter };
+                        app.actions.push(Action::SetChatFilter(next));
+                    }
                 }
+                ui.add_space(4.0);
+            })
+        });
+        // Chips cut off at the edge fade into the panel, which says the row
+        // scrolls on.
+        let hidden = output.content_size.x - output.state.offset.x - output.inner_rect.width();
+        if hidden > 0.5 {
+            // A translucent sidebar would show the fade as a band; the chips
+            // are only cut there.
+            if !palette.vibrant() {
+                widgets::fade_right(ui, output.inner_rect, CHIP_FADE, palette.panel);
             }
-            ui.add_space(4.0);
-        })
-    });
-    // Chips cut off at the edge fade into the panel, which says the row
-    // scrolls on.
-    let hidden = output.content_size.x - output.state.offset.x - output.inner_rect.width();
-    if hidden > 0.5 {
-        // A translucent sidebar would show the fade as a band; the chips
-        // are only cut there.
-        if !palette.vibrant() {
-            widgets::fade_right(ui, output.inner_rect, CHIP_FADE, palette.panel);
         }
-    }
-    labels::chip_row(app, ui, &palette);
+        labels::chip_row(app, ui, &palette);
+    });
 }
 
 /// Stable id for a starred row, so its menu can be addressed by the demo,

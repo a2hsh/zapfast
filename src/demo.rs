@@ -4848,9 +4848,10 @@ mod tests {
 
     /// Phone numbers are not Tab stops: Tab from the message list goes round
     /// the main view, through the message input, back to the list without
-    /// landing on one, and the message input's side goes from Emoji straight
-    /// to the chat search. Like the links of a text, a number has no node
-    /// of its own in the accessibility tree and takes no focus.
+    /// landing on one, and goes from the list straight to the message input,
+    /// where the numbers' stops used to come between them. Like the links of
+    /// a text, a number has no node of its own in the accessibility tree and
+    /// takes no focus.
     #[test]
     fn phone_numbers_are_neither_tab_stops_nor_nodes() {
         let mut on = app_on_attachment(Content::text(PHONE_FIXTURE));
@@ -4882,14 +4883,11 @@ mod tests {
                 .any(|focused| phones.contains(focused)),
             "Tab stopped on a phone number: {visited:?}"
         );
-        let emoji = crate::ui::focus::control(&on.ctx, crate::ui::focus::Stop::Emoji).unwrap();
-        let search =
-            crate::ui::focus::control(&on.ctx, crate::ui::focus::Stop::ChatSearch).unwrap();
-        on.ctx.memory_mut(|memory| memory.request_focus(emoji));
+        on.ctx.memory_mut(|memory| memory.request_focus(list));
         press_key(&mut on.app, &on.ctx, egui::Key::Tab, egui::Modifiers::NONE);
-        assert_eq!(on.ctx.memory(|memory| memory.focused()), Some(search));
+        assert_eq!(on.ctx.memory(|memory| memory.focused()), Some(composer));
         press_key(&mut on.app, &on.ctx, egui::Key::Tab, egui::Modifiers::SHIFT);
-        assert_eq!(on.ctx.memory(|memory| memory.focused()), Some(emoji));
+        assert_eq!(on.ctx.memory(|memory| memory.focused()), Some(list));
 
         on.ctx.enable_accesskit();
         let mut output = on.ctx.run_ui(
@@ -7286,9 +7284,9 @@ mod tests {
         use crate::ui::calls;
         let (mut app, ctx) = calls_page("calls");
         let list = calls::history_list_id();
-        let missed = crate::ui::focus::control(&ctx, crate::ui::focus::Stop::Missed)
-            .expect("the Missed chip");
-        ctx.memory_mut(|memory| memory.request_focus(missed));
+        let chips = crate::ui::focus::control(&ctx, crate::ui::focus::Stop::Filters)
+            .expect("the chips' toolbar");
+        ctx.memory_mut(|memory| memory.request_focus(chips));
         render(&mut app, &ctx);
         press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
         assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
@@ -18103,7 +18101,6 @@ mod tests {
     /// landing back on the chat that was open. No close button is added.
     #[test]
     fn a_second_click_on_the_settings_button_closes_settings() {
-        use crate::ui::focus::Stop;
         let mut app = app();
         let ctx = egui::Context::default();
         app.attach(&ctx);
@@ -18127,11 +18124,7 @@ mod tests {
             return;
         }
         let gear = |ctx: &egui::Context| {
-            let id = crate::ui::focus::stops(ctx)
-                .into_iter()
-                .find(|(stop, _)| *stop == Stop::Settings)
-                .map(|(_, id)| id)
-                .expect("the settings button is drawn");
+            let id = crate::ui::rail::destination_id(crate::ui::rail::Destination::Settings);
             ctx.read_response(id).expect("it publishes its rect").rect
         };
         let click = |app: &mut App, ctx: &egui::Context, rect: egui::Rect| {
@@ -21854,9 +21847,18 @@ mod tests {
             ),
             Some(text.layer_id)
         );
+        // Tab reaches the composer's toolbar; record is its last button.
         frame_sized(&mut app, &ctx, 780.0, tab());
         frame_sized(&mut app, &ctx, 780.0, Vec::new());
+        frame_sized(
+            &mut app,
+            &ctx,
+            780.0,
+            vec![key(egui::Key::End, egui::Modifiers::NONE)],
+        );
+        frame_sized(&mut app, &ctx, 780.0, Vec::new());
         let focused = ctx.memory(|memory| memory.focused()).unwrap();
+        assert_eq!(composer_buttons(&ctx).last(), Some(&focused));
         let record = ctx
             .data(|data| data.get_temp::<crate::theme::FocusOutline>(focused.with("focus-outline")))
             .unwrap();
@@ -21964,11 +21966,25 @@ mod tests {
         render(&mut app, &ctx);
         let bubble = crate::ui::conversation::bubble_id(&group, "plain-group-message");
         assert!(!ctx.read_response(bubble).unwrap().sense.is_focusable());
-        for _ in 0..2 {
-            frame_sized(&mut app, &ctx, 780.0, tab());
-            render(&mut app, &ctx);
-        }
-        assert_eq!(focused_stop(&ctx), Some(crate::ui::focus::Stop::Attach));
+        let buttons =
+            crate::ui::toolbar::buttons(&ctx, crate::ui::conversation::composer_toolbar_id());
+        frame_sized(&mut app, &ctx, 780.0, tab());
+        render(&mut app, &ctx);
+        assert_eq!(
+            focused_stop(&ctx),
+            Some(crate::ui::focus::Stop::MessageActions)
+        );
+        // Record is the toolbar's last button, and the composer the window's
+        // last stop; Tab from it wraps to the rail at the window's top left,
+        // not a sender or a message.
+        press_key(&mut app, &ctx, egui::Key::End, egui::Modifiers::NONE);
+        assert_eq!(focused(&ctx), buttons.last().copied());
+        frame_sized(&mut app, &ctx, 780.0, tab());
+        render(&mut app, &ctx);
+        assert_eq!(focused_stop(&ctx), Some(crate::ui::focus::Stop::Rail));
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::SHIFT);
+        press_key(&mut app, &ctx, egui::Key::Home, egui::Modifiers::NONE);
+        assert_eq!(focused(&ctx), buttons.first().copied(), "on the plus");
         assert!(ring(&ctx).is_some());
         frame_with(
             &mut app,
@@ -21994,7 +22010,6 @@ mod tests {
     /// it low, since descenders reach further down than accents rise.
     #[test]
     fn the_composers_text_centres_on_its_controls_at_every_scale() {
-        use crate::ui::focus::Stop;
         const DRAFT: &str = "Hy";
         for scale in [1.0_f32, 1.25, 1.333_333, 1.5, 2.0] {
             let mut app = app();
@@ -22024,11 +22039,7 @@ mod tests {
                 shapes = output.shapes;
             }
             assert!((ctx.pixels_per_point() - scale).abs() < 1e-4);
-            let id = crate::ui::focus::stops(&ctx)
-                .into_iter()
-                .find(|(found, _)| *found == Stop::Attach)
-                .map(|(_, id)| id)
-                .expect("the plus is drawn");
+            let id = *composer_buttons(&ctx).first().expect("the plus is drawn");
             let control = ctx.read_response(id).unwrap().rect.center().y;
             let mut ink: Option<(f32, f32)> = None;
             let mut stack: Vec<&egui::Shape> =
@@ -22258,7 +22269,6 @@ mod tests {
     /// emoji as the emoji is to the plus, not a field's width away.
     #[test]
     fn the_composers_text_follows_the_emoji_button_closely() {
-        use crate::ui::focus::Stop;
         for draft in ["", "A synthetic draft"] {
             let mut app = app();
             app.composer = draft.into();
@@ -22267,10 +22277,9 @@ mod tests {
             for _ in 0..4 {
                 frame_sized(&mut app, &ctx, 780.0, Vec::new());
             }
-            let emoji = crate::ui::focus::stops(&ctx)
-                .into_iter()
-                .find(|(found, _)| *found == Stop::Emoji)
-                .and_then(|(_, id)| ctx.read_response(id))
+            let emoji = composer_buttons(&ctx)
+                .get(1)
+                .and_then(|id| ctx.read_response(*id))
                 .expect("the emoji button is drawn")
                 .rect;
             let text = ctx
@@ -22290,13 +22299,13 @@ mod tests {
     /// last line.
     #[test]
     fn composer_controls_share_the_fields_vertical_centre() {
-        use crate::ui::focus::Stop;
-        let centre = |ctx: &egui::Context, stop: Stop| {
-            let id = crate::ui::focus::stops(ctx)
-                .into_iter()
-                .find(|(found, _)| *found == stop)
-                .map(|(_, id)| id)
-                .unwrap_or_else(|| panic!("{stop:?} is drawn"));
+        const CONTROLS: [&str; 3] = ["plus", "emoji", "send"];
+        // The composer toolbar's buttons: plus, emoji, then send or record.
+        let centre = |ctx: &egui::Context, index: usize| {
+            let id = composer_buttons(ctx)
+                .get(index)
+                .copied()
+                .unwrap_or_else(|| panic!("{} is drawn", CONTROLS[index]));
             ctx.read_response(id).unwrap().rect.center().y
         };
         let measure = |app: &mut App, ctx: &egui::Context| {
@@ -22312,11 +22321,7 @@ mod tests {
                 .read_response(egui::Id::new("composer-text"))
                 .unwrap()
                 .rect;
-            (
-                pill,
-                text,
-                [Stop::Attach, Stop::Emoji, Stop::Send].map(|stop| centre(ctx, stop)),
-            )
+            (pill, text, [0, 1, 2].map(|index| centre(ctx, index)))
         };
         for (draft, hints) in [("", false), ("A synthetic draft", false), ("", true)] {
             let mut app = app();
@@ -22333,10 +22338,10 @@ mod tests {
                 pill.contains_rect(text),
                 "text {text:?} leaves the field {pill:?}"
             );
-            for (stop, y) in [Stop::Attach, Stop::Emoji, Stop::Send].iter().zip(controls) {
+            for (control, y) in CONTROLS.iter().zip(controls) {
                 assert!(
                     (y - middle).abs() <= 1.0,
-                    "{stop:?} {y} vs field {middle} ({draft:?})"
+                    "{control} {y} vs field {middle} ({draft:?})"
                 );
             }
         }
@@ -22353,10 +22358,10 @@ mod tests {
         let last = text.bottom() - line / 2.0;
         // The last line's ink centres on the controls, which puts its line box
         // up to a couple of points higher (Inter's box is roomier above).
-        for (stop, y) in [Stop::Attach, Stop::Emoji, Stop::Send].iter().zip(controls) {
+        for (control, y) in CONTROLS.iter().zip(controls) {
             assert!(
                 (0.0..=2.5).contains(&(y - last)),
-                "{stop:?} {y} vs last line {last}"
+                "{control} {y} vs last line {last}"
             );
         }
     }
@@ -22448,12 +22453,11 @@ mod tests {
         let pill = ctx
             .data(|data| data.get_temp::<egui::Rect>(crate::ui::conversation::composer_pill_id()))
             .expect("the composer is drawn");
-        let id = crate::ui::focus::stops(&ctx)
-            .into_iter()
-            .find(|(stop, _)| *stop == crate::ui::focus::Stop::Send)
-            .map(|(_, id)| id)
-            .expect("send is drawn");
-        let send = ctx.read_response(id).unwrap().rect;
+        // The composer toolbar: plus, emoji, send.
+        let buttons = composer_buttons(&ctx);
+        assert_eq!(buttons.len(), 3, "plus, emoji and send are drawn");
+        let rect = |index: usize| ctx.read_response(buttons[index]).unwrap().rect;
+        let send = rect(2);
         let right = pill.right() - send.right();
         let bottom = pill.bottom() - send.bottom();
         assert!(
@@ -22461,16 +22465,8 @@ mod tests {
             "send is {right} from the right and {bottom} from the bottom"
         );
         // The plus mirrors it in the left end, and emoji stays close by.
-        let rect = |stop| {
-            let id = crate::ui::focus::stops(&ctx)
-                .into_iter()
-                .find(|(found, _)| *found == stop)
-                .map(|(_, id)| id)
-                .unwrap_or_else(|| panic!("{stop:?} is drawn"));
-            ctx.read_response(id).unwrap().rect
-        };
-        let plus = rect(crate::ui::focus::Stop::Attach);
-        let emoji = rect(crate::ui::focus::Stop::Emoji);
+        let plus = rect(0);
+        let emoji = rect(1);
         let left = plus.center().x - pill.left();
         let right = pill.right() - send.center().x;
         assert!(
@@ -22518,11 +22514,9 @@ mod tests {
             render(app, ctx);
         };
         let plus = |ctx: &egui::Context| {
-            let id = crate::ui::focus::stops(ctx)
-                .into_iter()
-                .find(|(stop, _)| *stop == crate::ui::focus::Stop::Attach)
-                .map(|(_, id)| id)
-                .expect("the plus button is a tab stop");
+            let id = *composer_buttons(ctx)
+                .first()
+                .expect("the plus button is drawn");
             (id, ctx.read_response(id).unwrap().rect.center())
         };
         // Row 0 sends files, row 1 documents, row 2 sends a location, row 3
@@ -22609,12 +22603,22 @@ mod tests {
         render(&mut app, &ctx);
         assert!(app.editing.is_some());
         assert!(!app.composer_tools_open, "editing closes the menu");
-        assert!(
-            !crate::ui::focus::stops(&ctx)
-                .iter()
-                .any(|(stop, _)| *stop == crate::ui::focus::Stop::Attach),
-            "editing hides the plus button"
+        assert_eq!(
+            composer_buttons(&ctx).len(),
+            1,
+            "editing hides the plus and emoji buttons, leaving the toolbar its check"
         );
+        assert!(
+            crate::ui::focus::stops(&ctx)
+                .iter()
+                .any(|(stop, _)| *stop == crate::ui::focus::Stop::MessageActions),
+            "the toolbar keeps its stop"
+        );
+    }
+
+    /// The composer toolbar's plus, emoji, and send or record, left to right.
+    fn composer_buttons(ctx: &egui::Context) -> Vec<egui::Id> {
+        crate::ui::toolbar::buttons(ctx, crate::ui::conversation::composer_toolbar_id())
     }
 
     fn focused_stop(ctx: &egui::Context) -> Option<crate::ui::focus::Stop> {
@@ -22724,33 +22728,24 @@ mod tests {
             for _ in 0..20 {
                 frame_sized(&mut app, &ctx, 780.0, Vec::new());
             }
-            // The same on macOS: the rail carries Settings there too, beside
-            // the app menu.
+            // Each toolbar is one stop, whose buttons the arrows walk. The rail
+            // comes first and the composer last, as in the window. The same on
+            // macOS: the rail carries Settings there too, beside the app menu.
             let expected = vec![
-                Stop::Composer,
-                Stop::Send,
-                Stop::Attach,
-                Stop::Emoji,
-                Stop::ChatSearch,
-                Stop::Messages,
-                Stop::Chats,
-                Stop::Calls,
-                Stop::Starred,
-                Stop::Archived,
-                Stop::Locked,
-                Stop::Settings,
-                Stop::Profile,
-                Stop::NewChat,
-                Stop::Sidebar,
+                Stop::Rail,
+                Stop::ChatListActions,
                 Stop::Search,
-                Stop::All,
-                Stop::Unread,
-                Stop::Private,
-                Stop::Favorites,
-                Stop::Groups,
-                Stop::Channels,
+                Stop::Filters,
                 Stop::ChatList,
+                Stop::ChatActions,
+                Stop::Messages,
+                Stop::Composer,
+                Stop::MessageActions,
             ];
+            let start = expected
+                .iter()
+                .position(|stop| *stop == Stop::Composer)
+                .unwrap();
             assert_eq!(
                 crate::ui::focus::stops(&ctx)
                     .iter()
@@ -22773,11 +22768,14 @@ mod tests {
                     };
                     frame_sized(&mut app, &ctx, 780.0, vec![key(egui::Key::Tab, modifiers)]);
                     let shapes = frame_sized(&mut app, &ctx, 780.0, Vec::new());
-                    let index = if backwards {
-                        (expected.len() - step % expected.len()) % expected.len()
+                    // From the message field, where the walk starts.
+                    let offset = if backwards {
+                        -(step as isize)
                     } else {
-                        step % expected.len()
+                        step as isize
                     };
+                    let index =
+                        (start as isize + offset).rem_euclid(expected.len() as isize) as usize;
                     assert_eq!(
                         focused_stop(&ctx),
                         Some(expected[index]),
@@ -22825,34 +22823,53 @@ mod tests {
                 controls.iter().any(|(stop, _)| *stop == Stop::Composer),
                 !matches!(page, "empty" | "channel")
             );
+            // The rail's button showing the hidden list, or the full list's
+            // header toolbar, which holds the button hiding it.
+            let hidden = matches!(page, "nosidebar" | "rail");
+            let destinations = [
+                crate::ui::rail::Destination::Chats,
+                crate::ui::rail::Destination::Calls,
+                crate::ui::rail::Destination::Starred,
+                crate::ui::rail::Destination::Archived,
+                crate::ui::rail::Destination::Locked,
+                crate::ui::rail::Destination::Settings,
+            ]
+            .map(crate::ui::rail::destination_id);
+            let rail = crate::ui::rail::buttons(&ctx);
+            // Our picture is the last; the one more is Show the chat list.
+            assert_eq!(
+                rail[..rail.len() - 1]
+                    .iter()
+                    .filter(|id| !destinations.contains(id))
+                    .count(),
+                usize::from(hidden),
+                "{page}: the rail shows the list only while it is hidden"
+            );
             assert_eq!(
                 controls
                     .iter()
-                    .filter(|(stop, _)| *stop == Stop::Sidebar)
-                    .count(),
-                1,
+                    .any(|(stop, _)| *stop == Stop::ChatListActions),
+                !hidden,
                 "{page}: one button hides or shows the list"
             );
             if page == "nosidebar" {
                 assert_eq!(
                     controls.iter().map(|(stop, _)| *stop).collect::<Vec<_>>(),
                     [
-                        Stop::Composer,
-                        Stop::Send,
-                        Stop::Attach,
-                        Stop::Emoji,
-                        Stop::ChatSearch,
+                        Stop::Rail,
+                        Stop::ChatList,
+                        Stop::ChatActions,
                         Stop::Messages,
-                        Stop::Chats,
-                        Stop::Calls,
-                        Stop::Starred,
-                        Stop::Archived,
-                        Stop::Locked,
-                        Stop::Settings,
-                        Stop::Profile,
-                        Stop::Sidebar,
-                        Stop::ChatList
+                        Stop::Composer,
+                        Stop::MessageActions
                     ]
+                );
+            }
+            if !matches!(page, "nosidebar" | "rail") {
+                assert!(
+                    crate::ui::toolbar::buttons(&ctx, crate::ui::chats::header_toolbar_id()).len()
+                        >= 2,
+                    "{page}: the header toolbar holds hide the list and New chat"
                 );
             }
             for backwards in [false, true] {
@@ -22877,6 +22894,597 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn focused(ctx: &egui::Context) -> Option<egui::Id> {
+        ctx.memory(|memory| memory.focused())
+    }
+
+    /// How many of `toolbar`'s buttons are in the Tab cycle.
+    fn toolbar_stops(ctx: &egui::Context, toolbar: egui::Id) -> usize {
+        let buttons = crate::ui::toolbar::buttons(ctx, toolbar);
+        crate::ui::focus::stops(ctx)
+            .iter()
+            .filter(|(_, id)| buttons.contains(id))
+            .count()
+    }
+
+    /// Asserts `toolbar`'s node is a Toolbar named `label` holding each of
+    /// `buttons`, and returns its node.
+    fn assert_toolbar_node(
+        tree: &egui::accesskit::TreeUpdate,
+        toolbar: egui::Id,
+        label: &str,
+        buttons: &[egui::Id],
+    ) -> egui::accesskit::Node {
+        let bar = node(tree, toolbar.accesskit_id()).expect("the toolbar is in the tree");
+        assert_eq!(bar.role(), egui::accesskit::Role::Toolbar);
+        assert_eq!(bar.label(), Some(label));
+        for button in buttons {
+            assert!(
+                descendants(tree, &bar).contains(&button.accesskit_id()),
+                "{label}: {button:?} is in the toolbar"
+            );
+        }
+        bar
+    }
+
+    /// Every node under `parent` in `tree`.
+    fn descendants(
+        tree: &egui::accesskit::TreeUpdate,
+        parent: &egui::accesskit::Node,
+    ) -> Vec<egui::accesskit::NodeId> {
+        let mut found = Vec::new();
+        let mut stack: Vec<_> = parent.children().to_vec();
+        while let Some(id) = stack.pop() {
+            found.push(id);
+            if let Some(child) = node(tree, id) {
+                stack.extend(child.children().iter().copied());
+            }
+        }
+        found
+    }
+
+    /// The rail is one Tab stop, a vertical toolbar named Navigation: Shift+Tab
+    /// from the search field, past the list header's toolbar, lands on its
+    /// first button; Up, Down, Home and End walk its buttons with the focus
+    /// ring showing, Left and Right keep focus there, and Tab leaves at once.
+    /// Coming back lands on the button left last, Enter opens it, and the
+    /// destination on screen reads as pressed, as the active filter does.
+    #[test]
+    fn the_rail_is_one_vertical_toolbar_walked_by_up_and_down() {
+        use crate::ui::focus::Stop;
+        use crate::ui::rail::{self, Destination};
+        let mut app = app();
+        app.settings.show_shortcut_hints = false;
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let buttons = rail::buttons(&ctx);
+        assert_eq!(
+            buttons[..3],
+            [Destination::Chats, Destination::Calls, Destination::Starred]
+                .map(rail::destination_id),
+            "top to bottom"
+        );
+        assert_eq!(
+            buttons[buttons.len() - 2],
+            rail::destination_id(Destination::Settings)
+        );
+        let last = buttons.len() - 1;
+        assert_eq!(toolbar_stops(&ctx, rail::toolbar_id()), 1);
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("chat-search")));
+        render(&mut app, &ctx);
+        for _ in 0..2 {
+            press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::SHIFT);
+        }
+        assert_eq!(focused_stop(&ctx), Some(Stop::Rail));
+        assert_eq!(focused(&ctx), Some(buttons[0]), "on Chats, the first");
+        for (key, index) in [
+            (egui::Key::ArrowDown, 1),
+            (egui::Key::ArrowDown, 2),
+            (egui::Key::ArrowUp, 1),
+            // Across the toolbar: nothing to move to, and never into the
+            // chat list beside it.
+            (egui::Key::ArrowRight, 1),
+            (egui::Key::ArrowLeft, 1),
+            (egui::Key::End, last),
+            (egui::Key::ArrowDown, last),
+            (egui::Key::Home, 0),
+            (egui::Key::ArrowUp, 0),
+            (egui::Key::ArrowDown, 1),
+        ] {
+            press_key(&mut app, &ctx, key, egui::Modifiers::NONE);
+            assert_eq!(focused(&ctx), Some(buttons[index]), "{key:?}");
+            assert!(ring(&ctx).is_some(), "{key:?}: the focus ring shows");
+        }
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        assert_eq!(
+            focused_stop(&ctx),
+            Some(Stop::ChatListActions),
+            "Tab leaves at once"
+        );
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::SHIFT);
+        assert_eq!(
+            focused(&ctx),
+            Some(buttons[1]),
+            "back on Calls, the button left last"
+        );
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        render(&mut app, &ctx);
+        assert_eq!(app.page, crate::model::Page::Calls, "Enter opens Calls");
+        assert_eq!(focused(&ctx), Some(buttons[1]), "focus stays on Calls");
+        let tree = tree_after(&mut app, &ctx, None);
+        let bar = assert_toolbar_node(&tree, rail::toolbar_id(), "Navigation", &buttons);
+        assert_eq!(
+            bar.orientation(),
+            Some(egui::accesskit::Orientation::Vertical)
+        );
+        for destination in [Destination::Chats, Destination::Calls] {
+            let button = node(&tree, rail::destination_id(destination).accesskit_id())
+                .expect("the destination is in the tree");
+            let pressed = if destination == Destination::Calls {
+                egui::accesskit::Toggled::True
+            } else {
+                egui::accesskit::Toggled::False
+            };
+            assert_eq!(
+                button.toggled(),
+                Some(pressed),
+                "{destination:?}: the one on screen reads as pressed"
+            );
+        }
+        // The other toolbars stay horizontal, as a toolbar is by default.
+        let chips = node(&tree, crate::ui::calls::filters_toolbar_id().accesskit_id())
+            .expect("the Calls page's chips are a toolbar");
+        assert_eq!(chips.role(), egui::accesskit::Role::Toolbar);
+        assert_eq!(chips.orientation(), None);
+    }
+
+    /// With the chat list hidden, the chats' avatars in the rail are the
+    /// chat list: not buttons of the rail's toolbar but the stop after it,
+    /// whose node is outside the toolbar's. Up and Down walk the chats
+    /// without opening them and Enter opens one; Shift+Tab goes back to the
+    /// rail, on the button left last, here Show the chat list.
+    #[test]
+    fn the_hidden_lists_avatars_are_the_stop_after_the_rail() {
+        use crate::ui::focus::Stop;
+        use crate::ui::rail::{self, Destination};
+        let mut app = app();
+        app.sidebar_visible = false;
+        app.settings.show_shortcut_hints = false;
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let buttons = rail::buttons(&ctx);
+        let show = buttons[3];
+        assert!(
+            ![
+                Destination::Archived,
+                Destination::Locked,
+                Destination::Settings
+            ]
+            .map(rail::destination_id)
+            .contains(&show),
+            "Show the chat list, under Starred"
+        );
+        ctx.data_mut(|data| data.insert_temp(crate::theme::keyboard_focus_id(), true));
+        ctx.memory_mut(|memory| memory.request_focus(show));
+        render(&mut app, &ctx);
+        assert_eq!(focused_stop(&ctx), Some(Stop::Rail));
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        assert_eq!(focused_stop(&ctx), Some(Stop::ChatList));
+        assert_eq!(focused(&ctx), Some(crate::ui::chats::chats_list_id()));
+        let ids = visible_ids(&app);
+        let open = app.open_chat.clone();
+        let start = app
+            .chat_cursor
+            .clone()
+            .and_then(|cursor| ids.iter().position(|id| *id == cursor))
+            .unwrap_or(0);
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        let next = ids[(start + 1).min(ids.len() - 1)].clone();
+        assert_eq!(
+            app.chat_cursor.as_ref(),
+            Some(&next),
+            "Down walks the chats"
+        );
+        assert_eq!(app.open_chat, open, "without opening one");
+        let tree = tree_after(&mut app, &ctx, None);
+        let bar = assert_toolbar_node(&tree, rail::toolbar_id(), "Navigation", &buttons);
+        let (list, _) = chat_list_nodes(&tree);
+        assert_eq!(list.label(), Some("Chats"));
+        let list_id = crate::ui::chats::chats_list_id().accesskit_id();
+        assert!(
+            !descendants(&tree, &bar).contains(&list_id),
+            "the avatars' list is not in the rail's toolbar"
+        );
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::SHIFT);
+        assert_eq!(focused(&ctx), Some(show), "back on Show the chat list");
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        render(&mut app, &ctx);
+        assert_eq!(app.open_chat.as_ref(), Some(&next), "Enter opens it");
+    }
+
+    /// The chat list header is one Tab stop: Shift+Tab from the search field
+    /// reaches one of its buttons, the arrows, Home and End walk them with
+    /// the focus ring showing, and Tab leaves at once. Coming back lands on
+    /// the button left last.
+    #[test]
+    fn the_chat_list_header_is_one_toolbar_stop_walked_by_the_arrows() {
+        use crate::ui::focus::Stop;
+        for macos in [false, true] {
+            let mut app = app();
+            app.settings.show_shortcut_hints = false;
+            let ctx = egui::Context::default();
+            app.attach(&ctx);
+            if macos {
+                crate::theme::preview_macos(&ctx);
+            }
+            render(&mut app, &ctx);
+            let toolbar = crate::ui::chats::header_toolbar_id();
+            let buttons = crate::ui::toolbar::buttons(&ctx, toolbar);
+            // New chat and hide the list: the rail beside the list holds
+            // the rest.
+            assert_eq!(buttons.len(), 2, "macOS {macos}");
+            assert_eq!(toolbar_stops(&ctx, toolbar), 1, "one stop, macOS {macos}");
+            let search = egui::Id::new("chat-search");
+            ctx.memory_mut(|memory| memory.request_focus(search));
+            render(&mut app, &ctx);
+            press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::SHIFT);
+            assert_eq!(focused(&ctx), Some(buttons[0]), "macOS {macos}");
+            assert_eq!(focused_stop(&ctx), Some(Stop::ChatListActions));
+            let last = buttons.len() - 1;
+            for (key, index) in [
+                (egui::Key::ArrowRight, 1),
+                (egui::Key::End, last),
+                (egui::Key::ArrowRight, last),
+                (egui::Key::Home, 0),
+                (egui::Key::ArrowLeft, 0),
+                (egui::Key::ArrowDown, 0),
+                (egui::Key::ArrowRight, 1),
+            ] {
+                press_key(&mut app, &ctx, key, egui::Modifiers::NONE);
+                assert_eq!(
+                    focused(&ctx),
+                    Some(buttons[index]),
+                    "{key:?}, macOS {macos}"
+                );
+                assert!(ring(&ctx).is_some(), "{key:?} shows the focus ring");
+            }
+            assert_eq!(toolbar_stops(&ctx, toolbar), 1);
+            press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+            assert_eq!(focused(&ctx), Some(search), "Tab leaves the toolbar");
+            press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::SHIFT);
+            assert_eq!(
+                focused(&ctx),
+                Some(buttons[1]),
+                "Shift+Tab returns to the button left last"
+            );
+            let tree = tree_after(&mut app, &ctx, None);
+            assert_toolbar_node(&tree, toolbar, "Chat list actions", &buttons);
+        }
+    }
+
+    /// The account switcher, our picture at the foot of the rail,
+    /// opens from the keys as a menu named for it, with focus on its first
+    /// account; Down walks its rows and Escape closes it, back on the button.
+    #[test]
+    fn the_account_switcher_opens_from_the_keys_onto_its_first_account() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let search = egui::Id::new("chat-search");
+        ctx.memory_mut(|memory| memory.request_focus(search));
+        render(&mut app, &ctx);
+        // Back past the list header's toolbar to the rail, and End to our
+        // picture, the rail's last button.
+        for _ in 0..2 {
+            press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::SHIFT);
+        }
+        assert_eq!(focused_stop(&ctx), Some(crate::ui::focus::Stop::Rail));
+        press_key(&mut app, &ctx, egui::Key::End, egui::Modifiers::NONE);
+        let switcher = crate::ui::rail::buttons(&ctx)
+            .last()
+            .copied()
+            .expect("drawn");
+        assert_eq!(focused(&ctx), Some(switcher));
+        let popup = switcher.with("popup");
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        render(&mut app, &ctx);
+        assert!(egui::Popup::is_id_open(&ctx, popup), "Enter opens the menu");
+        let first = focused(&ctx).expect("focus is in the menu");
+        assert_ne!(first, switcher);
+        // Its accounts are radio items, the one on screen chosen, and Add
+        // account an item.
+        let menu = accessible_nodes(&mut app, &ctx, Vec::new());
+        let role_of = |wanted: &str| {
+            menu.iter()
+                .find(|(name, _, _)| name.starts_with(wanted))
+                .map(|(_, role, _)| *role)
+        };
+        let name = app.account().display_label(app.locale);
+        assert_eq!(
+            role_of(&name),
+            Some(egui::accesskit::Role::MenuItemRadio),
+            "{menu:?}"
+        );
+        assert_eq!(
+            role_of("Add account"),
+            Some(egui::accesskit::Role::MenuItem)
+        );
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        let second = focused(&ctx).expect("focus stays in the menu");
+        assert_ne!(second, first, "Down moves to Add account");
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        render(&mut app, &ctx);
+        assert!(!egui::Popup::is_id_open(&ctx, popup), "Escape closes it");
+        assert_eq!(focused(&ctx), Some(switcher), "back on the button");
+    }
+
+    /// Choosing from the keys a linked account with no chat open, which has
+    /// no message field to take focus, leaves focus on the switcher, not
+    /// nowhere.
+    #[test]
+    fn switching_to_an_account_with_no_chat_open_keeps_focus_on_the_switcher() {
+        let mut app = app();
+        apply_flags(&mut app, Some("accounts-closed"));
+        assert!(app.accounts[1].open_chat.is_none());
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        // From the search field back to the rail, and End to our picture,
+        // the switcher, as a reader goes there.
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("chat-search")));
+        render(&mut app, &ctx);
+        for _ in 0..2 {
+            press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::SHIFT);
+        }
+        press_key(&mut app, &ctx, egui::Key::End, egui::Modifiers::NONE);
+        let switcher = crate::ui::rail::buttons(&ctx)
+            .last()
+            .copied()
+            .expect("drawn");
+        assert_eq!(focused(&ctx), Some(switcher));
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        render(&mut app, &ctx);
+        assert_ne!(focused(&ctx), Some(switcher), "focus is in the menu");
+        // The first row is the account on screen, the second the other one.
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        for _ in 0..3 {
+            render(&mut app, &ctx);
+        }
+        assert_eq!(app.active, 1, "the other account is on screen");
+        assert!(app.open_chat.is_none());
+        // Drawn for the other account, the button can sit elsewhere in the
+        // rail, under another id.
+        let switcher = crate::ui::rail::buttons(&ctx)
+            .last()
+            .copied()
+            .expect("drawn");
+        assert_eq!(focused(&ctx), Some(switcher), "back on the button");
+    }
+
+    /// The filter chips, Archived and Locked included, are one toolbar after
+    /// the search field. The active filter reads as pressed, the others as
+    /// not pressed, never as selected.
+    #[test]
+    fn the_filter_chips_are_one_toolbar_and_the_active_one_reads_pressed() {
+        use crate::ui::focus::Stop;
+        let mut app = app();
+        app.settings.show_shortcut_hints = false;
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let toolbar = crate::ui::chats::filters_toolbar_id();
+        let buttons = crate::ui::toolbar::buttons(&ctx, toolbar);
+        assert!(
+            buttons.len() >= crate::model::ChatFilter::EVERY.len(),
+            "{buttons:?}"
+        );
+        assert_eq!(toolbar_stops(&ctx, toolbar), 1);
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("chat-search")));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        assert_eq!(focused(&ctx), Some(buttons[0]), "Tab reaches All");
+        assert_eq!(focused_stop(&ctx), Some(Stop::Filters));
+        press_key(&mut app, &ctx, egui::Key::ArrowRight, egui::Modifiers::NONE);
+        assert_eq!(focused(&ctx), Some(buttons[1]), "Right reaches Unread");
+        press_key(&mut app, &ctx, egui::Key::End, egui::Modifiers::NONE);
+        assert_eq!(focused(&ctx), Some(buttons[buttons.len() - 1]));
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        assert_eq!(
+            focused(&ctx),
+            Some(crate::ui::chats::chats_list_id()),
+            "Tab leaves for the chat list"
+        );
+        let tree = tree_after(&mut app, &ctx, None);
+        assert_toolbar_node(&tree, toolbar, "Filters", &buttons);
+        let active = crate::model::ChatFilter::EVERY
+            .iter()
+            .position(|filter| *filter == app.chat_filter)
+            .unwrap();
+        for (index, button) in buttons
+            .iter()
+            .take(crate::model::ChatFilter::EVERY.len())
+            .enumerate()
+        {
+            let chip = node(&tree, button.accesskit_id()).expect("the chip is in the tree");
+            assert_eq!(chip.role(), egui::accesskit::Role::Button);
+            let pressed = if index == active {
+                egui::accesskit::Toggled::True
+            } else {
+                egui::accesskit::Toggled::False
+            };
+            assert_eq!(chip.toggled(), Some(pressed), "chip {index}");
+            assert_eq!(chip.is_selected(), None, "chip {index} is never selected");
+        }
+    }
+
+    /// The composer's buttons are one toolbar after the message input. The
+    /// input is not in it, and the voice button turning into Send keeps the
+    /// toolbar's one stop.
+    #[test]
+    fn the_composer_buttons_are_one_toolbar_after_the_message_input() {
+        use crate::ui::focus::Stop;
+        let mut app = app();
+        app.settings.show_shortcut_hints = false;
+        app.focus_composer = true;
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let toolbar = crate::ui::conversation::composer_toolbar_id();
+        let buttons = crate::ui::toolbar::buttons(&ctx, toolbar);
+        assert_eq!(buttons.len(), 3, "plus, emoji, and record");
+        let input = egui::Id::new("composer-text");
+        assert_eq!(focused(&ctx), Some(input));
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        assert_eq!(focused(&ctx), Some(buttons[0]), "Tab reaches the plus");
+        assert_eq!(focused_stop(&ctx), Some(Stop::MessageActions));
+        for (key, index) in [
+            (egui::Key::ArrowRight, 1),
+            (egui::Key::ArrowRight, 2),
+            (egui::Key::ArrowRight, 2),
+            (egui::Key::Home, 0),
+            (egui::Key::End, 2),
+        ] {
+            press_key(&mut app, &ctx, key, egui::Modifiers::NONE);
+            assert_eq!(focused(&ctx), Some(buttons[index]), "{key:?}");
+        }
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        assert_eq!(
+            focused_stop(&ctx),
+            Some(Stop::Rail),
+            "Tab leaves, wrapping to the top of the window"
+        );
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::SHIFT);
+        assert_eq!(
+            focused(&ctx),
+            Some(buttons[2]),
+            "back on the button left last"
+        );
+        let tree = tree_after(&mut app, &ctx, None);
+        let bar = assert_toolbar_node(&tree, toolbar, "Message actions", &buttons);
+        assert!(
+            !descendants(&tree, &bar).contains(&input.accesskit_id()),
+            "the message input is not in the toolbar"
+        );
+        // A draft turns the voice button into Send.
+        app.composer = "A synthetic draft".into();
+        render(&mut app, &ctx);
+        assert_eq!(crate::ui::toolbar::buttons(&ctx, toolbar).len(), 3);
+        assert_eq!(toolbar_stops(&ctx, toolbar), 1);
+    }
+
+    /// The chat header's info, search, menu and, in a one-to-one chat, call
+    /// buttons are one toolbar before the message list. The info button says
+    /// what it opens, and leaves the chat's name to the toolbar.
+    #[test]
+    fn the_chat_header_is_one_toolbar_of_info_search_and_menu() {
+        use crate::ui::focus::Stop;
+        let mut app = app();
+        app.settings.show_shortcut_hints = false;
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let toolbar = crate::ui::conversation::header_toolbar_id();
+        let buttons = crate::ui::toolbar::buttons(&ctx, toolbar);
+        assert_eq!(
+            buttons.len(),
+            5,
+            "info, the menu, voice and video call, and search"
+        );
+        assert_eq!(toolbar_stops(&ctx, toolbar), 1);
+        focus_messages(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::SHIFT);
+        assert_eq!(focused(&ctx), Some(buttons[0]), "Shift+Tab reaches info");
+        assert_eq!(focused_stop(&ctx), Some(Stop::ChatActions));
+        press_key(&mut app, &ctx, egui::Key::ArrowRight, egui::Modifiers::NONE);
+        assert_eq!(focused(&ctx), Some(buttons[1]));
+        press_key(&mut app, &ctx, egui::Key::End, egui::Modifiers::NONE);
+        assert_eq!(focused(&ctx), Some(buttons[4]));
+        press_key(&mut app, &ctx, egui::Key::Home, egui::Modifiers::NONE);
+        assert_eq!(focused(&ctx), Some(buttons[0]));
+        let tree = tree_after(&mut app, &ctx, None);
+        let chat = app.open_chat.clone().unwrap();
+        let title = app.chat_title(app.chat(&chat).unwrap());
+        assert_toolbar_node(&tree, toolbar, &format!("{title}, online"), &buttons);
+        let info = node(&tree, buttons[0].accesskit_id()).unwrap();
+        assert_eq!(info.role(), egui::accesskit::Role::Button);
+        // The toolbar says whose chat it is; the button only what it opens,
+        // so the name is not read twice on the way in.
+        assert_eq!(info.label(), Some("Chat info"));
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(
+            app.info.as_ref().map(|info| info.chat.clone()),
+            Some(chat),
+            "Enter on info opens the chat's info panel"
+        );
+    }
+
+    /// The chat header's toolbar is named by what the header shows: the
+    /// chat's name, then the line under it, which follows the chat (F22).
+    #[test]
+    fn the_chat_header_toolbar_reads_the_name_and_the_line_under_it() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let toolbar = crate::ui::conversation::header_toolbar_id().accesskit_id();
+        let name = |app: &mut App, ctx: &egui::Context| {
+            let tree = tree_after(app, ctx, None);
+            node(&tree, toolbar)
+                .and_then(|node| node.label().map(str::to_owned))
+                .expect("the toolbar has a name")
+        };
+        // A one-to-one chat with someone online.
+        let chat = app.open_chat.clone().unwrap();
+        let title = app.chat_title(app.chat(&chat).unwrap());
+        assert!(app.presence.get(&chat).is_some_and(|seen| seen.online));
+        assert_eq!(name(&mut app, &ctx), format!("{title}, online"));
+        // The line follows: typing, then nothing under a saved contact's
+        // name once their presence is unknown. The typer starts an hour
+        // ahead, so `TYPING_TIMEOUT` cannot expire it during a slow run.
+        app.typing.insert(
+            chat.clone(),
+            vec![(
+                chat.clone(),
+                std::time::Instant::now() + std::time::Duration::from_secs(3600),
+            )],
+        );
+        assert_eq!(name(&mut app, &ctx), format!("{title}, typing…"));
+        app.typing.clear();
+        app.presence.remove(&chat);
+        app.contacts.insert(
+            chat.clone(),
+            Contact {
+                id: chat.clone(),
+                full_name: Some(title.clone()),
+                first_name: None,
+                push_name: None,
+            },
+        );
+        assert_eq!(name(&mut app, &ctx), title);
+        // A group reads its members, as its header does.
+        let group = sample_ids()
+            .into_iter()
+            .find(|id| id.ends_with("@g.us"))
+            .unwrap()
+            .to_owned();
+        app.actions
+            .push(crate::model::Action::OpenChat(group.clone()));
+        render(&mut app, &ctx);
+        let group = app.chat(&group).unwrap().clone();
+        let members = app.participant_names(&group);
+        assert!(!members.is_empty());
+        assert_eq!(
+            name(&mut app, &ctx),
+            format!("{}, {members}", app.chat_title(&group))
+        );
     }
 
     #[test]
@@ -24988,6 +25596,14 @@ mod rail_tests {
             .map(|response| response.rect)
     }
 
+    /// Our avatar, the account switcher: the rail toolbar's last button.
+    fn switcher_rect(ctx: &egui::Context) -> Option<egui::Rect> {
+        rail::buttons(ctx)
+            .last()
+            .and_then(|id| ctx.read_response(*id))
+            .map(|response| response.rect)
+    }
+
     fn destination_rect(ctx: &egui::Context, destination: Destination) -> egui::Rect {
         ctx.read_response(rail::destination_id(destination))
             .expect("the rail draws every destination")
@@ -25057,7 +25673,7 @@ mod rail_tests {
                 .map(|destination| destination_rect(&ctx, destination));
             let settings = destination_rect(&ctx, Destination::Settings);
             let shown_settings = settings;
-            let me = stop_rect(&ctx, Stop::Profile).expect("our avatar is drawn");
+            let me = switcher_rect(&ctx).expect("our avatar is drawn");
             for rect in top.iter().chain([&settings, &me]) {
                 assert!(rail.contains_rect(*rect), "{macos}: {rect:?} in {rail:?}");
             }
@@ -25097,7 +25713,12 @@ mod rail_tests {
             let chats = destination_rect(&ctx, Destination::Chats);
             let starred = destination_rect(&ctx, Destination::Starred);
             let settings = destination_rect(&ctx, Destination::Settings);
-            let show = stop_rect(&ctx, Stop::Sidebar).expect("Show the chat list");
+            // The button under Starred.
+            let show = rail::buttons(&ctx)
+                .get(3)
+                .and_then(|id| ctx.read_response(*id))
+                .map(|response| response.rect)
+                .expect("Show the chat list");
             assert!(rail.contains_rect(show) && show.top() >= starred.bottom());
             // Nothing the list's toggle leaves in place moves.
             assert_eq!(chats, top[0], "{macos}: Chats stays put");
@@ -25119,8 +25740,9 @@ mod rail_tests {
         }
     }
 
-    /// At the minimum window height, Tab and Shift+Tab reveal every rail
-    /// control, including the bottom group, without crossing the title bar.
+    /// At the minimum window height, the rail toolbar's Down from its top
+    /// and Up from its bottom (End) reveal every rail button, including the
+    /// bottom group and the account switcher, without crossing the title bar.
     #[test]
     fn tab_reveals_every_rail_control_in_a_short_window() {
         for macos in [false, true] {
@@ -25131,68 +25753,63 @@ mod rail_tests {
                     for _ in 0..3 {
                         frame_at(&mut app, &ctx, size, Vec::new());
                     }
-                    let mut expected = vec![
-                        Stop::Chats,
-                        Stop::Calls,
-                        Stop::Starred,
-                        Stop::Archived,
-                        Stop::Locked,
-                        Stop::Settings,
-                        Stop::Profile,
-                    ];
-                    if page == "rail" {
-                        expected.push(Stop::Sidebar);
-                    }
-                    for stop in &expected {
-                        assert!(stop_rect(&ctx, *stop).is_some(), "{stop:?} is offered");
-                    }
-                    ctx.memory_mut(|memory| {
-                        memory.request_focus(rail::destination_id(Destination::Chats));
-                    });
-                    let mut reached = std::collections::BTreeSet::new();
-                    for _ in 0..40 {
+                    // Chats, Calls, Starred, Show the chat list while it is
+                    // hidden, Archived, Locked, Settings and our avatar.
+                    let buttons = rail::buttons(&ctx);
+                    let offered = if page == "rail" { 8 } else { 7 };
+                    assert_eq!(buttons.len(), offered, "{page}: every button is offered");
+                    ctx.memory_mut(|memory| memory.request_focus(buttons[0]));
+                    frame_at(&mut app, &ctx, size, Vec::new());
+                    let press = |app: &mut App, key| {
                         frame_at(
-                            &mut app,
+                            app,
                             &ctx,
                             size,
                             vec![egui::Event::Key {
-                                key: egui::Key::Tab,
+                                key,
                                 physical_key: None,
                                 pressed: true,
                                 repeat: false,
-                                modifiers: if reverse {
-                                    egui::Modifiers::SHIFT
-                                } else {
-                                    egui::Modifiers::NONE
-                                },
+                                modifiers: egui::Modifiers::NONE,
                             }],
                         );
                         for _ in 0..3 {
-                            frame_at(&mut app, &ctx, size, Vec::new());
+                            frame_at(app, &ctx, size, Vec::new());
                         }
+                    };
+                    let steps: Vec<egui::Key> = if reverse {
+                        std::iter::once(egui::Key::End)
+                            .chain(std::iter::repeat_n(egui::Key::ArrowUp, offered - 1))
+                            .collect()
+                    } else {
+                        std::iter::repeat_n(egui::Key::ArrowDown, offered - 1).collect()
+                    };
+                    let mut reached = std::collections::BTreeSet::new();
+                    if !reverse {
+                        reached.insert(0);
+                    }
+                    for key in steps {
+                        press(&mut app, key);
                         let focused = ctx.memory(|memory| memory.focused());
-                        let Some((stop, id)) = focus::stops(&ctx)
-                            .into_iter()
-                            .find(|(stop, id)| Some(*id) == focused && expected.contains(stop))
-                        else {
-                            continue;
+                        let Some(index) = buttons.iter().position(|id| Some(*id) == focused) else {
+                            panic!("{page}, macOS={macos}: {key:?} left the rail toolbar");
                         };
-                        let response = ctx.read_response(id).unwrap();
+                        let response = ctx.read_response(buttons[index]).unwrap();
                         let mut viewport = rail_rect(&ctx).unwrap();
                         if crate::theme::traffic_light_inset(&ctx) > 0.0 {
                             viewport.min.y += crate::theme::TOP_BAR_HEIGHT / 2.0 + 12.0;
                         }
                         assert_eq!(
                             response.interact_rect, response.rect,
-                            "{page}, macOS={macos}, reverse={reverse}: {stop:?} is fully visible"
+                            "{page}, macOS={macos}, reverse={reverse}: button {index} is fully visible"
                         );
                         assert!(
                             viewport.contains_rect(response.rect),
-                            "{stop:?} stays in the rail below the title bar"
+                            "button {index} stays in the rail below the title bar"
                         );
-                        reached.insert(stop);
+                        reached.insert(index);
                     }
-                    assert_eq!(reached, expected.into_iter().collect());
+                    assert_eq!(reached, (0..offered).collect());
                 }
             }
         }
@@ -25206,12 +25823,12 @@ mod rail_tests {
             for page in ["chat", "rail"] {
                 let (mut app, ctx) = open(page, macos);
                 let chats = destination_rect(&ctx, Destination::Chats);
-                let profile = stop_rect(&ctx, Stop::Profile).unwrap();
+                let profile = switcher_rect(&ctx).unwrap();
                 let size = egui::vec2(1180.0, 300.0);
                 for _ in 0..3 {
                     frame_at(&mut app, &ctx, size, Vec::new());
                 }
-                assert!(stop_rect(&ctx, Stop::Profile).unwrap().bottom() > size.y);
+                assert!(switcher_rect(&ctx).unwrap().bottom() > size.y);
                 let pointer = destination_rect(&ctx, Destination::Calls).center();
                 frame_at(
                     &mut app,
@@ -25230,7 +25847,7 @@ mod rail_tests {
                 for _ in 0..30 {
                     frame_at(&mut app, &ctx, size, Vec::new());
                 }
-                let id = focus::control(&ctx, Stop::Profile).unwrap();
+                let id = *rail::buttons(&ctx).last().unwrap();
                 let response = ctx.read_response(id).unwrap();
                 assert_eq!(
                     response.interact_rect, response.rect,
@@ -25241,7 +25858,7 @@ mod rail_tests {
                     frame(&mut app, &ctx, 1180.0, Vec::new());
                 }
                 assert_eq!(destination_rect(&ctx, Destination::Chats), chats);
-                assert_eq!(stop_rect(&ctx, Stop::Profile), Some(profile));
+                assert_eq!(switcher_rect(&ctx), Some(profile));
             }
         }
     }
@@ -25262,8 +25879,16 @@ mod rail_tests {
         let search = stop_rect(&ctx, Stop::Search).expect("the search field");
         assert!(all.top() >= search.bottom() && all.right() <= missed.left());
         assert_eq!(all.height(), 28.0, "the chat list's chip");
-        assert_eq!(stop_rect(&ctx, Stop::All), Some(all));
-        assert_eq!(stop_rect(&ctx, Stop::Missed), Some(missed));
+        // One toolbar holds both: Tab enters it on All, the arrows reach
+        // Missed.
+        assert_eq!(stop_rect(&ctx, Stop::Filters), Some(all));
+        assert_eq!(
+            crate::ui::toolbar::buttons(&ctx, calls::filters_toolbar_id())
+                .into_iter()
+                .filter_map(|id| ctx.read_response(id).map(|response| response.rect))
+                .collect::<Vec<_>>(),
+            [all, missed]
+        );
         let rows: Vec<(Message, bool)> = calls::rows(&app.call_log)
             .into_iter()
             .map(|row| {
@@ -25408,27 +26033,34 @@ mod rail_tests {
 
     /// The list header keeps only New chat and Hide the chat list beside its
     /// title; the starred messages' header has only Back and its title, and
-    /// the Calls tab's only New call.
+    /// the Calls tab's only New call. They are one toolbar, one Tab stop.
     #[test]
     fn the_list_header_has_only_its_own_buttons() {
         let in_header = |ctx: &egui::Context| {
             let header = list_header(ctx).expect("the list header is drawn");
-            focus::stops(ctx)
+            let stops = focus::stops(ctx)
                 .into_iter()
                 .filter(|(_, id)| {
                     ctx.read_response(*id)
                         .is_some_and(|response| header.intersects(response.rect))
                 })
                 .map(|(stop, _)| stop)
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            let buttons =
+                crate::ui::toolbar::buttons(ctx, crate::ui::chats::header_toolbar_id()).len();
+            (stops, buttons)
         };
         for macos in [false, true] {
             let (_app, ctx) = open("chat", macos);
-            assert_eq!(in_header(&ctx), [Stop::NewChat, Stop::Sidebar], "{macos}");
+            assert_eq!(in_header(&ctx), (vec![Stop::ChatListActions], 2), "{macos}");
             let (_app, ctx) = open("starred", macos);
-            assert_eq!(in_header(&ctx), [Stop::Back], "{macos}");
+            assert_eq!(in_header(&ctx), (vec![Stop::ChatListActions], 1), "{macos}");
             let (_app, ctx) = open("calls", macos);
-            assert_eq!(in_header(&ctx), [Stop::NewChat], "{macos}: New call");
+            assert_eq!(
+                in_header(&ctx),
+                (vec![Stop::ChatListActions], 1),
+                "{macos}: New call"
+            );
         }
     }
 

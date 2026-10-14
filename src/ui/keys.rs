@@ -231,6 +231,17 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
             actions.extend(taken);
         }
     }
+    // A focused toolbar button takes the arrows, Home and End to move along
+    // its toolbar, ahead of the scrolling below.
+    if app.dialog.is_none()
+        && !app.show_update
+        && app.picker.is_none()
+        && app.reaction_target.is_none()
+        && app.recording.is_none()
+        && !menu_open
+    {
+        crate::ui::toolbar::keys(ctx);
+    }
     // PgUp/PgDn/Home/End scroll the open chat. PgUp/PgDn also work while the
     // composer has focus, since egui's TextEdit does not handle them itself;
     // Home/End keep moving the text cursor in a non-empty field, as ↑ keeps
@@ -1510,6 +1521,8 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
         "M",
         "Mute or unmute the video that is playing or paused (in the message list)",
     ),
+    ("← / →, Home / End", "Move within a toolbar"),
+    ("↑ / ↓, Home / End", "Move within the rail on the left"),
     ("PgUp / PgDn", "Scroll the open chat by a page"),
     (
         "Home / End",
