@@ -4278,7 +4278,7 @@ fn bubble(
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .clicked()
                     {
-                        actions.push(Action::OpenInfo(message.sender.clone()));
+                        actions.push(sender_info_action(message));
                     }
                     if ui.is_rect_visible(rect) {
                         let name = (view.names_or)(&message.sender, message.sender_name.as_deref());
@@ -4908,9 +4908,16 @@ fn bubble_frame(
                         Sense::CLICK,
                     )
                     .on_hover_cursor(egui::CursorIcon::PointingHand);
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(bubble_id.with("sender"), response.rect));
                 if response.clicked() {
-                    actions.push(Action::OpenInfo(message.sender.clone()));
+                    actions.push(sender_info_action(message));
                 }
+            } else {
+                // A name from an earlier frame must not trim the text's
+                // click target below.
+                ui.ctx()
+                    .data_mut(|data| data.remove::<Rect>(bubble_id.with("sender")));
             }
             // Reserve the label's line now and paint it once the contents
             // are measured, at their start: an own bubble lays out from the
@@ -5153,6 +5160,22 @@ fn bubble_frame(
             ui.memory_mut(|memory| memory.move_focus(step));
         }
     }
+    // Opened from the keys, the menu also lists what only a click reaches
+    // in the bubble (`inner_entries`), and is wide enough for it. A menu
+    // opened with the pointer is as it was.
+    let keys_menu = from_keys.is_some();
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(keys_menu_id(popup_id), keys_menu));
+    let width = if keys_menu {
+        let labels: Vec<String> = inner_entries(view, menu_target)
+            .into_iter()
+            .map(|entry| entry.label)
+            .collect();
+        let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+        width.max(widgets::menu_width(ui, &labels, true))
+    } else {
+        width
+    };
     let open = if right_clicked || force_menu || reacting || keyboard_clicked {
         Some(egui::SetOpenCommand::Bool(true))
     } else if bubble.clicked() {
@@ -6613,6 +6636,38 @@ fn context_menu(
     ui.ctx().data_mut(|data| {
         data.insert_temp(menu_first_item_id(chat, &message.id), first);
     });
+    // What else a pointer reaches in the bubble, above Copy, in a menu the
+    // keys opened: a card's buttons, the quote, the sender. A disabled entry
+    // takes no focus, as its row in the bubble.
+    let keys_menu = ui
+        .ctx()
+        .data(|data| data.get_temp::<bool>(keys_menu_id(ui.layer_id().id)))
+        .unwrap_or(false);
+    let entries = if keys_menu {
+        inner_entries(view, message)
+    } else {
+        Vec::new()
+    };
+    if !entries.is_empty() {
+        widgets::menu_separator(ui, &palette);
+        for entry in entries {
+            let response = widgets::menu_item_response(
+                ui,
+                &palette,
+                Some(entry.icon),
+                &entry.label,
+                entry.enabled,
+            );
+            let clicked = response.clicked();
+            if let Some(hint) = entry.hint {
+                response.on_hover_text(hint);
+            }
+            if clicked && let Some(action) = entry.action {
+                actions.push(action);
+            }
+        }
+        widgets::menu_separator(ui, &palette);
+    }
     if let Some(text) = copyable_text(&message.content)
         && widgets::menu_item(
             ui,
@@ -6788,6 +6843,118 @@ fn context_menu(
     ) {
         actions.push(Action::CopyText(message.id.clone()));
     }
+}
+
+/// One menu entry for something inside a message: a link, a poll option or
+/// an interactive button. Everything a pointer reaches in the bubble is also
+/// here, for the keyboard and for screen readers.
+struct InnerEntry {
+    label: String,
+    icon: Icon,
+    /// What choosing it does. `None` for an entry that has nothing to do.
+    action: Option<Action>,
+    enabled: bool,
+    /// Why the entry is unavailable, shown on hover as in the bubble.
+    hint: Option<&'static str>,
+}
+
+/// The menu entries for the buttons of one interactive card. `card_number`
+/// names the card within a carousel.
+fn button_entries(
+    view: &View<'_>,
+    message: &Message,
+    card: &crate::model::InteractiveCard,
+    card_number: Option<usize>,
+    entries: &mut Vec<InnerEntry>,
+) {
+    use crate::model::InteractiveAction;
+    for (index, button) in card.buttons.iter().enumerate() {
+        let enabled = interactive_enabled(view, message, button);
+        let icon = if button.url.is_some() {
+            Icon::ExternalLink
+        } else {
+            match button.action {
+                InteractiveAction::Reply => Icon::Reply,
+                InteractiveAction::Select(_) => Icon::ListChecks,
+                InteractiveAction::Copy(_) => Icon::Copy,
+                InteractiveAction::Unavailable => Icon::Smartphone,
+            }
+        };
+        let label = match card_number {
+            Some(number) => crate::a11y::fill(
+                &crate::i18n::gettext(view.locale, "Card {number}: {button}"),
+                &[
+                    ("number", &(number + 1).to_string()),
+                    ("button", &button.label),
+                ],
+            ),
+            None => button.label.clone(),
+        };
+        entries.push(InnerEntry {
+            label,
+            icon,
+            action: enabled
+                .then(|| interactive_action(message, index, button))
+                .flatten(),
+            enabled,
+            hint: (!enabled).then(|| interactive_reason(view, message, button)),
+        });
+    }
+}
+
+/// The entries the message menu adds for what the keys reach nowhere else,
+/// in reading order: an interactive card's buttons, then what is about the
+/// message rather than in it, each as its click target does: the quote,
+/// and a group sender's name and picture. The links, cards, poll options
+/// and files in the message are the item cursor's; a video fills the window
+/// from the menu's own "Open in the viewer".
+fn inner_entries(view: &View<'_>, message: &Message) -> Vec<InnerEntry> {
+    let mut entries = Vec::new();
+    if let Content::Interactive {
+        card: Some(card), ..
+    } = &message.content
+    {
+        button_entries(view, message, card, None, &mut entries);
+        // One group per carousel card, each acting on its own card row as the
+        // card's buttons do.
+        for (index, child) in card.carousel.iter().enumerate() {
+            let row = carousel_row(message, index, child);
+            button_entries(view, &row, child, Some(index), &mut entries);
+        }
+    }
+    if let Some(quoted) = &message.quoted {
+        entries.push(InnerEntry {
+            label: crate::i18n::gettext(view.locale, "Go to replied message").into_owned(),
+            icon: Icon::Reply,
+            action: Some(quote_key_action(quoted)),
+            enabled: true,
+            hint: None,
+        });
+    }
+    if shows_sender_pictures(view.chat) && !message.from_me {
+        let name = (view.names_or)(&message.sender, message.sender_name.as_deref());
+        entries.push(InnerEntry {
+            label: crate::a11y::fill(
+                &crate::i18n::gettext(view.locale, "Info about {name}"),
+                &[("name", name.trim_start_matches('~'))],
+            ),
+            icon: Icon::Info,
+            action: Some(sender_info_action(message)),
+            enabled: true,
+            hint: None,
+        });
+    }
+    entries
+}
+
+/// Where a message menu's popup records whether the keys opened it.
+fn keys_menu_id(popup: egui::Id) -> egui::Id {
+    popup.with("opened-by-keys")
+}
+
+/// What clicking a group sender's name or picture does: their info.
+fn sender_info_action(message: &Message) -> Action {
+    Action::OpenInfo(message.sender.clone())
 }
 
 /// Where the message menu records its first item for this pass.
@@ -8241,6 +8408,89 @@ fn carousel_picture(
     }
 }
 
+/// Whether an interactive button can be used now: links and copy codes
+/// always, replies and lists only while connected, in a chat that takes
+/// messages, on a message from someone else that was not edited.
+fn interactive_enabled(
+    view: &View<'_>,
+    message: &Message,
+    button: &crate::model::InteractiveButton,
+) -> bool {
+    use crate::model::InteractiveAction;
+    button.url.is_some()
+        || match &button.action {
+            InteractiveAction::Copy(_) => true,
+            InteractiveAction::Reply | InteractiveAction::Select(_) => {
+                view.connected
+                    && view.chat.can_send()
+                    && !message.from_me
+                    && !message.edited
+                    && !view
+                        .interactive_pending
+                        .contains(&(message.chat.clone(), message.id.clone()))
+            }
+            InteractiveAction::Unavailable => false,
+        }
+}
+
+/// Why [`interactive_enabled`] refuses a button.
+fn interactive_reason(
+    view: &View<'_>,
+    message: &Message,
+    button: &crate::model::InteractiveButton,
+) -> &'static str {
+    use crate::model::InteractiveAction;
+    let sends = matches!(
+        button.action,
+        InteractiveAction::Reply | InteractiveAction::Select(_)
+    );
+    if sends
+        && view
+            .interactive_pending
+            .contains(&(message.chat.clone(), message.id.clone()))
+    {
+        "Sending reply…"
+    } else if sends && !view.connected {
+        "Connect to WhatsApp to reply"
+    } else if sends && !view.chat.can_send() {
+        "This conversation is read-only"
+    } else if sends && message.from_me {
+        "Reply options are for the recipient"
+    } else {
+        "Open this option in WhatsApp Web or on your phone"
+    }
+}
+
+/// What using an interactive button does, for a click and for the message
+/// menu alike. `None` for a button with nothing to do here.
+fn interactive_action(
+    message: &Message,
+    index: usize,
+    button: &crate::model::InteractiveButton,
+) -> Option<Action> {
+    use crate::model::InteractiveAction;
+    if let Some(url) = &button.url {
+        return Some(Action::OpenUrl(url.clone()));
+    }
+    match &button.action {
+        InteractiveAction::Reply => Some(Action::ReplyInteractive {
+            chat: message.chat.clone(),
+            message: message.id.clone(),
+            button: index,
+            choice: None,
+        }),
+        InteractiveAction::Copy(code) => Some(Action::CopyText(code.clone())),
+        InteractiveAction::Select(_) => {
+            Some(Action::ShowDialog(crate::model::Dialog::InteractiveList {
+                chat: message.chat.clone(),
+                message: message.id.clone(),
+                button: index,
+            }))
+        }
+        InteractiveAction::Unavailable => None,
+    }
+}
+
 /// Full-width action rows below the message timestamp, matching business cards.
 /// Show only executable actions as active, with the same keyboard path as clicks.
 fn interactive_buttons(
@@ -8256,24 +8506,7 @@ fn interactive_buttons(
     let spacing = ui.spacing().item_spacing.y;
     ui.spacing_mut().item_spacing.y = 0.0;
     for (index, button) in card.buttons.iter().enumerate() {
-        let sends = matches!(
-            button.action,
-            InteractiveAction::Reply | InteractiveAction::Select(_)
-        );
-        let enabled = button.url.is_some()
-            || match &button.action {
-                InteractiveAction::Copy(_) => true,
-                InteractiveAction::Reply | InteractiveAction::Select(_) => {
-                    view.connected
-                        && view.chat.can_send()
-                        && !message.from_me
-                        && !message.edited
-                        && !view
-                            .interactive_pending
-                            .contains(&(message.chat.clone(), message.id.clone()))
-                }
-                InteractiveAction::Unavailable => false,
-            };
+        let enabled = interactive_enabled(view, message, button);
         // Muted/link colours target incoming surfaces; outgoing tinted bubbles
         // need the main foreground to keep small labels readable in both themes.
         let color = if message.from_me {
@@ -8385,63 +8618,31 @@ fn interactive_buttons(
                 color,
             );
         }
-        let reply = |choice| Action::ReplyInteractive {
-            chat: message.chat.clone(),
-            message: message.id.clone(),
-            button: index,
-            choice,
-        };
         if !enabled {
-            let reason = if sends
-                && view
-                    .interactive_pending
-                    .contains(&(message.chat.clone(), message.id.clone()))
-            {
-                "Sending reply…"
-            } else if sends && !view.connected {
-                "Connect to WhatsApp to reply"
-            } else if sends && !view.chat.can_send() {
-                "This conversation is read-only"
-            } else if sends && message.from_me {
-                "Reply options are for the recipient"
-            } else {
-                "Open this option in WhatsApp Web or on your phone"
-            };
+            let reason = interactive_reason(view, message, button);
             response.on_hover_text(format!("{}\n{reason}", button.label));
         } else if let Some(url) = &button.url {
             if response
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .on_hover_text(format!("{}\n{url}", button.label))
                 .clicked()
+                && let Some(action) = interactive_action(message, index, button)
             {
-                actions.push(Action::OpenUrl(url.clone()));
+                actions.push(action);
             }
         } else {
             let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-            match &button.action {
+            let response = match &button.action {
                 InteractiveAction::Reply => {
-                    if response
-                        .on_hover_text(format!("Send reply: {}", button.label))
-                        .clicked()
-                    {
-                        actions.push(reply(None));
-                    }
+                    response.on_hover_text(format!("Send reply: {}", button.label))
                 }
-                InteractiveAction::Copy(code) => {
-                    if response.on_hover_text("Copy code").clicked() {
-                        actions.push(Action::CopyText(code.clone()));
-                    }
-                }
-                InteractiveAction::Select(_) => {
-                    if response.clicked() {
-                        actions.push(Action::ShowDialog(crate::model::Dialog::InteractiveList {
-                            chat: message.chat.clone(),
-                            message: message.id.clone(),
-                            button: index,
-                        }));
-                    }
-                }
-                InteractiveAction::Unavailable => {}
+                InteractiveAction::Copy(_) => response.on_hover_text("Copy code"),
+                InteractiveAction::Select(_) | InteractiveAction::Unavailable => response,
+            };
+            if response.clicked()
+                && let Some(action) = interactive_action(message, index, button)
+            {
+                actions.push(action);
             }
         }
     }
@@ -8559,6 +8760,14 @@ fn rich_body(
                     if let Some(card) = ui.ctx().data(|data| data.get_temp::<Rect>(id.with(kind))) {
                         target.min.y = target.min.y.max(card.bottom());
                     }
+                }
+                // A group sender's name, drawn above the text this frame,
+                // opens their info on a click: keep it outside as well.
+                if let Some(name) = ui
+                    .ctx()
+                    .data(|data| data.get_temp::<Rect>(id.with("sender")))
+                {
+                    target.min.y = target.min.y.max(name.bottom());
                 }
                 target
             } else {
@@ -9511,12 +9720,18 @@ fn video(
         && !gif
         && let Some(path) = &media.path
     {
-        actions.push(Action::ExpandVideo {
-            message: message.id.clone(),
-            path: path.clone(),
-        });
+        actions.push(expand_video_action(&message.id, path));
     }
     size.x
+}
+
+/// What "Fill the window" does: the video covers the window, starting it
+/// when it is not the one loaded.
+fn expand_video_action(message: &str, path: &Path) -> Action {
+    Action::ExpandVideo {
+        message: message.to_owned(),
+        path: path.to_owned(),
+    }
 }
 
 /// What a click on a video does: a downloaded video plays or pauses, a GIF
@@ -9615,6 +9830,8 @@ pub(crate) fn video_controls(
     }
     let window =
         Rect::from_center_size(pos2(bar.right() - 18.0, bar.center().y), Vec2::splat(26.0));
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(egui::Id::new(("video-window", message)), window));
     theme::paint_icon(
         ui,
         if controls.expanded {
@@ -9640,10 +9857,7 @@ pub(crate) fn video_controls(
         actions.push(if controls.expanded {
             Action::CloseImagePreview
         } else {
-            Action::ExpandVideo {
-                message: message.to_owned(),
-                path: path.to_owned(),
-            }
+            expand_video_action(message, path)
         });
     }
     let sound = Rect::from_center_size(
