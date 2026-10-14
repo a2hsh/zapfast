@@ -530,7 +530,9 @@ pub struct App {
     /// The reaction picker came from a message's context menu, which stays
     /// open beside it.
     pub reaction_beside_menu: bool,
-    /// Demo/test: keep this message's context menu open.
+    /// One-shot: open this message's context menu when its bubble is next
+    /// drawn. Set by the message list's keys that open it, and by demo
+    /// pages; the menu then stays open until it is closed.
     pub open_message_menu: Option<String>,
     /// Demo/test: keep this chat row's context menu open.
     #[cfg(any(test, feature = "demo"))]
@@ -622,6 +624,11 @@ pub struct App {
     /// overtaken by a cancellation or by another picture, and opening the
     /// cropper on it would take the window off whoever has it now.
     pub picture_inspecting: Option<AttachmentId>,
+    /// Whether the cropper asked for follows focus: asked for from the keys
+    /// or with a screen reader, as `ui::overlay::followed` says at the time
+    /// of asking. A file opens the cropper only once its size is read, in a
+    /// later frame that no longer knows how it was asked for.
+    pub picture_edit_followed: Option<bool>,
     /// Where the picture being written came from, by the attachment it will
     /// replace, so two edits in flight cannot swap their origins.
     pub picture_applying: std::collections::HashMap<AttachmentId, crate::model::PictureOrigin>,
@@ -1474,6 +1481,7 @@ impl App {
             sticker_draft: None,
             picture_edit: None,
             picture_inspecting: None,
+            picture_edit_followed: None,
             picture_applying: Default::default(),
             picture_origins: Default::default(),
             picture_texture: None,
@@ -6905,9 +6913,15 @@ impl App {
                     self.dialog = None;
                     self.picker = None;
                     // As for the image preview: the composer must not take
-                    // Enter in the frame before the modal is known.
+                    // Enter in the frame before the modal is known, and
+                    // anything else keeps focus until the card takes it when
+                    // the keys or a screen reader opened it.
+                    let composer = crate::ui::conversation::composer_id();
+                    let followed = crate::ui::overlay::followed(ctx);
                     ctx.memory_mut(|memory| {
-                        if let Some(focused) = memory.focused() {
+                        if let Some(focused) = memory.focused()
+                            && (focused == composer || !followed)
+                        {
                             memory.surrender_focus(focused);
                         }
                     });
@@ -7431,6 +7445,7 @@ impl App {
             Action::EditPicture(target) => {
                 // Whatever was being waited for is not what is wanted now.
                 self.picture_inspecting = None;
+                self.picture_edit_followed = Some(crate::ui::overlay::followed(ctx));
                 // Read out before anything is written back, so the borrow of
                 // the strip ends here.
                 let pasted = match self.staged_at(target) {
@@ -8336,6 +8351,13 @@ impl App {
                     self.cursor_followed = None;
                 }
             }
+            Action::OpenMessageMenu(id) => {
+                // The bubble opens its menu when it is next drawn; the
+                // current message is brought into view so that it is.
+                self.open_message_menu = Some(id);
+                self.reveal_cursor = true;
+            }
+            Action::MessageMenuOpened => self.open_message_menu = None,
             Action::FocusMessages => {
                 if self.current_chat().is_some() {
                     // The Calls tab keeps its history beside the chat, as
@@ -9703,9 +9725,16 @@ impl App {
         self.picker = None;
         // egui drops the focus of widgets behind a modal only from the frame
         // after it first shows; until then a focused composer would still
-        // take Enter and send the draft.
+        // take Enter and send the draft. Opened from the keys or for a screen
+        // reader, anything else keeps focus until the viewer takes it, in the
+        // pass that shows it (`ui::overlay`): let go now, focus would be on
+        // the window meanwhile.
+        let composer = crate::ui::conversation::composer_id();
+        let followed = crate::ui::overlay::followed(ctx);
         ctx.memory_mut(|memory| {
-            if let Some(focused) = memory.focused() {
+            if let Some(focused) = memory.focused()
+                && (focused == composer || !followed)
+            {
                 memory.surrender_focus(focused);
             }
         });
@@ -10066,6 +10095,7 @@ impl App {
         }
         crate::ui::show(self, ui);
         self.apply_actions(ctx);
+        crate::ui::overlay::settle(self, ctx);
         // The old colours, if a change is being revealed, go over everything.
         self.theme_transition.paint(ctx);
         // Release the image caches of everything that scrolled away.

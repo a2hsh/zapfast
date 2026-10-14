@@ -6,6 +6,11 @@ use crate::app::App;
 use crate::model::{Action, Dialog};
 use crate::theme::{self, Icon};
 
+/// The dialogs' `Modal`, the layer they are drawn on.
+pub(crate) fn modal_id() -> egui::Id {
+    egui::Id::new("dialog")
+}
+
 pub fn show(app: &mut App, ctx: &egui::Context) {
     let Some(dialog) = app.dialog.clone() else {
         return;
@@ -21,7 +26,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             22
         }))
         .shadow(palette.modal_shadow());
-    let response = egui::Modal::new(egui::Id::new("dialog"))
+    let response = egui::Modal::new(modal_id())
         .frame(frame)
         .backdrop_color(palette.shadow)
         .show(ctx, |ui| {

@@ -3013,6 +3013,11 @@ pub enum Action {
     MessageCursor(crate::ui::list_nav::Step),
     /// Gives the open chat's message list keyboard focus.
     FocusMessages,
+    /// Opens a message's context menu in the open chat, from the keyboard.
+    OpenMessageMenu(String),
+    /// The menu asked for by `OpenMessageMenu` is open: stop asking, so it
+    /// opens once and closes as any menu does.
+    MessageMenuOpened,
     /// Scrolls the open chat to a message.
     ScrollTo(String),
     /// Updates chat-list search text.
