@@ -4462,7 +4462,8 @@ mod tests {
         assert_eq!(offset(), 0.0, "the list is back at the top");
     }
 
-    /// Enter opens the batch menu while retaining the selected messages and checkbox focus.
+    /// Enter on the selection bar's Delete… opens the batch menu (#321) and
+    /// keeps the selected messages, as the pointer's check box menu does.
     #[test]
     fn keyboard_activation_opens_batch_delete_without_changing_selection() {
         let mut app = app();
@@ -4473,36 +4474,52 @@ mod tests {
         let selected = vec!["ada-doc".to_owned(), "ada-reply".to_owned()];
         app.selection = Some((chat.into(), selected.clone()));
         render(&mut app, &ctx);
+        // The rows' check boxes are the pointer's: the message list's keys
+        // tick messages, and each message says whether it is selected.
         let nodes = accessible_nodes(&mut app, &ctx, Vec::new());
         assert!(
-            nodes
+            !nodes
                 .iter()
                 .any(|(label, _, _)| label.starts_with("Select message from ")),
-            "selection rows have accessible labels"
+            "the check boxes are no nodes"
         );
-        let pick = crate::ui::conversation::bubble_id(chat, "ada-reply").with("pick");
-        ctx.memory_mut(|memory| memory.request_focus(pick));
+        // From the keys, the bar's Delete… opens the batch menu, with focus
+        // on its first usable item, and changes nothing else.
+        let delete = crate::ui::focus::control(&ctx, crate::ui::focus::Stop::SelectionDelete)
+            .expect("Delete… is a Tab stop");
+        ctx.data_mut(|data| data.insert_temp(crate::theme::keyboard_focus_id(), true));
+        ctx.memory_mut(|memory| memory.request_focus(delete));
+        render(&mut app, &ctx);
         frame_with(
             &mut app,
             &ctx,
             vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
         );
         render(&mut app, &ctx);
-        assert!(egui::Popup::is_id_open(&ctx, pick.with("popup")));
+        let popup = delete.with("popup");
+        assert!(egui::Popup::is_id_open(&ctx, popup));
+        assert_eq!(
+            focused_layer(&ctx).map(|layer| layer.id),
+            Some(popup),
+            "a menu item has focus"
+        );
         assert_eq!(app.selection.as_ref().unwrap().1, selected);
         assert!(app.dialog.is_none(), "opening the menu never deletes");
-        let bubble = crate::ui::conversation::bubble_id(chat, "ada-reply");
-        let row_outline = ctx
-            .data(|data| data.get_temp::<crate::theme::FocusOutline>(pick.with("focus-outline")))
-            .unwrap();
-        let bubble_outline = ctx
-            .data(|data| data.get_temp::<crate::theme::FocusOutline>(bubble.with("focus-outline")))
-            .unwrap();
-        let check = ctx
-            .data(|data| data.get_temp::<egui::Rect>(bubble.with("check")))
-            .unwrap();
-        assert!(row_outline.rect.contains_rect(check));
-        assert_eq!(row_outline.rect, bubble_outline.rect);
+        // Escape closes the menu, back on Delete…, and leaves the selection
+        // open: the next Escape ends it.
+        frame_with(
+            &mut app,
+            &ctx,
+            vec![key(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        render(&mut app, &ctx);
+        assert!(!egui::Popup::is_id_open(&ctx, popup), "the menu closed");
+        assert_eq!(
+            app.selection.as_ref().map(|(_, ids)| ids.clone()),
+            Some(selected),
+            "the selection stays"
+        );
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(delete));
     }
 
     /// A clicked notification lands on the message it announced and keeps it
@@ -16541,6 +16558,44 @@ mod tests {
         }
     }
 
+    /// A confirmed batch deletion ends the selection without "Selection
+    /// cancelled": the messages were deleted, not the selection given up.
+    #[test]
+    fn a_confirmed_batch_delete_ends_the_selection_without_a_word() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        app.attach(&ctx);
+        apply_flags(&mut app, Some("delete-selection"));
+        for _ in 0..3 {
+            render(&mut app, &ctx);
+        }
+        assert!(app.selection.is_some());
+        let delete = accessible_nodes(&mut app, &ctx, Vec::new())
+            .into_iter()
+            .find(|(text, role, _)| text == "Delete" && *role == egui::accesskit::Role::Button)
+            .map(|(_, _, pos)| pos)
+            .expect("the dialog's Delete");
+        app.announcer = Default::default();
+        let event = |pressed| egui::Event::PointerButton {
+            pos: delete,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame_with(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(delete), event(true)],
+        );
+        frame_with(&mut app, &ctx, vec![event(false)]);
+        render(&mut app, &ctx);
+        assert!(app.dialog.is_none(), "the deletion was confirmed");
+        assert!(app.selection.is_none(), "the selection ended");
+        let spoken = app.announcer.spoken().concat();
+        assert!(!spoken.contains("Selection cancelled"), "{spoken:?}");
+    }
+
     /// macOS and Wayland report trackpad scrolling in points; a two-finger
     /// scroll moves a picture larger than the area.
     #[test]
@@ -17433,67 +17488,6 @@ mod tests {
     }
 
     #[test]
-    fn message_checkboxes_describe_the_message_and_checked_state() {
-        let mut app = app();
-        let chat = sample_ids()[0].to_owned();
-        let conversation = app.conversations.get_mut(&chat).unwrap();
-        conversation
-            .messages
-            .retain(|row| matches!(row.id.as_str(), "ada-voice" | "you-voice" | "ada-reply"));
-        app.selection = Some((chat.clone(), vec!["ada-voice".into()]));
-        let ctx = egui::Context::default();
-        ctx.enable_accesskit();
-        app.attach(&ctx);
-        for _ in 0..3 {
-            render(&mut app, &ctx);
-        }
-        let mut output = ctx.run_ui(
-            egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(1180.0, 780.0),
-                )),
-                ..Default::default()
-            },
-            |ui| app.frame_ui(ui),
-        );
-        output.textures_delta.clear();
-        let tree = output.platform_output.accesskit_update.unwrap();
-        let boxes: Vec<_> = tree
-            .nodes
-            .iter()
-            .filter(|(_, node)| node.role() == egui::accesskit::Role::CheckBox)
-            .map(|(_, node)| node)
-            .collect();
-        assert_eq!(boxes.len(), 3);
-        let labels: std::collections::HashSet<_> =
-            boxes.iter().map(|node| node.label().unwrap()).collect();
-        assert_eq!(labels.len(), 3, "each message has a distinct label");
-        for row in &app.conversations[&chat].messages {
-            let node = boxes
-                .iter()
-                .find(|node| node.label().unwrap().contains(&row.content.summary()))
-                .expect("label identifies the message content");
-            let label = node.label().unwrap();
-            let sender = if row.from_me {
-                "You".to_owned()
-            } else {
-                app.display_name_or(&row.sender, row.sender_name.as_deref())
-            };
-            assert!(label.contains(&sender), "label identifies the sender");
-            assert!(label.contains(&crate::util::moment_stamp(app.locale, row.timestamp)));
-            assert_eq!(
-                node.toggled(),
-                Some(if row.id == "ada-voice" {
-                    egui::accesskit::Toggled::True
-                } else {
-                    egui::accesskit::Toggled::False
-                })
-            );
-        }
-    }
-
-    #[test]
     fn ineligible_messages_have_neither_selection_boxes_nor_menu_actions() {
         for content in [
             Content::Revoked,
@@ -17538,11 +17532,11 @@ mod tests {
             assert_eq!(
                 ctx.read_response(pick).unwrap().sense,
                 if selectable {
-                    egui::Sense::click_and_drag()
+                    egui::Sense::CLICK | egui::Sense::DRAG
                 } else {
                     egui::Sense::hover()
                 },
-                "only a visible checkbox can receive focus or start a sweep"
+                "only a visible checkbox takes clicks or starts a sweep, and none takes focus"
             );
             app.selection = None;
             render(&mut app, &ctx);
@@ -17560,101 +17554,536 @@ mod tests {
         }
     }
 
-    #[test]
-    fn message_checkboxes_reveal_keyboard_focus_and_outline_the_box() {
+    /// A chat of five messages for keyboard selection, oldest first: Alpha,
+    /// Bravo, a poll, which cannot be selected, Delta and Echo, with the
+    /// message list focused on `current`.
+    fn selection_keys_chat(current: &str) -> (App, egui::Context, String) {
         let mut app = app();
         let chat = sample_ids()[0].to_owned();
-        let conversation = app.conversations.get_mut(&chat).unwrap();
-        let timestamp = conversation.messages.last().unwrap().timestamp;
-        conversation.messages = (0..12)
-            .map(|index| {
-                message(
-                    &chat,
-                    &format!("focus-{index}"),
-                    false,
-                    timestamp + index,
-                    Content::text("A short message for keyboard selection"),
-                )
-            })
-            .collect();
-        app.selection = Some((chat.clone(), Vec::new()));
+        let poll = Content::Poll {
+            question: "Lunch?".into(),
+            options: vec!["Yes".into(), "No".into()],
+            state: Default::default(),
+        };
+        app.conversations.get_mut(&chat).unwrap().messages = [
+            ("alpha", Content::text("Message alpha")),
+            ("bravo", Content::text("Message bravo")),
+            ("poll", poll),
+            ("delta", Content::text("Message delta")),
+            ("echo", Content::text("Message echo")),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (id, content))| {
+            message(
+                &chat,
+                id,
+                index % 2 == 1,
+                1_700_000_000 + index as i64,
+                content,
+            )
+        })
+        .collect();
         let ctx = egui::Context::default();
         app.attach(&ctx);
-        for _ in 0..3 {
-            frame_sized(&mut app, &ctx, 360.0, Vec::new());
+        render(&mut app, &ctx);
+        app.message_cursor.insert(chat.clone(), current.to_owned());
+        focus_messages(&mut app, &ctx);
+        (app, ctx, chat)
+    }
+
+    /// Control, as the platform sends it: with Command on Windows and
+    /// Linux, where egui reports Ctrl as both, and alone on macOS.
+    fn control() -> egui::Modifiers {
+        if cfg!(target_os = "macos") {
+            egui::Modifiers::CTRL
+        } else {
+            egui::Modifiers::CTRL | egui::Modifiers::COMMAND
         }
-        frame_sized(&mut app, &ctx, 360.0, tab());
-        let (message, pick) = app.conversations[&chat]
-            .messages
-            .iter()
-            .find_map(|row| {
-                let id = crate::ui::conversation::bubble_id(&chat, &row.id).with("pick");
-                ctx.read_response(id)
-                    .filter(|response| {
-                        response.interact_rect.is_positive()
-                            && response.interact_rect.y_range() != response.rect.y_range()
-                    })
-                    .map(|response| (row.id.clone(), response))
-            })
-            .expect("a partially clipped message checkbox is laid out");
-        // Request focus inside the pass, as keyboard and accessibility
-        // events do, so egui reports gained_focus to the scroll area.
-        let mut output = ctx.run_ui(
-            egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(1180.0, 360.0),
-                )),
-                ..Default::default()
-            },
-            |ui| {
-                pick.request_focus();
-                app.background_frame(ui.ctx());
-                app.frame_ui(ui);
-            },
+    }
+
+    /// Everything the announcer says for one key press.
+    fn said_after(
+        app: &mut App,
+        ctx: &egui::Context,
+        key: egui::Key,
+        modifiers: egui::Modifiers,
+    ) -> String {
+        app.announcer = Default::default();
+        press_key(app, ctx, key, modifiers);
+        // Released, so the next press of the key is not a repeat, which
+        // Ctrl+Space leaves alone.
+        frame_with(
+            app,
+            ctx,
+            vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: false,
+                repeat: false,
+                modifiers,
+            }],
         );
-        output.textures_delta.clear();
-        for _ in 0..3 {
-            frame_sized(&mut app, &ctx, 360.0, Vec::new());
+        app.announcer
+            .spoken()
+            .map(|text| text.trim_end_matches('\u{200B}'))
+            .concat()
+    }
+
+    fn cursor_of(app: &App, chat: &str) -> String {
+        app.message_cursor.get(chat).cloned().unwrap_or_default()
+    }
+
+    fn list_has_focus(ctx: &egui::Context, chat: &str) -> bool {
+        ctx.memory(|memory| memory.has_focus(crate::ui::conversation::messages_list_id(chat)))
+    }
+
+    /// Ctrl+Space selects the current message as Ctrl-click does: it opens
+    /// a selection with it, saying how to go on, then ticks and unticks
+    /// messages in it. Focus stays on the list.
+    #[test]
+    fn ctrl_space_starts_a_selection_with_the_current_message() {
+        let (mut app, ctx, chat) = selection_keys_chat("bravo");
+        let said = said_after(&mut app, &ctx, egui::Key::Space, control());
+        assert_eq!(app.selection, Some((chat.clone(), vec!["bravo".into()])));
+        assert_eq!(
+            said,
+            "Selecting messages. Space selects, F forwards, Escape cancels. Selected, 1 selected"
+        );
+        assert!(list_has_focus(&ctx, &chat));
+        let said = said_after(&mut app, &ctx, egui::Key::Space, control());
+        assert_eq!(app.selection, Some((chat.clone(), Vec::new())));
+        assert_eq!(said, "Not selected, 0 selected");
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        assert_eq!(cursor_of(&app, &chat), "delta");
+        let said = said_after(&mut app, &ctx, egui::Key::Space, control());
+        assert_eq!(app.selection, Some((chat.clone(), vec!["delta".into()])));
+        assert_eq!(said, "Selected, 1 selected", "the opening is said once");
+        // Only Control and Space: Ctrl+Shift+Space and Alt+Space tick nothing.
+        for modifiers in [control() | egui::Modifiers::SHIFT, egui::Modifiers::ALT] {
+            press_key(&mut app, &ctx, egui::Key::Space, modifiers);
+            assert_eq!(app.selection, Some((chat.clone(), vec!["delta".into()])));
         }
-        assert_eq!(ctx.memory(|memory| memory.focused()), Some(pick.id));
-        assert!(
-            !app.scroll_to_bottom,
-            "keyboard focus releases the bottom pin"
+    }
+
+    /// On macOS, where Control+Space can switch input sources, Shift+Space
+    /// starts a selection with the current message as Control+Space does,
+    /// and ticks or unticks it after; elsewhere it selects nothing. With
+    /// Command, Control or Option held it ticks nothing anywhere.
+    #[test]
+    fn shift_space_selects_as_control_space_does_on_macos() {
+        let (mut app, ctx, chat) = selection_keys_chat("bravo");
+        let shift = egui::Modifiers::SHIFT;
+        let said = said_after(&mut app, &ctx, egui::Key::Space, shift);
+        if cfg!(target_os = "macos") {
+            assert_eq!(app.selection, Some((chat.clone(), vec!["bravo".into()])));
+            assert_eq!(
+                said,
+                "Selecting messages. Space selects, F forwards, Escape cancels. Selected, 1 selected"
+            );
+            said_after(&mut app, &ctx, egui::Key::Space, shift);
+            assert_eq!(app.selection, Some((chat.clone(), Vec::new())));
+        } else {
+            assert_eq!(app.selection, None, "Shift+Space selects only on macOS");
+            assert_eq!(said, "");
+        }
+        let before = app.selection.clone();
+        for extra in [
+            egui::Modifiers::COMMAND,
+            egui::Modifiers::CTRL,
+            egui::Modifiers::ALT,
+        ] {
+            said_after(&mut app, &ctx, egui::Key::Space, shift | extra);
+            assert_eq!(app.selection, before, "Shift+Space with {extra:?}");
+        }
+        assert!(list_has_focus(&ctx, &chat));
+    }
+
+    /// While selecting, Space ticks or unticks the current message, as
+    /// clicking its row does then; otherwise it keeps its own meaning and
+    /// selects nothing.
+    #[test]
+    fn space_toggles_the_current_message_only_while_selecting() {
+        let (mut app, ctx, chat) = selection_keys_chat("alpha");
+        // Pressed and released, so the next press is not a repeat.
+        said_after(&mut app, &ctx, egui::Key::Space, egui::Modifiers::NONE);
+        assert_eq!(app.selection, None, "no selection outside one");
+        app.actions.push(crate::model::Action::StartSelection);
+        render(&mut app, &ctx);
+        let said = said_after(&mut app, &ctx, egui::Key::Space, egui::Modifiers::NONE);
+        assert_eq!(said, "Selected, 1 selected");
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        let said = said_after(&mut app, &ctx, egui::Key::Space, egui::Modifiers::NONE);
+        assert_eq!(said, "Selected, 2 selected");
+        assert_eq!(selected_ids(&app), ["alpha", "bravo"]);
+        press_key(&mut app, &ctx, egui::Key::ArrowUp, egui::Modifiers::NONE);
+        let said = said_after(&mut app, &ctx, egui::Key::Space, egui::Modifiers::NONE);
+        assert_eq!(said, "Not selected, 1 selected");
+        assert_eq!(selected_ids(&app), ["bravo"]);
+        assert!(list_has_focus(&ctx, &chat));
+    }
+
+    /// Space held while selecting ticks the message once, as Ctrl+Space
+    /// does: its repeats do not flip it back and forth.
+    #[test]
+    fn a_held_space_ticks_once_while_selecting() {
+        let (mut app, ctx, _chat) = selection_keys_chat("alpha");
+        app.actions.push(crate::model::Action::StartSelection);
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Space, egui::Modifiers::NONE);
+        assert_eq!(selected_ids(&app), ["alpha"]);
+        for _ in 0..3 {
+            hold_key(&mut app, &ctx, egui::Key::Space, " ");
+            assert_eq!(selected_ids(&app), ["alpha"], "a repeat ticks nothing");
+        }
+    }
+
+    /// A message without a check box is never ticked from the keys: Space
+    /// and Ctrl+Space say why instead, and Space does not vote.
+    #[test]
+    fn a_message_that_cannot_be_selected_says_so() {
+        let (mut app, ctx, chat) = selection_keys_chat("poll");
+        let said = said_after(&mut app, &ctx, egui::Key::Space, control());
+        assert_eq!(said, "Can't be selected");
+        assert_eq!(app.selection, None, "Ctrl+Space opens no selection");
+        app.actions.push(crate::model::Action::StartSelection);
+        render(&mut app, &ctx);
+        let said = said_after(&mut app, &ctx, egui::Key::Space, egui::Modifiers::NONE);
+        assert_eq!(said, "Can't be selected");
+        assert_eq!(app.selection, Some((chat.clone(), Vec::new())));
+        let said = said_after(&mut app, &ctx, egui::Key::Space, control());
+        assert_eq!(said, "Can't be selected");
+        assert_eq!(app.selection, Some((chat, Vec::new())));
+    }
+
+    /// Shift+Up, Shift+Down, Shift+Home, Shift+End, Shift+PgUp and
+    /// Shift+PgDn move the current message as the same keys without Shift
+    /// do, and tick every message from the anchor to it, as Shift-click in
+    /// a file list does, saying the count; moving back toward the anchor
+    /// unticks what the range passes again. A message that cannot be
+    /// selected says so when the range stays as it was. Without a selection
+    /// they open one, anchored on the message the cursor leaves.
+    #[test]
+    fn shift_keys_tick_a_range_from_the_anchor() {
+        let (mut app, ctx, chat) = selection_keys_chat("alpha");
+        let shift = egui::Modifiers::SHIFT;
+        let opened = "Selecting messages. Space selects, F forwards, Escape cancels";
+        assert_eq!(
+            said_after(&mut app, &ctx, egui::Key::ArrowDown, shift),
+            format!("{opened}. 2 selected")
         );
-        let focused = ctx.read_response(pick.id).unwrap();
-        assert_eq!(focused.interact_rect.y_range(), focused.rect.y_range());
-        let check = ctx
-            .data(|data| {
-                data.get_temp::<egui::Rect>(
-                    crate::ui::conversation::bubble_id(&chat, &message).with("check"),
-                )
-            })
-            .unwrap();
-        let outline = ring(&ctx).expect("keyboard focus is visible");
-        assert!(outline.contains_rect(check));
-        assert!(outline.width() < check.width() + 12.0);
-        let mut next_message = None;
-        for _ in 0..50 {
-            frame_sized(&mut app, &ctx, 360.0, tab());
-            frame_sized(&mut app, &ctx, 360.0, Vec::new());
-            let focused = ctx.memory(|memory| memory.focused());
-            next_message = app.conversations[&chat].messages.iter().find_map(|row| {
-                let id = crate::ui::conversation::bubble_id(&chat, &row.id).with("pick");
-                (focused == Some(id) && row.id != message).then(|| row.id.clone())
-            });
-            if next_message.is_some() {
-                break;
+        for (key, cursor, said, selected) in [
+            (egui::Key::ArrowDown, "bravo", "", &["alpha", "bravo"][..]),
+            (
+                egui::Key::ArrowDown,
+                "poll",
+                "Can't be selected",
+                &["alpha", "bravo"][..],
+            ),
+            (
+                egui::Key::ArrowDown,
+                "delta",
+                "3 selected",
+                &["alpha", "bravo", "delta"][..],
+            ),
+            (
+                egui::Key::End,
+                "echo",
+                "4 selected",
+                &["alpha", "bravo", "delta", "echo"][..],
+            ),
+            // Back toward the anchor the range shrinks; past a message that
+            // cannot be selected it says the new count.
+            (
+                egui::Key::ArrowUp,
+                "delta",
+                "3 selected",
+                &["alpha", "bravo", "delta"][..],
+            ),
+            (
+                egui::Key::ArrowUp,
+                "poll",
+                "2 selected",
+                &["alpha", "bravo"][..],
+            ),
+            (
+                egui::Key::ArrowDown,
+                "delta",
+                "3 selected",
+                &["alpha", "bravo", "delta"][..],
+            ),
+            (
+                egui::Key::End,
+                "echo",
+                "4 selected",
+                &["alpha", "bravo", "delta", "echo"][..],
+            ),
+        ] {
+            if !said.is_empty() {
+                assert_eq!(said_after(&mut app, &ctx, key, shift), said, "{key:?}");
             }
+            assert_eq!(cursor_of(&app, &chat), cursor);
+            assert_eq!(selected_ids(&app), selected);
         }
-        let next_message = next_message.expect("Tab reaches another message checkbox");
-        frame_sized(
-            &mut app,
-            &ctx,
-            360.0,
-            vec![key(egui::Key::Space, egui::Modifiers::NONE)],
+        // Opened from the chat's menu, nothing is the anchor yet: the range
+        // starts where the keys do.
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        app.actions.push(crate::model::Action::StartSelection);
+        render(&mut app, &ctx);
+        assert_eq!(
+            said_after(&mut app, &ctx, egui::Key::ArrowUp, shift),
+            "2 selected"
         );
-        assert_eq!(selected_ids(&app), [next_message]);
+        assert_eq!(selected_ids(&app), ["delta", "echo"]);
+        // Shift+Home on the oldest loaded message takes in what is loaded.
+        assert_eq!(
+            said_after(&mut app, &ctx, egui::Key::Home, shift),
+            "4 selected"
+        );
+        assert_eq!(cursor_of(&app, &chat), "alpha");
+        assert_eq!(selected_ids(&app), ["alpha", "bravo", "delta", "echo"]);
+        // A page holds the whole chat here: Shift+PgDn and Shift+PgUp go to
+        // its ends, opening a selection from where they start.
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert_eq!(app.selection, None);
+        assert_eq!(
+            said_after(&mut app, &ctx, egui::Key::PageDown, shift),
+            format!("{opened}. 4 selected")
+        );
+        assert_eq!(cursor_of(&app, &chat), "echo");
+        assert_eq!(selected_ids(&app), ["alpha", "bravo", "delta", "echo"]);
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::ArrowUp, egui::Modifiers::NONE);
+        assert_eq!(
+            said_after(&mut app, &ctx, egui::Key::PageUp, shift),
+            format!("{opened}. 3 selected")
+        );
+        assert_eq!(cursor_of(&app, &chat), "alpha");
+        assert_eq!(selected_ids(&app), ["alpha", "bravo", "delta"]);
+        assert!(list_has_focus(&ctx, &chat));
+    }
+
+    /// As in a file list, Ctrl+Up and Ctrl+Down move the current message
+    /// without ticking anything, and Ctrl+Space ticks it; plain arrows never
+    /// change what is ticked either.
+    #[test]
+    fn ctrl_arrows_move_without_ticking() {
+        let (mut app, ctx, chat) = selection_keys_chat("alpha");
+        said_after(&mut app, &ctx, egui::Key::Space, control());
+        assert_eq!(selected_ids(&app), ["alpha"]);
+        for _ in 0..3 {
+            press_key(
+                &mut app,
+                &ctx,
+                egui::Key::ArrowDown,
+                egui::Modifiers::COMMAND,
+            );
+        }
+        assert_eq!(cursor_of(&app, &chat), "delta");
+        assert_eq!(selected_ids(&app), ["alpha"], "Ctrl+Down ticks nothing");
+        assert_eq!(
+            said_after(&mut app, &ctx, egui::Key::Space, control()),
+            "Selected, 2 selected"
+        );
+        press_key(&mut app, &ctx, egui::Key::ArrowUp, egui::Modifiers::COMMAND);
+        assert_eq!(cursor_of(&app, &chat), "poll");
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        assert_eq!(cursor_of(&app, &chat), "echo");
+        assert_eq!(
+            selected_ids(&app),
+            ["alpha", "delta"],
+            "arrows tick nothing"
+        );
+        // Without a selection Ctrl+Up moves too, and opens none.
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::ArrowUp, egui::Modifiers::COMMAND);
+        assert_eq!(cursor_of(&app, &chat), "delta");
+        assert_eq!(app.selection, None);
+        assert!(list_has_focus(&ctx, &chat));
+    }
+
+    /// While selecting, F forwards the whole selection in the chat's order,
+    /// as the selection bar's Forward… does; with nothing ticked it says so.
+    #[test]
+    fn f_forwards_the_selection_in_order() {
+        let (mut app, ctx, chat) = selection_keys_chat("delta");
+        app.actions.push(crate::model::Action::StartSelection);
+        render(&mut app, &ctx);
+        let said = said_after(&mut app, &ctx, egui::Key::F, egui::Modifiers::NONE);
+        assert_eq!(said, "Nothing selected");
+        assert_eq!(app.dialog, None);
+        // Ticked newest first, Space released in between, as a hand does.
+        said_after(&mut app, &ctx, egui::Key::Space, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::Home, egui::Modifiers::NONE);
+        said_after(&mut app, &ctx, egui::Key::Space, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::F, egui::Modifiers::NONE);
+        assert_eq!(
+            app.dialog,
+            Some(Dialog::Forward {
+                chat: chat.clone(),
+                messages: vec!["alpha".into(), "delta".into()],
+            })
+        );
+    }
+
+    /// Escape ends the selection, says so, and leaves focus on the list.
+    #[test]
+    fn escape_cancels_a_selection_and_says_so() {
+        let (mut app, ctx, chat) = selection_keys_chat("bravo");
+        said_after(&mut app, &ctx, egui::Key::Space, control());
+        let said = said_after(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert_eq!(said, "Selection cancelled");
+        assert_eq!(app.selection, None);
+        assert_eq!(app.open_chat, Some(chat.clone()), "the chat stays open");
+        assert!(list_has_focus(&ctx, &chat));
+    }
+
+    /// While selecting, the message list is multiselectable and each
+    /// message with a check box says whether it is selected, the standard
+    /// way, while the current message stays the list's active item. Outside
+    /// a selection no message carries a selection state at all.
+    #[test]
+    fn selected_messages_say_so_as_items_of_the_list() {
+        let (mut app, ctx, chat) = selection_keys_chat("bravo");
+        let list = crate::ui::conversation::messages_list_id(&chat).accesskit_id();
+        let option = |tree: &egui::accesskit::TreeUpdate, text: &str| {
+            tree.nodes
+                .iter()
+                .find(|(_, node)| {
+                    node.role() == egui::accesskit::Role::ListBoxOption
+                        && node.label().is_some_and(|label| label.contains(text))
+                })
+                .map(|(id, node)| (*id, node.clone()))
+                .unwrap_or_else(|| panic!("no item for {text}"))
+        };
+        let texts = [
+            "Message alpha",
+            "Message bravo",
+            "Lunch?",
+            "Message delta",
+            "Message echo",
+        ];
+        let tree = tree_after(&mut app, &ctx, None);
+        assert!(!node(&tree, list).unwrap().is_multiselectable());
+        for text in texts {
+            assert_eq!(option(&tree, text).1.is_selected(), None, "{text}");
+        }
+        said_after(&mut app, &ctx, egui::Key::Space, control());
+        let tree = tree_after(&mut app, &ctx, None);
+        let list_node = node(&tree, list).unwrap();
+        assert!(list_node.is_multiselectable());
+        for (text, selected) in [
+            ("Message alpha", Some(false)),
+            ("Message bravo", Some(true)),
+            ("Lunch?", None),
+            ("Message delta", Some(false)),
+            ("Message echo", Some(false)),
+        ] {
+            assert_eq!(option(&tree, text).1.is_selected(), selected, "{text}");
+        }
+        assert_eq!(tree.focus, list, "focus stays on the list");
+        assert_eq!(
+            list_node.active_descendant(),
+            Some(option(&tree, "Message bravo").0),
+            "the current message is still the active item"
+        );
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        let tree = tree_after(&mut app, &ctx, None);
+        assert!(!node(&tree, list).unwrap().is_multiselectable());
+        for text in texts {
+            assert_eq!(option(&tree, text).1.is_selected(), None, "{text}");
+        }
+    }
+
+    /// The check boxes are for the pointer only, as links and phone numbers
+    /// are: neither Tab stops nor nodes, since each message says whether it
+    /// is selected. Tab goes from the list to the selection bar's Cancel
+    /// selection and Forward…, which belong to the conversation's section,
+    /// and leaving the bar with the selection puts focus back on the list.
+    #[test]
+    fn selection_check_boxes_are_neither_tab_stops_nor_nodes() {
+        let (mut app, ctx, chat) = selection_keys_chat("bravo");
+        said_after(&mut app, &ctx, egui::Key::Space, control());
+        let tree = tree_after(&mut app, &ctx, None);
+        // The poll's own options are check boxes; the rows' are not nodes.
+        let mut boxes: Vec<_> = tree
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.role() == egui::accesskit::Role::CheckBox)
+            .filter_map(|(_, node)| node.label())
+            .collect();
+        boxes.sort_unstable();
+        assert_eq!(boxes, ["No", "Yes"], "no check box but the poll's");
+        for id in ["alpha", "bravo", "delta", "echo"] {
+            let pick = crate::ui::conversation::bubble_id(&chat, id).with("pick");
+            assert!(
+                node(&tree, pick.accesskit_id()).is_none(),
+                "{id}: its box is no node"
+            );
+            let response = ctx.read_response(pick).expect("the row is drawn");
+            assert!(response.sense.senses_click(), "{id}: still clicked");
+            assert!(!response.sense.is_focusable(), "{id}: not focusable");
+        }
+        let tab = |app: &mut App, modifiers| {
+            press_key(app, &ctx, egui::Key::Tab, modifiers);
+            focused_label(app, &ctx)
+        };
+        assert_eq!(
+            tab(&mut app, egui::Modifiers::NONE).as_deref(),
+            Some("Cancel selection")
+        );
+        assert_eq!(
+            tab(&mut app, egui::Modifiers::NONE).as_deref(),
+            Some("Delete…")
+        );
+        assert_eq!(
+            tab(&mut app, egui::Modifiers::NONE).as_deref(),
+            Some("Forward…")
+        );
+        tab(&mut app, egui::Modifiers::SHIFT);
+        assert_eq!(
+            tab(&mut app, egui::Modifiers::SHIFT).as_deref(),
+            Some("Cancel selection")
+        );
+        tab(&mut app, egui::Modifiers::SHIFT);
+        assert!(
+            list_has_focus(&ctx, &chat),
+            "Shift+Tab goes back to the list"
+        );
+        // F6 from the bar goes to the chat list, the next section shown
+        // while selecting, and Shift+F6 comes back to where it left.
+        tab(&mut app, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::F6, egui::Modifiers::NONE);
+        render(&mut app, &ctx);
+        assert!(ctx.memory(|memory| memory.has_focus(crate::ui::chats::chats_list_id())));
+        press_key(&mut app, &ctx, egui::Key::F6, egui::Modifiers::SHIFT);
+        render(&mut app, &ctx);
+        assert_eq!(
+            focused_label(&mut app, &ctx).as_deref(),
+            Some("Cancel selection")
+        );
+        // Cancel selection from the keys, then Escape from Forward…: the bar
+        // goes, and focus with it to the list.
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        render(&mut app, &ctx);
+        assert_eq!(app.selection, None);
+        assert!(
+            list_has_focus(&ctx, &chat),
+            "Cancel selection gives focus back"
+        );
+        said_after(&mut app, &ctx, egui::Key::Space, control());
+        tab(&mut app, egui::Modifiers::NONE);
+        tab(&mut app, egui::Modifiers::NONE);
+        assert_eq!(
+            tab(&mut app, egui::Modifiers::NONE).as_deref(),
+            Some("Forward…")
+        );
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        render(&mut app, &ctx);
+        assert_eq!(app.selection, None);
+        assert!(list_has_focus(&ctx, &chat), "Escape gives focus back");
     }
 
     /// Where every copy of a label landed in the last frame.

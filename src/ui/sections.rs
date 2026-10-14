@@ -72,7 +72,11 @@ pub fn of(stop: Stop) -> Section {
         | Stop::ChatSearchField
         | Stop::ChatSearchDay
         | Stop::ChatSearchResults
-        | Stop::Messages => Section::Conversation,
+        | Stop::Messages
+        // The selection bar acts on the messages selected above it.
+        | Stop::SelectionCancel
+        | Stop::SelectionDelete
+        | Stop::SelectionForward => Section::Conversation,
         Stop::InfoClose | Stop::InfoControl(_) => Section::Info,
         // The recorder takes the composer's place while a voice message
         // records.
@@ -248,6 +252,9 @@ mod tests {
             (Stop::InfoClose, Section::Info),
             (Stop::InfoControl(0), Section::Info),
             (Stop::Messages, Section::Conversation),
+            (Stop::SelectionCancel, Section::Conversation),
+            (Stop::SelectionDelete, Section::Conversation),
+            (Stop::SelectionForward, Section::Conversation),
             (Stop::Composer, Section::Composer),
             (Stop::Recording, Section::Composer),
             (Stop::MessageActions, Section::Composer),

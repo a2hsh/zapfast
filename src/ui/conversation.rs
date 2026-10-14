@@ -3286,6 +3286,10 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat, under: f32) {
     }
     let list_response =
         super::list_nav::container(ui, list_id, list, list_label, total).tab_stop(Stop::Messages);
+    // While selecting, several of its messages can be selected at once.
+    if selection.is_some() {
+        super::list_nav::mark_multiselectable(ui.ctx(), list_id);
+    }
     let list_focused = list_response.has_focus();
     // Both below only after keyboard navigation, as for a focused bubble.
     // Arriving in the list shows where its current message is.
@@ -3728,8 +3732,13 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat, under: f32) {
                                     let pick = ui.interact(
                                         row,
                                         bubble_id(&chat.id, &message.id).with("pick"),
+                                        // Pointer only, as links and phone
+                                        // numbers are: neither a Tab stop nor
+                                        // a node. The message list's keys tick
+                                        // messages, and each item of the list
+                                        // says whether it is selected.
                                         if selectable {
-                                            Sense::click_and_drag()
+                                            Sense::CLICK | Sense::DRAG
                                         } else {
                                             Sense::hover()
                                         },
@@ -3763,52 +3772,6 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat, under: f32) {
                                     // Only forwardable messages get a box.
                                     if selectable {
                                         select_box(ui, &palette, check, checked);
-                                        if pick.has_focus()
-                                            && ui.ctx().data(|data| {
-                                                data.get_temp::<bool>(theme::keyboard_focus_id())
-                                                    .unwrap_or(false)
-                                            })
-                                        {
-                                            keyboard_navigation.set(true);
-                                        }
-                                        theme::reveal_focus(&pick);
-                                        theme::focus_outline(ui, pick.id, check.expand(3.0), 4.0);
-                                        pick.widget_info(|| {
-                                            let sender = if message.from_me {
-                                                crate::i18n::gettext(view.locale, "You")
-                                                    .into_owned()
-                                            } else {
-                                                (view.names_or)(
-                                                    &message.sender,
-                                                    message.sender_name.as_deref(),
-                                                )
-                                            };
-                                            let summary: String = message
-                                                .content
-                                                .summary()
-                                                .chars()
-                                                .take(120)
-                                                .collect();
-                                            let label = crate::i18n::gettext(
-                                                view.locale,
-                                                "Select message from {sender}, {time}: {summary}",
-                                            )
-                                            .replace("{sender}", &sender)
-                                            .replace(
-                                                "{time}",
-                                                &crate::util::moment_stamp(
-                                                    view.locale,
-                                                    message.timestamp,
-                                                ),
-                                            )
-                                            .replace("{summary}", &summary);
-                                            egui::WidgetInfo::selected(
-                                                egui::WidgetType::Checkbox,
-                                                pick.enabled(),
-                                                checked,
-                                                label,
-                                            )
-                                        });
                                         #[cfg(any(test, feature = "demo"))]
                                         ui.ctx().data_mut(|data| {
                                             data.insert_temp(
@@ -4044,6 +4007,19 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat, under: f32) {
                                 row.response.rect,
                                 false,
                             );
+                            // While selecting, each message that has a check
+                            // box says whether it is ticked; the rest say
+                            // nothing about it, as they say nothing outside a
+                            // selection.
+                            if let Some(selected) = &selection
+                                && crate::app::can_select(&message.content)
+                            {
+                                super::list_nav::mark_selected(
+                                    ui.ctx(),
+                                    row.inner,
+                                    selected.contains(&message.id),
+                                );
+                            }
                         }
                         // Laid out this pass, so its node is in this pass's
                         // tree and may be the list's active descendant.
@@ -6750,6 +6726,8 @@ fn selection_menu(
 
 /// The two ways to delete a selection, shared by the selection's context
 /// menu and the selection bar's Delete menu. Each opens the confirmation.
+/// Returns the first usable item, which a menu the keys opened focuses; a
+/// popup's first pass only measures it, so then there is none.
 fn selection_delete_items(
     ui: &mut egui::Ui,
     palette: &Palette,
@@ -6757,12 +6735,17 @@ fn selection_delete_items(
     can_revoke: bool,
     selected: &[String],
     actions: &mut Vec<Action>,
-) {
+) -> Option<egui::Id> {
+    let mut first = None;
     for (label, for_everyone, enabled) in [
         ("Delete for everyone", true, can_revoke),
         ("Delete for me", false, !selected.is_empty()),
     ] {
-        if widgets::menu_item_enabled(ui, palette, Some(Icon::Trash), label, enabled) {
+        let response = widgets::menu_item_response(ui, palette, Some(Icon::Trash), label, enabled);
+        if enabled && !ui.is_sizing_pass() {
+            first.get_or_insert(response.id);
+        }
+        if enabled && response.clicked() {
             actions.push(Action::ShowDialog(Dialog::ConfirmDeleteSelection {
                 chat: chat.to_owned(),
                 messages: selected.to_vec(),
@@ -6770,6 +6753,7 @@ fn selection_delete_items(
             }));
         }
     }
+    first
 }
 
 /// Offers actions supported by the selected message, including private replies for eligible group senders.
@@ -11852,11 +11836,23 @@ fn select_box(ui: &egui::Ui, palette: &Palette, rect: Rect, checked: bool) {
     }
 }
 
+/// Whether one of the selection bar's buttons had focus when this pass
+/// began: an Escape there ends the selection and takes the bar away with
+/// the focus in it. Read before `focus::begin` forgets the last pass's stops.
+pub(crate) fn selection_bar_had_focus(ctx: &egui::Context) -> bool {
+    super::focus::stops(ctx).into_iter().any(|(stop, id)| {
+        matches!(
+            stop,
+            Stop::SelectionCancel | Stop::SelectionDelete | Stop::SelectionForward
+        ) && ctx.memory(|memory| memory.has_focus(id) || memory.had_focus_last_frame(id))
+    })
+}
+
 /// Replaces the composer while messages are selected.
 fn selection_bar(app: &mut App, ui: &mut egui::Ui, chat: &str, selected: &[String]) {
     let palette = app.palette;
     ui.horizontal(|ui| {
-        if theme::icon_button(
+        let cancel = theme::icon_button(
             ui,
             Icon::X,
             18.0,
@@ -11864,10 +11860,19 @@ fn selection_bar(app: &mut App, ui: &mut egui::Ui, chat: &str, selected: &[Strin
             palette.text,
             "Cancel selection",
         )
-        .clicked()
-            || ui.input(|input| input.key_pressed(Key::Escape))
+        .tab_stop(Stop::SelectionCancel);
+        // Escape closes a menu open over the bar, such as Delete…'s, before
+        // it ends the selection.
+        if cancel.clicked()
+            || (!egui::Popup::is_any_open(ui.ctx())
+                && ui.input(|input| input.key_pressed(Key::Escape)))
         {
             app.actions.push(Action::CancelSelection);
+            // The bar goes with the selection: its focus goes to the
+            // message list, where the messages were picked.
+            if cancel.has_focus() && super::keys::keyboard_or_reader(ui.ctx()) {
+                app.actions.push(Action::FocusMessages);
+            }
         }
         let count = if selected.len() == 1 {
             "1 selected".to_owned()
@@ -11882,7 +11887,8 @@ fn selection_bar(app: &mut App, ui: &mut egui::Ui, chat: &str, selected: &[Strin
                 .add_enabled_ui(!selected.is_empty(), |ui| {
                     theme::pill_button(ui, &palette, "Forward…", true)
                 })
-                .inner;
+                .inner
+                .tab_stop(Stop::SelectionForward);
             if forward.clicked() {
                 app.actions.push(Action::ShowDialog(Dialog::Forward {
                     chat: chat.to_owned(),
@@ -11893,7 +11899,8 @@ fn selection_bar(app: &mut App, ui: &mut egui::Ui, chat: &str, selected: &[Strin
                 .add_enabled_ui(!selected.is_empty(), |ui| {
                     theme::pill_button(ui, &palette, "Delete…", false)
                 })
-                .inner;
+                .inner
+                .tab_stop(Stop::SelectionDelete);
             // Demo/test: hold this menu open for a screenshot.
             #[cfg(any(test, feature = "demo"))]
             if app.open_selection_delete_menu {
@@ -11904,15 +11911,41 @@ fn selection_bar(app: &mut App, ui: &mut egui::Ui, chat: &str, selected: &[Strin
             });
             let width = widgets::menu_width(ui, &["Delete for everyone", "Delete for me"], true);
             let mut actions = Vec::new();
+            // Opened from the keys (Enter or Space on Delete…) or by a screen
+            // reader, focus goes into the menu, stays in it, and returns to
+            // Delete… when it closes, as in the other menus. The pointer's
+            // menu is unchanged.
+            let key_menu = super::list_nav::KeyMenu::for_button(
+                ui.ctx(),
+                delete.id.with("popup"),
+                &delete,
+                false,
+            )
+            .menu(crate::i18n::gettext(app.locale, "Delete…"));
+            let mut first = None;
             // The background takes clicks, not focus: a focusable one is a
             // nameless Tab stop.
-            egui::Popup::menu(&delete)
+            let shown = egui::Popup::menu(&delete)
                 .sense(Sense::CLICK)
                 .width(width)
                 .frame(widgets::menu_frame(&palette))
                 .show(|ui| {
-                    selection_delete_items(ui, &palette, chat, can_revoke, selected, &mut actions);
+                    first = selection_delete_items(
+                        ui,
+                        &palette,
+                        chat,
+                        can_revoke,
+                        selected,
+                        &mut actions,
+                    );
                 });
+            key_menu.finish(
+                ui.ctx(),
+                shown.map(|shown| shown.response.layer_id),
+                false,
+                first,
+                delete.id,
+            );
             app.actions.extend(actions);
         });
     });

@@ -1578,7 +1578,7 @@ fn confirm_delete_messages(
         })
         .collect();
     if selection {
-        actions.push(Action::CancelSelection);
+        actions.push(Action::EndSelection);
     }
     confirm_destructive(
         app,

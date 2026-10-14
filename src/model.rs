@@ -2539,6 +2539,11 @@ pub enum Action {
     ToggleSelected(String),
     /// Selects every message from the last one clicked to this one.
     SelectRange(String),
+    /// Moves the message list's current message, as `MessageCursor` does,
+    /// and selects every message from the selection's anchor to the one it
+    /// reaches, as Shift-click does. Without a selection in the open chat
+    /// it opens one, anchored on the message the cursor leaves.
+    ExtendSelection(crate::ui::list_nav::Step),
     /// Selects the messages a mouse drag has swept, from the row it began on
     /// to the row under the pointer, starting a selection if none was open.
     SweepMessages {
@@ -2549,6 +2554,9 @@ pub enum Action {
     EndSweep,
     /// Leaves selection mode.
     CancelSelection,
+    /// Leaves selection mode once its messages were acted on, such as
+    /// deleted, without a word: what was done says enough.
+    EndSelection,
     /// Loads an outgoing message into the composer for editing.
     Edit(String),
     CancelEdit,

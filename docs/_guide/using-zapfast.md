@@ -112,8 +112,35 @@ once the one before it reached WhatsApp, so a picture cannot overtake the
 text that came before it. Deleted or unsupported messages, phone-only content,
 polls, and interactive messages cannot be selected or forwarded, so they have
 no box. If a selected message is deleted, it leaves the selection automatically.
-Keyboard focus outlines the box; screen readers identify its message
-by sender, time, and a short summary.
+
+From the keyboard, select messages in the message list (Alt+2, or Control+2
+on macOS), as in a file list. Ctrl+Space (on macOS, Control+Space or
+Shift+Space: with more than one input source, macOS takes Control+Space to
+switch between them) selects the current message, starting a selection if
+none is open, and unselects it when pressed again. While selecting, Space also selects or
+unselects the current message, as clicking its row does then. Shift+Up,
+Shift+Down, Shift+Home, Shift+End, Shift+PgUp and Shift+PgDn move as the
+same keys without Shift do and select every message from where the range
+began (the last one you selected, or the one you started from) to the new
+one, starting a selection if none is open; moving back toward where it
+began unselects the messages you pass again. Ctrl+Up and Ctrl+Down (Command on macOS) move without
+changing the selection; plain arrows never change it either. While
+selecting, F forwards every selected message, in their original order, and
+Escape ends the selection; Enter and the keys that act on one message
+(Shift+F10, R, E, C, G, Delete, S, M and Left and Right) wait until it ends. A selection
+shows each photo or video of an album
+in a row of its own: Ctrl+Space (or Shift+Space on macOS) on an album selects the item you moved to
+with Left and Right, and the list moves onto it. The check boxes are for the pointer: they are not
+Tab stops, and screen readers hear each message in the list say "selected"
+or "not selected" instead. ZapFast says "Selecting messages. Space selects,
+F forwards, Escape cancels" when a selection starts, the new state and count
+on each change, such as "Selected, 3 selected", "Can't be selected" for a
+message that has no box, "Nothing selected" for F with nothing selected, and
+"Selection cancelled" when you end it. Deleting or forwarding the selection
+ends it without a word. Tab goes from the message list to the
+bar's close button, Delete… and Forward…, which belong to the conversation
+section; Enter or Space on Delete… opens its menu with focus on the first
+choice. Closing the selection from there puts focus back on the message list.
 
 ## Starred messages
 
@@ -880,6 +907,8 @@ message menu also offers what is about the message rather than in it: going
 to the replied message and the sender's info in a group. S cycles the speed
 of a voice message, or of a video that is playing or paused, through 1x,
 1.5x and 2x, and M mutes or unmutes such a video; both say the result.
+Ctrl+Space (also Shift+Space on macOS), and Shift with the arrows, Home, End
+and the page keys, select messages (see Selecting messages).
 
 The chats form one list too, named Chats, or Archived chats, Locked chats
 or Search results for what it shows; the open chat is its selected item.
@@ -949,12 +978,12 @@ field, and Add account to the new account's linking screen.
 
 The chat view has four sections: the chat list (the rail, the list's
 toolbars, search and the list, or the call history on the Calls page), the
-conversation (Chat actions, the pinned message line, the chat's search pane
-and the message list), the chat info panel while it is open, and the
-composer (the message input and Message actions). F6 moves to the next
-section and Shift+F6 to the previous one, skipping sections that are not
-shown: with no chat open only the chat list is left, and a read-only chat
-has no composer. The chat list, the conversation and the info panel are
+conversation (Chat actions, the pinned message line, the chat's search pane,
+the message list and, while selecting messages, the selection bar), the chat
+info panel while it is open, and the composer (the message input and
+Message actions). F6 moves to the next section and Shift+F6 to the previous
+one, skipping sections that are not shown: with no chat open only the chat
+list is left, and a read-only chat has no composer. The chat list, the conversation and the info panel are
 entered where you left them, or on their list (the info panel on its Close
 button) the first time; the composer is always entered on the message
 input. Alt+3 (Control+3 on macOS) moves to the open chat's first unread
