@@ -474,6 +474,8 @@ fn run() -> eframe::Result<()> {
                         update_receipt: receipt,
                         #[cfg(target_os = "windows")]
                         taskbar: Default::default(),
+                        #[cfg(target_os = "windows")]
+                        menu_key: Default::default(),
                         #[cfg(feature = "demo")]
                         shot,
                         #[cfg(feature = "demo")]
@@ -648,6 +650,9 @@ struct Shell {
     /// This window's unread overlay on its taskbar button.
     #[cfg(target_os = "windows")]
     taskbar: zapfast::notify::Taskbar,
+    /// This window's Applications key, which opens menus as Shift+F10 does.
+    #[cfg(target_os = "windows")]
+    menu_key: zapfast::menu_key::MenuKey,
     #[cfg(feature = "demo")]
     shot: Option<Shot>,
     #[cfg(feature = "demo")]
@@ -716,14 +721,21 @@ impl eframe::App for Shell {
         }
     }
 
-    #[cfg(feature = "demo")]
+    #[cfg(any(feature = "demo", target_os = "windows"))]
     fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        // The Applications key pressed since the last frame, as Shift+F10.
+        #[cfg(target_os = "windows")]
+        self.menu_key.deliver(input);
+        #[cfg(not(feature = "demo"))]
+        let _ = ctx;
+        #[cfg(feature = "demo")]
         if let Some(tour) = &mut self.tour {
             tour.input(&mut self.app, ctx, input);
         }
         // Moves the pointer only while it is elsewhere: each move restarts
         // egui's tooltip delay, so a fake pointer that kept moving in place
         // would never show one.
+        #[cfg(feature = "demo")]
         if let Some(pos) = self.hover
             && ctx.input(|input| input.pointer.latest_pos()) != Some(pos)
         {
@@ -768,6 +780,10 @@ impl Shell {
         }
         app.background_frame(ctx);
         app.window_logic(ctx);
+        #[cfg(target_os = "windows")]
+        if let Some(window) = frame.winit_window() {
+            self.menu_key.watch(window);
+        }
         #[cfg(target_os = "windows")]
         if let (Some(window), Some(count)) = (frame.winit_window(), app.taskbar_badge_count())
             && let Some(at) = self.taskbar.show(window, count, app.locale)

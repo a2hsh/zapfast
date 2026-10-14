@@ -668,7 +668,8 @@ pub fn focused_message(app: &App, ctx: &egui::Context) -> Option<(ChatId, String
 /// what it does: each key is the message menu's item of the same name, with
 /// the same conditions, so the keys never offer what the menu does not.
 /// Enter does what Space does, and Shift+F10 opens the menu itself: egui
-/// never reports the Applications key.
+/// never reports the Applications key; on Windows `crate::menu_key` makes it
+/// Shift+F10.
 fn message_keys(app: &mut App, ctx: &egui::Context, chat: &str, id: &str) -> Vec<Action> {
     use crate::model::Content;
     use crate::ui::conversation as view;
@@ -1610,6 +1611,15 @@ const UNREAD_KEYS: &str = if cfg!(target_os = "macos") {
     "Alt+3"
 };
 
+/// The lists' menu key, for the chat list and the message list alike. On
+/// Windows the Applications key opens the menu too (`crate::menu_key`);
+/// egui does not report it elsewhere.
+const MENU_KEYS: &str = if cfg!(target_os = "windows") {
+    "Shift+F10 / Applications"
+} else {
+    "Shift+F10"
+};
+
 /// Shortcuts shown in the help dialog.
 pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+K / Ctrl+Shift+F", "Search chats"),
@@ -1655,13 +1665,13 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
         "Move through chats without opening them (in the chat list)",
     ),
     ("Enter", "Open the chat (in the chat list)"),
-    ("Shift+F10", "Chat menu (in the chat list)"),
+    (MENU_KEYS, "Chat menu (in the chat list)"),
     (MESSAGES_KEYS, "Go to the message list"),
     (
         "↑ / ↓, Home / End, PgUp / PgDn",
         "Move through messages (in the message list)",
     ),
-    ("Shift+F10", "Message menu (in the message list)"),
+    (MENU_KEYS, "Message menu (in the message list)"),
     ("R", "Reply to the message (in the message list)"),
     ("E", "React to the message (in the message list)"),
     ("C", "Copy the message (in the message list)"),

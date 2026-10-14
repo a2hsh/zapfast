@@ -837,9 +837,11 @@ focused control. Shift+F10 opens the current message's menu with
 focus on its first item; Tab, Shift+Tab, Up and Down move through the menu,
 and Escape closes it and returns to the list. Opened from the keyboard, the
 menu also lists a card's buttons, so none of them needs the pointer; the
-right-click menu is unchanged. The Applications key does not work yet: egui
-does not report it. In the list, R replies to the current message and moves
-to the message input, E reacts to it, C copies its text (or a downloaded
+right-click menu is unchanged. On Windows the Applications key (the menu
+key) opens the same menus as Shift+F10, wherever Shift+F10 opens one; on
+macOS and Linux, egui does not report that key, so use Shift+F10. In the
+list, R replies to the current message and moves to the message input, E
+reacts to it, C copies its text (or a downloaded
 picture), F forwards it, G goes to the message it replies to, and Delete
 (on a Mac, Delete or Fn+Delete) asks to delete it for you; Delete for
 everyone stays in the menu. Space or Enter does what clicking the message
@@ -882,12 +884,12 @@ beside the chat, it closes the panel. In the list, Up and Down move one chat
 without opening it, so nothing is marked as read; Home and End go to the
 first and last chat, and PgUp and PgDn move about a screen. Enter opens the
 chat and moves to its message input, or to its message list when it has
-none. Shift+F10 opens the chat's menu with focus on its first item, and
-Escape returns to the list. In the search field, Down moves into the search
-results on the first one, Up from the first returns to the field, and Enter
-in either opens a chat, as before. Once you pause typing, the search says
-how many results it shows, chats, messages and contacts together, such as
-"5 results" or "No results".
+none. Shift+F10, or the Applications key on Windows, opens the chat's menu
+with focus on its first item, and Escape returns to the list. In the search
+field, Down moves into the search results on the first one, Up from the
+first returns to the field, and Enter in either opens a chat, as before.
+Once you pause typing, the search says how many results it shows, chats,
+messages and contacts together, such as "5 results" or "No results".
 
 The chat's search pane (Ctrl+F) has a search field named for the chat,
 such as "Search messages with Ahmed", and lists its matches as a list

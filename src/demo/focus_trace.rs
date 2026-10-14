@@ -490,6 +490,59 @@ fn the_reactions_are_one_stop_of_the_message_menu() {
     trace.assert_clean(from, "the reactions in the message menu");
 }
 
+/// The Applications key as Windows delivers it: the window's subclass
+/// records the press and the next frame takes it (`menu_key`).
+#[cfg(target_os = "windows")]
+fn applications_key(trace: &mut Trace) {
+    const WINDOW: isize = 0x5a46;
+    let mut key = crate::menu_key::MenuKey::watching(WINDOW);
+    crate::menu_key::note_press(WINDOW);
+    let mut input = egui::RawInput::default();
+    key.deliver(&mut input);
+    trace.action += 1;
+    trace.frame("Applications", input.events);
+    trace.settle("Applications", 5);
+}
+
+/// The Applications key does what Shift+F10 does wherever focus is: it
+/// opens the current message's menu and the current chat's menu, each once,
+/// and does nothing in the message field or the search field.
+#[cfg(target_os = "windows")]
+#[test]
+fn the_applications_key_does_what_shift_f10_does() {
+    for (stop, menu) in [
+        (Stop::Messages, true),
+        (Stop::ChatList, true),
+        (Stop::Composer, false),
+        (Stop::Search, false),
+    ] {
+        let outcome = |applications: bool| {
+            let mut trace = Trace::new(app());
+            focus_stop(&mut trace, stop);
+            let from = trace.mark();
+            if applications {
+                applications_key(&mut trace);
+            } else {
+                trace.press("Shift+F10", egui::Key::F10, egui::Modifiers::SHIFT);
+            }
+            let scenario = format!("{stop:?}, Applications key: {applications}");
+            if menu {
+                trace.assert_clean(from, &scenario);
+            } else {
+                trace.assert_unchanged(from, &scenario);
+            }
+            let open = egui::Popup::is_any_open(&trace.ctx);
+            (trace.last().name.clone(), trace.last().egui, open)
+        };
+        let (name, _, open) = outcome(true);
+        assert_eq!(open, menu, "{stop:?}: a menu is open: {name}");
+        if menu {
+            assert!(name.starts_with("MenuItem"), "{stop:?}: {name}");
+        }
+        assert_eq!(outcome(true), outcome(false), "{stop:?}");
+    }
+}
+
 /// Home and End reach messages far from the view, which are not laid out
 /// yet, and the page keys move the rows laid out above the current one: the
 /// reader still hears each message once.
