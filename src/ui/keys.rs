@@ -580,6 +580,23 @@ fn message_keys(app: &mut App, ctx: &egui::Context, chat: &str, id: &str) -> Vec
         _ => None,
     };
     let blocked = option.and_then(|option| view::option_blocked(message, option, &voting));
+    // A carousel card with no picture has only its buttons: Space or Enter
+    // opens the message menu on them, as Shift+F10 opens it on its first
+    // item. A card with neither takes neither key.
+    let card_menu = match (targets.get(current), &message.content) {
+        (
+            Some(crate::a11y::KeyTarget::Card(index)),
+            Content::Interactive {
+                card: Some(card), ..
+            },
+        ) => card
+            .carousel
+            .get(*index)
+            .filter(|card| card.image.is_none() && !card.buttons.is_empty())
+            .map(|_| *index),
+        _ => None,
+    };
+    let mut opened_card = None;
     let mut actions = Vec::new();
     let mut said = None;
     let mut speed_said = None;
@@ -598,6 +615,11 @@ fn message_keys(app: &mut App, ctx: &egui::Context, chat: &str, id: &str) -> Vec
             // The item heard last is gone: say where the cursor is now
             // rather than act on something else.
             moved = Some(0);
+        } else if let Some(index) = card_menu
+            && take_space_or_enter(input)
+        {
+            actions.push(Action::OpenMessageMenu(id.to_owned()));
+            opened_card = Some(index);
         } else if !primary.is_empty() && take_space_or_enter(input) {
             // What clicking the current target does. Play and pause are not
             // announced: the player's own state is the feedback.
@@ -666,6 +688,9 @@ fn message_keys(app: &mut App, ctx: &egui::Context, chat: &str, id: &str) -> Vec
             actions.push(view::delete_for_me_action(chat, id));
         }
     });
+    if let Some(index) = opened_card {
+        ctx.data_mut(|data| data.insert_temp(view::menu_card_id(chat, id), index));
+    }
     // A download that Space or Enter asked for is spoken if it fails.
     if let Some((message, card)) = actions.iter().find_map(|action| match action {
         Action::Download { message, card, .. } => Some((message.clone(), *card)),
