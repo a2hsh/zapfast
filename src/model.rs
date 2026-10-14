@@ -2768,6 +2768,16 @@ pub enum Action {
     },
     /// The menu asked for by `OpenPhoneMenu` is open: stop asking.
     PhoneMenuOpened,
+    /// Moves the chat list's current chat, from the focused list, without
+    /// opening it.
+    ChatCursor(crate::ui::list_nav::Step),
+    /// Gives the chat list keyboard focus.
+    FocusChats,
+    /// Opens a chat's context menu in the chat list, from the keyboard.
+    OpenChatMenu(ChatId),
+    /// The menu asked for by `OpenChatMenu` is open: stop asking, so it
+    /// opens once and closes as any menu does.
+    ChatMenuOpened,
     /// Scrolls the open chat to a message.
     ScrollTo(String),
     /// Goes to a replied message from the keys: as `ScrollTo`, but the

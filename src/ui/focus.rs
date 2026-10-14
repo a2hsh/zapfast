@@ -1,7 +1,7 @@
 //! Deliberate Tab navigation for the main chat view. Message content and chat
 //! rows remain pointer/accessibility targets, not stops in the primary cycle:
-//! the message list as a whole is one stop, and its keys reach a message's
-//! links and phone numbers.
+//! the message list and the chat list as a whole are one stop each, and the
+//! message list's keys reach a message's links and phone numbers.
 
 use egui::{Context, FocusDirection, Id, Response};
 
@@ -51,6 +51,9 @@ pub enum Stop {
     /// One chip in the label row, by its position among the labels.
     Label(u8),
     ManageLabels,
+    /// The chat list, full or collapsed to the rail's avatars: one stop
+    /// below the chips, the arrows walk its chats.
+    ChatList,
 }
 
 #[derive(Clone, Copy, Debug)]

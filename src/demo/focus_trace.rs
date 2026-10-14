@@ -390,6 +390,7 @@ fn long_chat(app: &mut App, count: usize) {
 /// as Tab would.
 fn focus_stop(trace: &mut Trace, stop: Stop) {
     match stop {
+        Stop::ChatList => trace.press("Alt+1", egui::Key::Num1, alt()),
         Stop::Messages => trace.press("Alt+2", egui::Key::Num2, alt()),
         Stop::Composer => {}
         _ => {
@@ -502,7 +503,7 @@ fn escape_with_the_pointer_lets_go_as_before() {
 }
 
 /// Where focus can be with no chat open: Escape and Alt+2 are tried there.
-const NO_CHAT_STOPS: &[Stop] = &[Stop::Search];
+const NO_CHAT_STOPS: &[Stop] = &[Stop::Search, Stop::ChatList];
 
 /// Escape with nothing to close is not heard at all.
 #[test]
@@ -562,7 +563,7 @@ fn a_deleted_current_message_leaves_the_cursor_on_the_next() {
 
 /// Where focus can be when the window goes away, one stop or more in each
 /// section.
-const REFOCUS_STOPS: &[Stop] = &[Stop::Search, Stop::Messages, Stop::Composer];
+const REFOCUS_STOPS: &[Stop] = &[Stop::Search, Stop::Messages, Stop::Composer, Stop::ChatList];
 
 /// Leaving the window and coming back puts the reader where they were, in
 /// any section.
@@ -1499,6 +1500,12 @@ fn menus_opened_from_the_keys_are_heard_in_the_next_frame() {
             egui::Key::F10,
             egui::Modifiers::SHIFT,
         ),
+        (
+            Stop::ChatList,
+            "Shift+F10",
+            egui::Key::F10,
+            egui::Modifiers::SHIFT,
+        ),
     ] {
         let mut trace = Trace::new(app());
         focus_stop(&mut trace, stop);
@@ -1516,4 +1523,113 @@ fn menus_opened_from_the_keys_are_heard_in_the_next_frame() {
             trace.dump(press)
         );
     }
+}
+
+/// Escape closes the open chat and puts the reader on its row in the chat
+/// list, from the message field and from the message list alike.
+#[test]
+fn escape_in_an_open_chat_lands_on_its_row() {
+    for stop in [Stop::Composer, Stop::Messages] {
+        let mut trace = Trace::new(app());
+        let chat = trace.app.open_chat.clone().expect("the demo opens a chat");
+        focus_stop(&mut trace, stop);
+        let from = trace.mark();
+        trace.press("Escape", egui::Key::Escape, egui::Modifiers::NONE);
+        let scenario = format!("Escape in an open chat from {stop:?}");
+        trace.assert_clean(from, &scenario);
+        assert_eq!(trace.app.open_chat, None, "{scenario}");
+        assert_eq!(
+            trace.last().egui,
+            Some(crate::ui::chats::chats_list_id()),
+            "{scenario}\n{}",
+            trace.dump(from)
+        );
+        let row = trace
+            .ctx
+            .data(|data| {
+                data.get_temp::<egui::Id>(crate::ui::chats::chat_row_id(&chat).with("widget"))
+            })
+            .expect("the closed chat's row is drawn");
+        assert_eq!(
+            trace.last().effective,
+            row.accesskit_id(),
+            "{scenario}: the reader is on the closed chat's row\n{}",
+            trace.dump(from)
+        );
+    }
+}
+
+/// Alt+1 in the message field moves to the chat list and types nothing.
+#[test]
+fn alt_1_in_the_message_field_types_nothing() {
+    let mut trace = Trace::new(app());
+    focus_stop(&mut trace, Stop::Composer);
+    let draft = trace.app.composer.clone();
+    trace.press("Alt+1", egui::Key::Num1, alt());
+    assert_eq!(trace.last().egui, Some(crate::ui::chats::chats_list_id()));
+    assert_eq!(trace.app.composer, draft, "nothing typed");
+}
+
+/// With the pointer, no keyboard navigation and no screen reader, Escape
+/// closes the chat as it always did: no ring on its row in the chat list,
+/// no scroll to it, and focus let go.
+#[test]
+fn escape_with_the_pointer_closes_the_chat_as_before() {
+    let mut app = app();
+    let ctx = egui::Context::default();
+    app.attach(&ctx);
+    render(&mut app, &ctx);
+    assert!(app.open_chat.is_some());
+    press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+    assert_eq!(app.open_chat, None);
+    assert!(app.scroll_chat_into_view.is_none());
+    assert_eq!(ctx.memory(|memory| memory.focused()), None);
+    assert!(!ctx.data(|data| {
+        data.get_temp::<bool>(crate::theme::keyboard_focus_id())
+            .unwrap_or(false)
+    }));
+}
+
+/// The chat list scrolls under the arrows: the reader hears each chat once.
+#[test]
+fn arrowing_the_chat_list_never_reports_the_window() {
+    let mut trace = Trace::new(app());
+    focus_stop(&mut trace, Stop::ChatList);
+    let from = trace.mark();
+    for _ in 0..super::sample_ids().len() {
+        trace.press("Down", egui::Key::ArrowDown, egui::Modifiers::NONE);
+    }
+    for _ in 0..4 {
+        trace.press("Up", egui::Key::ArrowUp, egui::Modifiers::NONE);
+    }
+    trace.press("Home", egui::Key::Home, egui::Modifiers::NONE);
+    trace.press("End", egui::Key::End, egui::Modifiers::NONE);
+    trace.assert_clean(from, "arrows in the chat list");
+}
+
+/// The chat menu's Delete chat asks in a dialog reached in one focus
+/// change, and Escape puts the reader back on the chat's row.
+#[test]
+fn the_chat_menus_dialog_gives_focus_back_to_the_row() {
+    let mut trace = Trace::new(app());
+    focus_stop(&mut trace, Stop::ChatList);
+    let row = trace.last().clone();
+    trace.press("Shift+F10", egui::Key::F10, egui::Modifiers::SHIFT);
+    walk_to(&mut trace, "Delete chat");
+    let press = tap(&mut trace, "Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    assert!(trace.app.dialog.is_some());
+    trace.assert_clean(press, "Delete chat");
+    assert_eq!(
+        trace.frames[press + 1].layer,
+        Some(crate::ui::dialogs::modal_id())
+    );
+    let from = tap(
+        &mut trace,
+        "Escape",
+        egui::Key::Escape,
+        egui::Modifiers::NONE,
+    );
+    trace.assert_clean(from, "Delete chat, closed");
+    assert_eq!(trace.last().egui, Some(crate::ui::chats::chats_list_id()));
+    assert_eq!(trace.last().effective, row.effective, "back on the chat");
 }

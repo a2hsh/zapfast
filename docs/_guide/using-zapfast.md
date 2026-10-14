@@ -839,11 +839,27 @@ to the replied message and the sender's info in a group. S cycles the speed
 of a voice message, or of a video that is playing or paused, through 1x,
 1.5x and 2x, and M mutes or unmutes such a video; both say the result.
 
+The chats form one list too, named Chats, or Archived chats, Locked chats
+or Search results for what it shows; the open chat is its selected item.
+The list is a single Tab stop: Alt+1 (Control+1 on macOS) also moves there,
+and to the chats' avatars in the rail while the list is hidden. From the
+Calls tab, Settings or Starred it goes back to the chats first. In a narrow
+window, where an open chat takes the list's place, Alt+1 goes back to the
+list as Back does; where the chat info panel leaves no room for the list
+beside the chat, it closes the panel. In the list, Up and Down move one chat
+without opening it, so nothing is marked as read; Home and End go to the
+first and last chat, and PgUp and PgDn move about a screen. Enter opens the
+chat and moves to its message input, or to its message list when it has
+none. Shift+F10 opens the chat's menu with focus on its first item, and
+Escape returns to the list. In the search field, Down moves into the search
+results on the first one, Up from the first returns to the field, and Enter
+in either opens a chat, as before.
+
 In the chat view, Tab moves through the message input and its buttons, chat
 search, the chat info panel, the message list, the rail, the chat list's
-header, search and the chat filters, then returns to the input. Shift+Tab goes
-back; hidden controls are skipped. Single messages, their links and phone
-numbers, reactions and chat rows are not stops. The React and Reply buttons
-that appear beside a hovered message are for the pointer only; keyboard and
-screen-reader users reach both from the message menu. Alt+Up/Down switches
-conversations.
+header, search, the chat filters and the chat list, then returns to the
+input. Shift+Tab goes back; hidden controls are skipped. Single messages,
+their links and phone numbers, reactions and chat rows are not stops. The
+React and Reply buttons that appear beside a hovered message are for the
+pointer only; keyboard and screen-reader users reach both from the message
+menu. Alt+Up/Down switches conversations.
