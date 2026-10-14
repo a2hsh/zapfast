@@ -18,6 +18,7 @@ pub mod locations;
 pub mod lock;
 pub mod login;
 pub mod message_info;
+pub(crate) mod overlay;
 pub mod pane;
 pub mod picker;
 pub mod polls;
@@ -81,6 +82,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         login::show(app, ui);
         accounts::corner(app, ctx);
         dialogs::show(app, ctx);
+        overlay::finish(ctx);
         update::show(app, ctx);
         toasts(app, ctx);
         focus_ring(app, ctx);
@@ -116,6 +118,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     image_preview::show_sticker(app, ctx);
     call::show(app, ctx);
     image_editor::show(app, ctx);
+    overlay::finish(ctx);
     drop_target(app, ctx);
     toasts(app, ctx);
     focus_ring(app, ctx);

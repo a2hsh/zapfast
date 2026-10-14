@@ -225,7 +225,10 @@ opens over the window with the region to keep marked, and you can drag that
 region by its edges and corners or move it whole. **Turn left** and **Turn
 right** turn the picture a quarter at a time, and **Reset** puts it back the way
 it started. Press Enter or click the check to keep the crop, or Escape or the
-close button to leave the picture as it was.
+close button to leave the picture as it was. Opened from the keyboard, the
+cropper puts focus on the check (**Keep this crop**), Tab moves between its
+buttons, and Enter or Space presses the focused one, so Enter on the close
+button cancels. The region itself moves and resizes with the pointer only.
 
 Keeping a crop does not change the file you picked. ZapFast writes the cropped
 picture beside its other media and sends that one, keeping any see-through
@@ -791,6 +794,13 @@ oldest loaded message loads older history. The current message stays put when
 new messages arrive, and follows when ZapFast itself takes you to a message:
 the next voice message playing on, a quoted message, or a search result. After
 keyboard navigation it is outlined like any other focused control.
+Shift+F10 opens the current message's menu with focus on its first item; Tab,
+Shift+Tab, Up and Down move through the menu, and Escape closes it and returns
+to the list. The Applications key does not work yet: egui does not report it.
+In the list, R replies to the current message and moves to the message input,
+E reacts to it, C copies its text (or a downloaded picture), F forwards it, and
+Delete asks to delete it for you; Delete for everyone stays in the menu. A call
+in the chat has only a menu to call back, which Space and Enter open too.
 
 In the chat view, Tab moves through the message input and its buttons, phone
 numbers in messages, chat search, the chat info panel, the message list, the

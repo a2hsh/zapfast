@@ -6954,6 +6954,501 @@ mod tests {
     }
 
     #[test]
+    fn letters_type_in_the_composer_not_actions() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("composer-text")));
+        render(&mut app, &ctx);
+        for key in [
+            egui::Key::R,
+            egui::Key::E,
+            egui::Key::C,
+            egui::Key::F,
+            egui::Key::S,
+            egui::Key::M,
+        ] {
+            app.actions.clear();
+            press_key(&mut app, &ctx, key, egui::Modifiers::NONE);
+            assert!(
+                app.reply_to.is_none() && app.reaction_target.is_none(),
+                "{key:?} acted"
+            );
+        }
+    }
+
+    #[test]
+    fn r_replies_to_the_focused_message_and_moves_to_the_composer() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        focus_messages(&mut app, &ctx);
+        let chat = app.open_chat.clone().unwrap();
+        let newest = app.conversations[&chat].messages.last().unwrap().id.clone();
+        press_key(&mut app, &ctx, egui::Key::R, egui::Modifiers::NONE);
+        assert_eq!(app.reply_to.as_deref(), Some(newest.as_str()));
+        assert!(ctx.memory(|memory| memory.has_focus(egui::Id::new("composer-text"))));
+    }
+
+    /// Shift, Ctrl and Alt with a message key are left alone.
+    #[test]
+    fn modified_message_keys_do_not_act() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        focus_messages(&mut app, &ctx);
+        for modifiers in [
+            egui::Modifiers::SHIFT,
+            egui::Modifiers::COMMAND,
+            egui::Modifiers::ALT,
+        ] {
+            press_key(&mut app, &ctx, egui::Key::R, modifiers);
+            assert!(app.reply_to.is_none(), "R with {modifiers:?} replied");
+        }
+        // F10 needs Shift alone, and Shift+Enter is no menu key either.
+        for (key, modifiers) in [
+            (egui::Key::F10, egui::Modifiers::NONE),
+            (
+                egui::Key::F10,
+                egui::Modifiers::SHIFT | egui::Modifiers::COMMAND,
+            ),
+            (egui::Key::Enter, egui::Modifiers::SHIFT),
+        ] {
+            press_key(&mut app, &ctx, key, modifiers);
+            assert!(
+                !egui::Popup::is_any_open(&ctx),
+                "{key:?} with {modifiers:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn shift_f10_opens_the_message_menu_with_focus_inside() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        focus_messages(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::F10, egui::Modifiers::SHIFT);
+        assert!(egui::Popup::is_any_open(&ctx));
+        let focused = ctx.memory(|memory| memory.focused());
+        let chat = app.open_chat.clone().unwrap();
+        assert_ne!(
+            focused,
+            Some(crate::ui::conversation::messages_list_id(&chat)),
+            "focus moved into the menu"
+        );
+        let newest = app.conversations[&chat].messages.last().unwrap().id.clone();
+        let popup = crate::ui::conversation::bubble_id(&chat, &newest).with("popup");
+        assert_eq!(
+            focused_layer(&ctx).map(|layer| layer.id),
+            Some(popup),
+            "a menu item has focus"
+        );
+        assert!(
+            app.open_message_menu.is_none(),
+            "opened once, not pinned open"
+        );
+    }
+
+    /// Enter is no menu key: on a text message, where Space has nothing to
+    /// do, it does nothing either, and the list keeps focus.
+    #[test]
+    fn enter_on_a_text_message_does_nothing() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let chat = focus_fixture_message(&mut app, &ctx, Content::text("Fixture plain text"));
+        app.actions.clear();
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert!(!egui::Popup::is_any_open(&ctx), "no menu opened");
+        assert!(app.open_message_menu.is_none());
+        assert!(
+            app.dialog.is_none() && app.reply_to.is_none() && app.reaction_target.is_none(),
+            "nothing acted on the message"
+        );
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::conversation::messages_list_id(&chat)),
+            "the list keeps focus"
+        );
+    }
+
+    /// Opens the focused message's menu from the keyboard and returns the
+    /// menu's popup id.
+    fn open_menu_by_keys(app: &mut App, ctx: &egui::Context) -> egui::Id {
+        render(app, ctx);
+        focus_messages(app, ctx);
+        let chat = app.open_chat.clone().unwrap();
+        let newest = app.conversations[&chat].messages.last().unwrap().id.clone();
+        press_key(app, ctx, egui::Key::F10, egui::Modifiers::SHIFT);
+        let popup = crate::ui::conversation::bubble_id(&chat, &newest).with("popup");
+        assert!(egui::Popup::is_id_open(ctx, popup));
+        popup
+    }
+
+    #[test]
+    fn escape_closes_the_message_menu_and_returns_to_the_list() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        open_menu_by_keys(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(!egui::Popup::is_any_open(&ctx));
+        let chat = app.open_chat.clone().unwrap();
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::conversation::messages_list_id(&chat))
+        );
+        assert!(app.open_chat.is_some(), "Escape closed the menu only");
+    }
+
+    /// The layer of the focused widget, if any.
+    fn focused_layer(ctx: &egui::Context) -> Option<egui::LayerId> {
+        ctx.memory(|memory| memory.focused())
+            .and_then(|id| ctx.read_response(id))
+            .map(|response| response.layer_id)
+    }
+
+    #[test]
+    fn tab_and_the_arrows_stay_in_a_menu_opened_from_the_keyboard() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        let popup = open_menu_by_keys(&mut app, &ctx);
+        for (key, modifiers) in [
+            (egui::Key::Tab, egui::Modifiers::NONE),
+            (egui::Key::Tab, egui::Modifiers::SHIFT),
+            (egui::Key::ArrowDown, egui::Modifiers::NONE),
+            (egui::Key::ArrowUp, egui::Modifiers::NONE),
+        ] {
+            let mut seen = std::collections::HashSet::new();
+            for _ in 0..24 {
+                press_key(&mut app, &ctx, key, modifiers);
+                assert!(egui::Popup::is_id_open(&ctx, popup), "{key:?} closed it");
+                let layer = focused_layer(&ctx);
+                assert_eq!(
+                    layer.map(|layer| layer.id),
+                    Some(popup),
+                    "{key:?} with {modifiers:?} left the menu"
+                );
+                seen.insert(ctx.memory(|memory| memory.focused()));
+            }
+            assert!(seen.len() > 1, "{key:?} with {modifiers:?} moved focus");
+        }
+    }
+
+    /// The open chat with one fixture message as its newest, the list
+    /// focused on it.
+    fn focus_fixture_message(app: &mut App, ctx: &egui::Context, content: Content) -> String {
+        let chat = app.open_chat.clone().unwrap();
+        let conversation = app.conversations.get_mut(&chat).unwrap();
+        let newest = conversation.messages.last().unwrap().timestamp + 60;
+        conversation
+            .messages
+            .push(message(&chat, "key-fixture", false, newest, content));
+        render(app, ctx);
+        focus_messages(app, ctx);
+        chat
+    }
+
+    #[test]
+    fn c_copies_the_focused_message_text() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        focus_fixture_message(&mut app, &ctx, Content::text("Fixture copy text"));
+        press_key(&mut app, &ctx, egui::Key::C, egui::Modifiers::NONE);
+        assert!(
+            app.toasts.iter().any(|toast| toast.message == "Copied"),
+            "{:?}",
+            app.toasts
+        );
+        assert!(
+            app.announcer
+                .spoken()
+                .iter()
+                .any(|spoken| spoken.contains("Copied"))
+        );
+    }
+
+    #[test]
+    fn c_copies_a_downloaded_photo_and_nothing_from_one_not_downloaded() {
+        for downloaded in [true, false] {
+            let mut app = app();
+            let ctx = egui::Context::default();
+            app.attach(&ctx);
+            app.backend.record_demo_commands();
+            render(&mut app, &ctx);
+            let path = std::path::PathBuf::from("demo/photo.jpg");
+            let mut photo = media("image/jpeg", 120_000, Some(800), Some(600));
+            photo.path = downloaded.then(|| path.clone());
+            focus_fixture_message(
+                &mut app,
+                &ctx,
+                Content::Image {
+                    motion: None,
+                    caption: None,
+                    media: photo,
+                },
+            );
+            app.backend.take_demo_commands();
+            press_key(&mut app, &ctx, egui::Key::C, egui::Modifiers::NONE);
+            let copied = app.backend.take_demo_commands().iter().any(|command| {
+                matches!(
+                    command,
+                    crate::backend::Command::PrepareClipboardImage(copied) if copied == &path
+                )
+            });
+            assert_eq!(copied, downloaded);
+            assert!(!app.toasts.iter().any(|toast| toast.message == "Copied"));
+        }
+    }
+
+    #[test]
+    fn f_opens_the_forward_dialog_for_the_focused_message() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let chat = focus_fixture_message(&mut app, &ctx, Content::text("Fixture forward"));
+        press_key(&mut app, &ctx, egui::Key::F, egui::Modifiers::NONE);
+        assert_eq!(
+            app.dialog,
+            Some(crate::model::Dialog::Forward {
+                chat,
+                messages: vec!["key-fixture".into()],
+            })
+        );
+    }
+
+    /// The Calls tab keeps the open chat beside its history, and the list's
+    /// current message takes its keys there as on the chats' page. A narrow
+    /// window that shows only the history has no list on screen: there the
+    /// keys act on no message.
+    #[test]
+    fn the_message_keys_work_beside_the_call_history() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        app.page = crate::model::Page::Calls;
+        render(&mut app, &ctx);
+        let chat = focus_fixture_message(&mut app, &ctx, Content::text("Fixture forward"));
+        assert_eq!(app.page, crate::model::Page::Calls, "the history stays");
+        let list = crate::ui::conversation::messages_list_id(&chat);
+        assert!(ctx.memory(|memory| memory.has_focus(list)));
+        press_key(&mut app, &ctx, egui::Key::F, egui::Modifiers::NONE);
+        assert_eq!(
+            app.dialog,
+            Some(crate::model::Dialog::Forward {
+                chat,
+                messages: vec!["key-fixture".into()],
+            })
+        );
+
+        // Narrow, the Calls tab shows only its history beside a chat that
+        // was not picked from it.
+        app.dialog = None;
+        let narrow = |app: &mut App, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(500.0, 780.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let ctx = ui.ctx().clone();
+                    app.background_frame(&ctx);
+                    app.frame_ui(ui);
+                },
+            );
+            output.textures_delta.clear();
+        };
+        for _ in 0..2 {
+            narrow(&mut app, Vec::new());
+        }
+        narrow(
+            &mut app,
+            vec![egui::Event::Key {
+                key: egui::Key::F,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert_eq!(app.page, crate::model::Page::Calls);
+        assert_eq!(app.dialog, None, "no message on screen to forward");
+    }
+
+    /// Delete asks first, and for the reversible-looking choice only: the
+    /// menu still offers Delete for everyone.
+    #[test]
+    fn delete_asks_to_delete_the_focused_message_for_me() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let chat = focus_fixture_message(&mut app, &ctx, Content::text("Fixture delete"));
+        press_key(&mut app, &ctx, egui::Key::Delete, egui::Modifiers::NONE);
+        assert_eq!(
+            app.dialog,
+            Some(crate::model::Dialog::ConfirmDeleteMessage {
+                chat: chat.clone(),
+                message: "key-fixture".into(),
+                for_everyone: false,
+            })
+        );
+        assert!(
+            app.conversations[&chat].message("key-fixture").is_some(),
+            "nothing is deleted before the confirmation"
+        );
+    }
+
+    #[test]
+    fn e_opens_the_reaction_picker_with_focus_in_its_search() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let chat = focus_fixture_message(&mut app, &ctx, Content::text("Fixture react"));
+        press_key(&mut app, &ctx, egui::Key::E, egui::Modifiers::NONE);
+        assert_eq!(app.reaction_target, Some((chat, "key-fixture".into())));
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(egui::Id::new("reaction-emoji-search"))
+        );
+    }
+
+    /// Turns the open chat's last `count` messages into one album from
+    /// another sender, its pictures not downloaded, and returns their ids.
+    fn album_fixture(app: &mut App, count: usize) -> Vec<String> {
+        let chat = app.open_chat.clone().unwrap();
+        let messages = &mut app.conversations.get_mut(&chat).unwrap().messages;
+        let total = messages.len();
+        let at = messages[total - count - 1].timestamp + 60;
+        for message in &mut messages[total - count..] {
+            message.from_me = false;
+            message.sender = "album@s.whatsapp.net".into();
+            message.timestamp = at;
+            message.quoted = None;
+            message.content = Content::Image {
+                motion: None,
+                caption: None,
+                media: crate::model::Media {
+                    mime: "image/jpeg".into(),
+                    size: 1,
+                    width: Some(640),
+                    height: Some(480),
+                    album: Some("album-fixture".into()),
+                    path: None,
+                    state: crate::model::MediaState::Idle,
+                },
+            };
+        }
+        messages[total - count..]
+            .iter()
+            .map(|message| message.id.clone())
+            .collect()
+    }
+
+    /// An album is one row of the list, which its first picture names: the
+    /// keys act on that picture even when the list's cursor was left on a
+    /// later one, and its menu opens with focus inside.
+    #[test]
+    fn the_message_keys_act_on_an_albums_first_picture() {
+        let start = || {
+            let mut app = app();
+            let ctx = egui::Context::default();
+            app.attach(&ctx);
+            let ids = album_fixture(&mut app, 3);
+            let chat = app.open_chat.clone().unwrap();
+            render(&mut app, &ctx);
+            focus_messages(&mut app, &ctx);
+            app.message_cursor.insert(chat.clone(), ids[2].clone());
+            (app, ctx, chat, ids)
+        };
+        let (mut app, ctx, _, ids) = start();
+        press_key(&mut app, &ctx, egui::Key::R, egui::Modifiers::NONE);
+        assert_eq!(app.reply_to.as_deref(), Some(ids[0].as_str()));
+        let (mut app, ctx, chat, ids) = start();
+        press_key(&mut app, &ctx, egui::Key::F10, egui::Modifiers::SHIFT);
+        let popup = crate::ui::conversation::bubble_id(&chat, &ids[0]).with("popup");
+        assert!(egui::Popup::is_id_open(&ctx, popup), "the album's menu");
+        assert_eq!(
+            focused_layer(&ctx).map(|layer| layer.id),
+            Some(popup),
+            "a menu item has focus"
+        );
+    }
+
+    /// A call in the chat is a record, with no replies, reactions or
+    /// deletion in its menu: only Space, Enter and Shift+F10 act on it, each
+    /// opening that menu with focus on calling back.
+    #[test]
+    fn a_call_entry_takes_only_the_menu_keys() {
+        let call = || {
+            let mut app = app();
+            let ctx = egui::Context::default();
+            app.attach(&ctx);
+            render(&mut app, &ctx);
+            let chat = focus_fixture_message(
+                &mut app,
+                &ctx,
+                Content::Call {
+                    video: false,
+                    status: crate::model::CallStatus::Missed,
+                    duration: 0,
+                    group: false,
+                },
+            );
+            (app, ctx, chat)
+        };
+        let (mut app, ctx, _) = call();
+        for key in [
+            egui::Key::R,
+            egui::Key::E,
+            egui::Key::C,
+            egui::Key::F,
+            egui::Key::Delete,
+        ] {
+            app.actions.clear();
+            press_key(&mut app, &ctx, key, egui::Modifiers::NONE);
+            assert!(
+                app.reply_to.is_none() && app.reaction_target.is_none() && app.dialog.is_none(),
+                "{key:?} acted on a call"
+            );
+            assert!(!egui::Popup::is_any_open(&ctx), "{key:?} opened a menu");
+        }
+        for (key, modifiers) in [
+            (egui::Key::Space, egui::Modifiers::NONE),
+            (egui::Key::Enter, egui::Modifiers::NONE),
+            (egui::Key::F10, egui::Modifiers::SHIFT),
+        ] {
+            let (mut app, ctx, chat) = call();
+            press_key(&mut app, &ctx, key, modifiers);
+            let popup = crate::ui::conversation::bubble_id(&chat, "key-fixture").with("popup");
+            assert!(
+                egui::Popup::is_id_open(&ctx, popup),
+                "{key:?}: the call's menu"
+            );
+            assert_eq!(
+                focused_layer(&ctx).map(|layer| layer.id),
+                Some(popup),
+                "{key:?}: Voice call has focus"
+            );
+        }
+    }
+
+    #[test]
     fn announcer_nodes_are_in_every_frame() {
         let mut app = app();
         let ctx = egui::Context::default();
@@ -7103,6 +7598,85 @@ mod tests {
             matches!(&edit.source, crate::model::PictureSource::File(path) if *path == staged),
             "the editor and the staged attachment are the same picture"
         );
+    }
+
+    /// A file's cropper opens as its size arrives, in the frame that
+    /// drains it, while the message field it was asked for from still has
+    /// focus: egui only drops it from the next frame on. Enter in that
+    /// first frame keeps the crop, as in every frame after it, rather than
+    /// reach the field and send the draft with the picture.
+    #[test]
+    fn enter_in_the_croppers_first_frame_keeps_the_crop() {
+        let root = tempfile::Builder::new()
+            .prefix("zapfast-demo-")
+            .tempdir()
+            .unwrap();
+        let (mut app, events) = App::headless(AppDirs::under(root.path()), Settings::default());
+        ROOTS.with(|roots| roots.borrow_mut().push(root));
+        populate(&mut app);
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        let (photo, _) = sample_files(&app);
+        let (width, height) = image::image_dimensions(&photo).unwrap();
+        let target = app.stage(crate::app::Pending::File(photo));
+        render(&mut app, &ctx);
+        app.composer = "A draft".into();
+        let composer = crate::ui::conversation::composer_id();
+        ctx.memory_mut(|memory| memory.request_focus(composer));
+        render(&mut app, &ctx);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(composer));
+        app.backend.record_demo_commands();
+        let frame = |app: &mut App, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1180.0, 780.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let ctx = ui.ctx().clone();
+                    app.background_frame(&ctx);
+                    app.frame_ui(ui);
+                },
+            );
+            output.textures_delta.clear();
+        };
+        // Asked for with the pointer: focus stays in the field.
+        app.actions.push(crate::model::Action::EditPicture(target));
+        frame(&mut app, Vec::new());
+        assert!(app.picture_edit.is_none(), "a file waits for its size");
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(composer));
+        events
+            .send(crate::backend::Event::PictureInspected {
+                target,
+                result: Ok((width, height)),
+            })
+            .unwrap();
+        frame(
+            &mut app,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        let commands = app.backend.take_demo_commands();
+        assert!(
+            !commands.iter().any(|command| matches!(
+                command,
+                crate::backend::Command::SendText { .. }
+                    | crate::backend::Command::SendImage { .. }
+                    | crate::backend::Command::SendFiles { .. }
+            )),
+            "{commands:?}"
+        );
+        assert_eq!(app.composer, "A draft");
+        assert!(app.picture_edit.is_none(), "Enter kept the crop");
     }
 
     #[test]

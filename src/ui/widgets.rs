@@ -612,6 +612,20 @@ pub fn menu_item_enabled(
     label: &str,
     enabled: bool,
 ) -> bool {
+    // Drawn either way: a disabled item still shows, greyed out.
+    let response = menu_item_response(ui, palette, icon, label, enabled);
+    enabled && response.clicked()
+}
+
+/// A menu item as [`menu_item_enabled`] draws it, returning its response,
+/// for a menu that needs the item's id (to focus it from the keyboard).
+pub fn menu_item_response(
+    ui: &mut Ui,
+    palette: &Palette,
+    icon: Option<Icon>,
+    label: &str,
+    enabled: bool,
+) -> egui::Response {
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(
         vec2(width, 28.0),
@@ -664,14 +678,14 @@ pub fn menu_item_enabled(
             color,
         );
     }
-    let clicked = enabled && response.clicked();
-    if clicked {
+    if enabled && response.clicked() {
         ui.close();
     }
     if enabled {
-        response.on_hover_cursor(egui::CursorIcon::PointingHand);
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        response
     }
-    clicked
 }
 
 pub fn menu_separator(ui: &mut Ui, palette: &Palette) {

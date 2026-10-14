@@ -33,6 +33,16 @@ enum Row {
     },
 }
 
+/// The picker's `Area`, the layer it is drawn on.
+pub(crate) fn area_id() -> egui::Id {
+    egui::Id::new("picker")
+}
+
+/// The reaction picker's `Area`, the layer it is drawn on.
+pub(crate) fn reaction_area_id() -> egui::Id {
+    egui::Id::new("reaction-picker")
+}
+
 pub fn show(app: &mut App, ctx: &egui::Context) {
     if app.picker == Some(PickerTab::Emoji) && app.reaction_target.is_none() {
         if app.picker_recent.is_none() {
@@ -57,7 +67,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         .left()
         .clamp(screen.left() + 8.0, (screen.right() - WIDTH - 8.0).max(8.0));
     let y = (anchor.top() - HEIGHT - 10.0).max(screen.top() + 8.0);
-    let area = egui::Area::new(egui::Id::new("picker"))
+    let area = egui::Area::new(area_id())
         .fixed_pos(pos2(x, y))
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
@@ -412,7 +422,7 @@ fn reaction_picker(app: &mut App, ctx: &egui::Context) {
         .get(&chat)
         .and_then(|conversation| conversation.message(&message))
         .map(|message| (app.display_name(&message.sender), message.content.summary()));
-    let area = egui::Area::new(egui::Id::new("reaction-picker"))
+    let area = egui::Area::new(reaction_area_id())
         .fixed_pos(pos)
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
