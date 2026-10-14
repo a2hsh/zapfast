@@ -7387,6 +7387,23 @@ mod tests {
         }
     }
 
+    fn sample_video() -> std::path::PathBuf {
+        std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/video/sample.mp4"
+        ))
+    }
+
+    fn video_to_fetch() -> Content {
+        Content::Video {
+            caption: None,
+            media: media("video/mp4", 120_000, Some(800), Some(600)),
+            seconds: Some(6),
+            gif: false,
+            note: false,
+        }
+    }
+
     /// Where a test clicks in the fixture's bubble.
     #[derive(Clone, Copy, Debug)]
     enum Part {
@@ -7919,6 +7936,50 @@ mod tests {
                 "{what}: a menu row has focus"
             );
         }
+    }
+
+    /// A deleted message from someone in a group focuses the menu's first
+    /// row, their info, which comes before Delete for me.
+    #[test]
+    fn a_deleted_group_messages_keyboard_menu_focuses_its_first_row() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = app();
+        app.attach(&ctx);
+        let mut groups: Vec<_> = app
+            .conversations
+            .keys()
+            .filter(|chat| chat.ends_with("@g.us"))
+            .cloned()
+            .collect();
+        groups.sort();
+        let (chat, sender) = groups
+            .into_iter()
+            .find_map(|chat| {
+                let sender = app.conversations[&chat]
+                    .messages
+                    .iter()
+                    .find(|message| !message.from_me)?
+                    .sender
+                    .clone();
+                Some((chat, sender))
+            })
+            .expect("a group with a message from someone else");
+        app.open_chat = Some(chat.clone());
+        render(&mut app, &ctx);
+        let conversation = app.conversations.get_mut(&chat).unwrap();
+        let newest = conversation.messages.last().unwrap().timestamp + 60;
+        let mut deleted = message(&chat, "key-fixture", false, newest, Content::Revoked);
+        deleted.sender = sender.clone();
+        conversation.messages.push(deleted);
+        render(&mut app, &ctx);
+        focus_messages(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::F10, egui::Modifiers::SHIFT);
+        let name = app.display_name_or(&sender, None);
+        assert_eq!(
+            focused_label(&mut app, &ctx),
+            Some(format!("Info about {}", name.trim_start_matches('~')))
+        );
     }
 
     /// Enter is no menu key: on a text message, where Space has nothing to
@@ -14817,6 +14878,316 @@ mod tests {
             crate::backend::Command::ReloadHistory { chat, message }
             if Some(chat) == app.open_chat.as_ref() && message == "ada-link")));
         assert!(app.conversations[app.open_chat.as_ref().unwrap()].fetching_phone);
+    }
+
+    /// The label of the node with keyboard focus, as a screen reader gets it.
+    fn focused_label(app: &mut App, ctx: &egui::Context) -> Option<String> {
+        let tree = tree_after(app, ctx, None);
+        node(&tree, tree.focus).and_then(|node| node.label().map(str::to_owned))
+    }
+
+    /// Down through an open menu until the item named `label` has focus.
+    fn walk_menu_to(app: &mut App, ctx: &egui::Context, label: &str) {
+        for _ in 0..30 {
+            if focused_label(app, ctx).as_deref() == Some(label) {
+                return;
+            }
+            press_key(app, ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        }
+        panic!("no menu item {label}");
+    }
+
+    /// Chooses the open menu's item named `label` from the keys: down to it,
+    /// then Enter.
+    fn choose_menu_item(app: &mut App, ctx: &egui::Context, label: &str) {
+        walk_menu_to(app, ctx, label);
+        press_key(app, ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        render(app, ctx);
+    }
+
+    /// "Go to replied message" goes where clicking the quote goes, and
+    /// the list keeps focus on the replied message.
+    #[test]
+    fn the_menus_go_to_replied_message_does_what_the_quote_click_does() {
+        let (mut on, target) = on_a_reply();
+        on.ctx.enable_accesskit();
+        open_menu_by_keys(&mut on.app, &on.ctx);
+        choose_menu_item(&mut on.app, &on.ctx, "Go to replied message");
+        assert_eq!(on.app.message_cursor.get(&on.chat), Some(&target));
+        let label = current_message_label(&mut on).expect("the list has focus again");
+        let body = on.app.conversations[&on.chat].messages[0].summary();
+        assert!(label.contains(body.trim()), "{label} / {body}");
+        let (mut clicked, target) = on_a_reply();
+        clicked.click(Part::Named("quote"));
+        assert_eq!(clicked.app.message_cursor.get(&clicked.chat), Some(&target));
+    }
+
+    /// A downloaded video's keyboard menu fills the window with it through
+    /// the menu's own "Open in the viewer", where its "Fill the window"
+    /// button takes it too.
+    #[test]
+    fn the_menus_open_in_the_viewer_does_what_the_videos_button_does() {
+        let mut video = video_to_fetch();
+        if let Some(media) = video.media_at_mut(None) {
+            media.path = Some(sample_video());
+        }
+        let mut on = app_on_attachment(video.clone());
+        on.ctx.enable_accesskit();
+        on.app.video.silence();
+        open_menu_by_keys(&mut on.app, &on.ctx);
+        choose_menu_item(&mut on.app, &on.ctx, "Open in the viewer");
+        let shown = |app: &App| {
+            app.image_preview
+                .as_ref()
+                .map(|preview| preview.message().to_owned())
+        };
+        assert_eq!(shown(&on.app).as_deref(), Some("key-fixture"));
+        // The video's own button, under a paused video's controls.
+        let mut clicked = app_on_attachment(video);
+        clicked.app.video.silence();
+        clicked.app.actions.push(crate::model::Action::PlayVideo {
+            message: "key-fixture".into(),
+            path: sample_video(),
+        });
+        let started = std::time::Instant::now();
+        while clicked
+            .app
+            .video
+            .status("key-fixture")
+            .is_none_or(|status| status.state != crate::video::State::Playing)
+        {
+            assert!(started.elapsed() < std::time::Duration::from_secs(10));
+            render(&mut clicked.app, &clicked.ctx);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        clicked.app.actions.push(crate::model::Action::PlayVideo {
+            message: "key-fixture".into(),
+            path: sample_video(),
+        });
+        render(&mut clicked.app, &clicked.ctx);
+        let window = clicked
+            .ctx
+            .data(|data| {
+                data.get_temp::<egui::Rect>(egui::Id::new(("video-window", "key-fixture")))
+            })
+            .expect("the paused video shows its controls");
+        let at = window.center();
+        let press = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame_with(
+            &mut clicked.app,
+            &clicked.ctx,
+            vec![egui::Event::PointerMoved(at), press(true), press(false)],
+        );
+        render(&mut clicked.app, &clicked.ctx);
+        assert_eq!(shown(&clicked.app), shown(&on.app));
+    }
+
+    /// In a group, "Info about {name}" opens the sender's info panel, as clicking
+    /// their name or picture does; one's own messages have none.
+    #[test]
+    fn the_menus_sender_info_does_what_the_name_click_does() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = app();
+        app.attach(&ctx);
+        // The groups in a fixed order (the map's own order changes from run
+        // to run), and the first plain text message from someone else with
+        // their name drawn well inside the window. A text message's click
+        // target spans its bubble for selecting, so its name is where a
+        // click could be lost.
+        let mut groups: Vec<_> = app
+            .conversations
+            .keys()
+            .filter(|chat| chat.ends_with("@g.us"))
+            .cloned()
+            .collect();
+        groups.sort();
+        let inside =
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1180.0, 780.0)).shrink(120.0);
+        let (chat, message, name_rect) = groups
+            .into_iter()
+            .find_map(|chat| {
+                app.open_chat = Some(chat.clone());
+                // A chat scrolls into place over its first frames.
+                for _ in 0..6 {
+                    render(&mut app, &ctx);
+                }
+                app.conversations[&chat]
+                    .messages
+                    .iter()
+                    .filter(|message| {
+                        !message.from_me && matches!(message.content, Content::Text { .. })
+                    })
+                    .find_map(|message| {
+                        ctx.data(|data| {
+                            data.get_temp::<egui::Rect>(
+                                crate::ui::conversation::bubble_id(&chat, &message.id)
+                                    .with("sender"),
+                            )
+                        })
+                        .filter(|rect| inside.contains_rect(*rect))
+                        .map(|rect| (chat.clone(), message.clone(), rect))
+                    })
+            })
+            .expect("a group text message from someone else, its sender's name on screen");
+        let at = name_rect.center();
+        let press = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame_with(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(at), press(true), press(false)],
+        );
+        render(&mut app, &ctx);
+        let by_click = app.info.take().map(|info| info.chat);
+        assert_eq!(
+            by_click.as_ref(),
+            Some(&message.sender),
+            "the sender's info"
+        );
+        render(&mut app, &ctx);
+        app.message_cursor.insert(chat.clone(), message.id.clone());
+        focus_messages(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::F10, egui::Modifiers::SHIFT);
+        let name = app.display_name_or(&message.sender, message.sender_name.as_deref());
+        choose_menu_item(
+            &mut app,
+            &ctx,
+            &format!("Info about {}", name.trim_start_matches('~')),
+        );
+        assert_eq!(
+            app.info.map(|info| info.chat),
+            by_click,
+            "the menu does what the click does"
+        );
+    }
+
+    /// From the keys' menu, a replied message that is not loaded is waited
+    /// for, as G waits for it.
+    #[test]
+    fn the_menus_go_to_replied_message_waits_for_one_not_loaded() {
+        let (mut on, target) = on_a_reply_not_loaded();
+        on.ctx.enable_accesskit();
+        open_menu_by_keys(&mut on.app, &on.ctx);
+        choose_menu_item(&mut on.app, &on.ctx, "Go to replied message");
+        assert_eq!(current_message(&on), "key-fixture");
+        assert!(
+            spoke(&on.app, "Loading the replied message"),
+            "{:?}",
+            on.app.announcer.spoken()
+        );
+        // Focus back in the list from the menu is not a move on.
+        deliver(&mut on, vec![target]);
+        assert_eq!(current_message(&on), "not-loaded");
+    }
+
+    /// Every button of an interactive card is an entry of the menu the keys
+    /// open: usable ones act as a click does, unavailable ones do nothing.
+    /// The menu opened otherwise, as with the pointer, is as it was.
+    #[test]
+    fn the_message_menu_lists_interactive_buttons() {
+        let count = |nodes: &[(String, egui::accesskit::Role, egui::Pos2)], label: &str| {
+            nodes.iter().filter(|(name, _, _)| name == label).count()
+        };
+        let labels = [
+            "Tell me more",
+            "Choose a session",
+            "Copy invitation code",
+            "Open registration form",
+        ];
+        let start = || {
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            let mut app = app();
+            apply_flags(&mut app, Some("interactive-actions"));
+            app.backend.record_demo_commands();
+            app.attach(&ctx);
+            render(&mut app, &ctx);
+            (app, ctx)
+        };
+        let (mut app, ctx) = start();
+        let before = accessible_nodes(&mut app, &ctx, Vec::new());
+        app.open_message_menu = message_menu(&app, "interactive-card");
+        render(&mut app, &ctx);
+        let after = accessible_nodes(&mut app, &ctx, Vec::new());
+        for label in labels {
+            assert_eq!(
+                count(&after, label),
+                count(&before, label),
+                "{label} is no entry of a menu the keys did not open"
+            );
+        }
+        let (mut app, ctx) = start();
+        let before = accessible_nodes(&mut app, &ctx, Vec::new());
+        ctx.data_mut(|data| data.insert_temp(crate::theme::keyboard_focus_id(), true));
+        app.open_message_menu = message_menu(&app, "interactive-card");
+        render(&mut app, &ctx);
+        let after = accessible_nodes(&mut app, &ctx, Vec::new());
+        // The card's own rows carry the same names, so each name appears once
+        // more with the menu open.
+        for label in labels {
+            assert_eq!(
+                count(&after, label),
+                count(&before, label) + 1,
+                "{label} is a menu entry"
+            );
+        }
+        // The unavailable button's entry is disabled, in the menu and in the
+        // card alike.
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 780.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                let ctx = ui.ctx().clone();
+                app.background_frame(&ctx);
+                app.frame_ui(ui);
+            },
+        );
+        output.textures_delta.clear();
+        let tree = output.platform_output.accesskit_update.unwrap();
+        let states: Vec<bool> = tree
+            .nodes
+            .iter()
+            .filter(|(_, node)| {
+                node.label() == Some("Open registration form")
+                    && node.role() == egui::accesskit::Role::Button
+            })
+            .map(|(_, node)| node.is_disabled())
+            .collect();
+        assert_eq!(states, [true, true], "disabled in the card and the menu");
+        // Chosen from the keys, an entry does what its button's click does.
+        let (mut app, ctx) = start();
+        let choose = |app: &mut App, label: &str| {
+            app.message_cursor
+                .insert(SAMPLES[0].id.into(), "interactive-card".into());
+            focus_messages(app, &ctx);
+            press_key(app, &ctx, egui::Key::F10, egui::Modifiers::SHIFT);
+            choose_menu_item(app, &ctx, label);
+        };
+        choose(&mut app, "Copy invitation code");
+        assert!(
+            app.toasts.iter().any(|toast| toast.message == "Copied"),
+            "the code is copied"
+        );
+        choose(&mut app, "Choose a session");
+        assert!(matches!(
+            app.dialog,
+            Some(Dialog::InteractiveList { button: 1, .. })
+        ));
     }
 
     /// Opening the log hands it to the worker, which waits to see it open or
