@@ -597,10 +597,26 @@ pub fn submenu<R>(
         );
     }
     let width = submenu_width(ui, items);
-    egui::containers::menu::SubMenu::new().show(ui, &response, |ui| {
+    let shown = egui::containers::menu::SubMenu::new().show(ui, &response, |ui| {
         ui.set_width(width);
         add_contents(ui)
-    })
+    });
+    // egui gives a submenu's background a focusable sense, with no way to
+    // ask for another, so egui's own Tab order can land on it: name it after
+    // its row, as the menu it holds is. A drawn background has its node.
+    let background = egui::containers::menu::SubMenu::id_from_widget_id(response.id).with("move");
+    if shown.is_some()
+        && ui
+            .ctx()
+            .viewport(|viewport| viewport.this_pass.widgets.contains(background))
+    {
+        let label = label.to_owned();
+        ui.ctx().accesskit_node_builder(background, |node| {
+            node.set_role(egui::accesskit::Role::GenericContainer);
+            node.set_label(label);
+        });
+    }
+    shown
 }
 
 pub fn menu_item(ui: &mut Ui, palette: &Palette, icon: Option<Icon>, label: &str) -> bool {
@@ -629,6 +645,60 @@ pub fn menu_item_response(
     enabled: bool,
 ) -> egui::Response {
     menu_item_named(ui, palette, icon, label, label, enabled)
+}
+
+/// Names a control that paints its own look, for a screen reader: a button
+/// called `label`. Without a name, egui's fallback Tab order and a screen
+/// reader's review reach it as "unknown".
+pub fn name_button(response: &egui::Response, label: &str) {
+    name_button_with(response, || label.to_owned());
+}
+
+/// [`name_button`] for a name worth building only when it is read: egui
+/// asks for it only while a screen reader is attached, or when the button
+/// is used, so idle frames of a long chat pay nothing for it.
+pub fn name_button_with(response: &egui::Response, label: impl Fn() -> String) {
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, response.enabled(), label())
+    });
+}
+
+/// Names the resize edge of the panel `panel` (the id given to
+/// `egui::Panel`), drawn in this pass: egui makes it a focusable node with
+/// no role or name, which a screen reader reads as "unknown".
+pub fn name_panel_edge(ctx: &egui::Context, panel: egui::Id, label: &str) {
+    // egui's own id for a panel's resize handle.
+    let edge = panel.with("__resize");
+    if !ctx.viewport(|viewport| viewport.this_pass.widgets.contains(edge)) {
+        return;
+    }
+    let label = label.to_owned();
+    ctx.accesskit_node_builder(edge, |node| {
+        node.set_role(egui::accesskit::Role::Splitter);
+        node.set_label(label);
+    });
+}
+
+/// Names a text field by what it is for, usually its placeholder: egui
+/// gives a field's hint text no accessible name of its own. Also names a
+/// slider by the word drawn beside it. The placeholder egui also gives the
+/// field goes: it says what the name already says, and a screen reader
+/// reads it after the name ("Password, edit, Password").
+pub fn name_field(response: &egui::Response, label: &str) {
+    let label = label.to_owned();
+    response.ctx.accesskit_node_builder(response.id, |node| {
+        node.set_label(label);
+        node.clear_placeholder();
+    });
+}
+
+/// As [`name_field`], keeping the placeholder: for a field whose hint says
+/// something the name does not, such as a sample of what to type.
+pub fn name_field_keeping_hint(response: &egui::Response, label: &str) {
+    let label = label.to_owned();
+    response
+        .ctx
+        .accesskit_node_builder(response.id, |node| node.set_label(label));
 }
 
 /// As [`menu_item_response`], with a screen reader name that differs from the
@@ -849,8 +919,12 @@ pub fn search_field(
             .layouter(&mut layouter),
     );
     theme::focus_outline(ui, response.id, rect, height / 2.0);
-    ui.ctx()
-        .accesskit_node_builder(response.id, |node| node.set_label(hint));
+    // Named by its hint, which is then no placeholder too: a screen reader
+    // would read it twice.
+    ui.ctx().accesskit_node_builder(response.id, |node| {
+        node.set_label(hint);
+        node.clear_placeholder();
+    });
     if !text.is_empty() {
         let clear_rect = Rect::from_center_size(
             pos2(rect.right() - 17.0, rect.center().y),

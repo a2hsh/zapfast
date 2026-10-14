@@ -31,7 +31,7 @@ pub fn create(app: &mut App, ui: &mut egui::Ui, chat: &str) {
         } else {
             Align::LEFT
         };
-        ui.add(
+        let question = ui.add(
             egui::TextEdit::singleline(&mut app.poll_draft.question)
                 .id_salt("poll-question")
                 .hint_text("Ask a question")
@@ -41,6 +41,12 @@ pub fn create(app: &mut App, ui: &mut egui::Ui, chat: &str) {
                 .horizontal_align(question_align)
                 .layouter(&mut layouter),
         );
+        // The placeholder is all the field shows of what it is for.
+        widgets::name_field(
+            &question,
+            &crate::i18n::gettext(app.locale, "Ask a question"),
+        );
+        let locale = app.locale;
         ui.add_space(8.0);
         theme::text(ui, "Answers", theme::medium(13.5), palette.secondary);
         let height = (ui.ctx().content_rect().height() - 320.0).clamp(90.0, 330.0);
@@ -63,7 +69,7 @@ pub fn create(app: &mut App, ui: &mut egui::Ui, chat: &str) {
                         } else {
                             Align::LEFT
                         };
-                        ui.add(
+                        let field = ui.add(
                             egui::TextEdit::singleline(answer)
                                 .id_salt(("poll-answer", index))
                                 .hint_text(format!("Answer {}", index + 1))
@@ -72,6 +78,13 @@ pub fn create(app: &mut App, ui: &mut egui::Ui, chat: &str) {
                                 .desired_width(width)
                                 .horizontal_align(answer_align)
                                 .layouter(&mut answer_layouter),
+                        );
+                        widgets::name_field(
+                            &field,
+                            &crate::a11y::fill(
+                                &crate::i18n::gettext(locale, "Answer {number}"),
+                                &[("number", &(index + 1).to_string())],
+                            ),
                         );
                         if removable
                             && theme::icon_button(
@@ -93,7 +106,8 @@ pub fn create(app: &mut App, ui: &mut egui::Ui, chat: &str) {
             app.poll_draft.options.remove(index);
         }
         if app.poll_draft.options.len() < 12
-            && theme::soft_button(ui, &palette, Some(Icon::Plus), "Add answer", false).clicked()
+            && theme::soft_action_button(ui, &palette, Some(Icon::Plus), "Add answer", false)
+                .clicked()
         {
             app.poll_draft.options.push(String::new());
         }
@@ -110,7 +124,7 @@ pub fn create(app: &mut App, ui: &mut egui::Ui, chat: &str) {
         theme::text(ui, *error, theme::regular(12.0), palette.dim);
     }
     ui.horizontal(|ui| {
-        if theme::soft_button(ui, &palette, None, "Cancel", false).clicked() {
+        if theme::soft_action_button(ui, &palette, None, "Cancel", false).clicked() {
             app.actions.push(Action::CloseDialog);
         }
         ui.add_enabled_ui(

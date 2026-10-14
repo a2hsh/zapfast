@@ -430,7 +430,7 @@ fn sections(app: &App) -> Vec<Section> {
                 wallpaper_label(app.locale, app.settings.wallpaper_color_for(palette.dark))
             };
             let response =
-                theme::soft_action_button(ui, &palette, Some(Icon::ChevronRight), &label);
+                theme::soft_action_button(ui, &palette, Some(Icon::ChevronRight), &label, false);
             // The button shows the current wallpaper; its name says which
             // setting that is.
             let name = crate::a11y::fill(
@@ -848,8 +848,14 @@ fn sections(app: &App) -> Vec<Section> {
         {
             let open_folder = open_folder.clone();
             move |ui, app| {
-                if theme::soft_action_button(ui, &palette, Some(Icon::ExternalLink), &open_folder)
-                    .clicked()
+                if theme::soft_action_button(
+                    ui,
+                    &palette,
+                    Some(Icon::ExternalLink),
+                    &open_folder,
+                    false,
+                )
+                .clicked()
                 {
                     app.actions.push(Action::OpenFolder(state));
                 }
@@ -864,8 +870,14 @@ fn sections(app: &App) -> Vec<Section> {
         translated(locale, "Downloads"),
         media.display().to_string(),
         move |ui, app| {
-            if theme::soft_action_button(ui, &palette, Some(Icon::ExternalLink), &open_folder)
-                .clicked()
+            if theme::soft_action_button(
+                ui,
+                &palette,
+                Some(Icon::ExternalLink),
+                &open_folder,
+                false,
+            )
+            .clicked()
             {
                 let _ = std::fs::create_dir_all(&media);
                 app.actions.push(Action::OpenFolder(media.clone()));
@@ -875,6 +887,7 @@ fn sections(app: &App) -> Vec<Section> {
                 &palette,
                 None,
                 &crate::i18n::gettext(app.locale, "Change…"),
+                false,
             )
             .clicked()
             {
@@ -886,6 +899,7 @@ fn sections(app: &App) -> Vec<Section> {
                     &palette,
                     None,
                     &crate::i18n::gettext(app.locale, "Use default"),
+                    false,
                 )
                 .clicked()
             {
@@ -915,6 +929,7 @@ fn sections(app: &App) -> Vec<Section> {
                 &palette,
                 Some(Icon::FileText),
                 &crate::i18n::gettext(app.locale, "Open"),
+                false,
             )
             .clicked()
             {
@@ -970,7 +985,7 @@ fn app_lock_rows(app: &App, privacy: &mut Section) {
                 vec![(FormMode::Set, gettext(app.locale, "Set password…"))]
             };
             for (mode, label) in modes {
-                if theme::soft_action_button(ui, &palette, None, &label).clicked() {
+                if theme::soft_action_button(ui, &palette, None, &label, false).clicked() {
                     app.actions.push(Action::AppLockForm(Some(mode)));
                 }
             }
@@ -1213,8 +1228,14 @@ fn theme_picker(ui: &mut egui::Ui, app: &mut App) {
             egui::pos2(rect.left() + 8.0, rect.center().y - text.size().y / 2.0),
             palette.text,
         );
-        if theme::soft_action_button(ui, &palette, Some(Icon::ExternalLink), "Open themes folder")
-            .clicked()
+        if theme::soft_action_button(
+            ui,
+            &palette,
+            Some(Icon::ExternalLink),
+            "Open themes folder",
+            false,
+        )
+        .clicked()
         {
             app.actions.push(Action::OpenThemesFolder);
         }
@@ -1223,6 +1244,7 @@ fn theme_picker(ui: &mut egui::Ui, app: &mut App) {
             &palette,
             Some(Icon::ExternalLink),
             &crate::i18n::gettext(app.locale, "How to make a theme"),
+            false,
         )
         .clicked()
         {
@@ -1487,11 +1509,13 @@ fn image_buttons(app: &mut App, ui: &mut egui::Ui, width: f32) {
         Layout::left_to_right(Align::Center),
         |ui| {
             ui.add_space(((width - row_width) / 2.0).max(0.0));
-            if theme::soft_action_button(ui, &palette, Some(Icon::Image), &choose).clicked() {
+            if theme::soft_action_button(ui, &palette, Some(Icon::Image), &choose, false).clicked()
+            {
                 app.actions.push(Action::PickWallpaperImage);
             }
             if has_image
-                && theme::soft_action_button(ui, &palette, Some(Icon::Trash), &remove).clicked()
+                && theme::soft_action_button(ui, &palette, Some(Icon::Trash), &remove, false)
+                    .clicked()
             {
                 app.actions.push(Action::RemoveWallpaperImage);
             }
@@ -1570,7 +1594,7 @@ fn storage_usage(ui: &mut egui::Ui, app: &mut App) {
             let label = crate::i18n::gettext(locale, "Clear…");
             let clear = ui
                 .add_enabled_ui(measured && total > 0 && !clearing, |ui| {
-                    theme::soft_button(ui, &palette, Some(Icon::Trash), &label, false)
+                    theme::soft_action_button(ui, &palette, Some(Icon::Trash), &label, false)
                 })
                 .inner;
             if clear.clicked() {
@@ -1806,6 +1830,7 @@ fn account(app: &mut App, ui: &mut egui::Ui) {
                     &palette,
                     Some(Icon::LogOut),
                     &crate::i18n::gettext(app.locale, "Remove this account"),
+                    false,
                 )
                 .clicked()
                 {
@@ -1818,6 +1843,7 @@ fn account(app: &mut App, ui: &mut egui::Ui) {
                 &palette,
                 Some(Icon::LogOut),
                 &crate::i18n::gettext(app.locale, "Unlink this computer"),
+                false,
             )
             .clicked()
             {
@@ -1828,6 +1854,7 @@ fn account(app: &mut App, ui: &mut egui::Ui) {
                 &palette,
                 Some(Icon::Plus),
                 &crate::i18n::gettext(app.locale, "Add account"),
+                false,
             )
             .clicked()
             {
@@ -1929,7 +1956,9 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
         if let Some(update) = &app.update {
             let label = crate::i18n::gettext(app.locale, "Update to {version}")
                 .replace("{version}", &update.version);
-            if theme::soft_action_button(ui, &palette, Some(Icon::Download), &label).clicked() {
+            if theme::soft_action_button(ui, &palette, Some(Icon::Download), &label, false)
+                .clicked()
+            {
                 app.actions.push(Action::ShowUpdate);
             }
         }
@@ -1938,6 +1967,7 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
             &palette,
             Some(Icon::Keyboard),
             &crate::i18n::gettext(app.locale, "Keyboard shortcuts"),
+            false,
         )
         .clicked()
         {
@@ -1948,6 +1978,7 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
             &palette,
             Some(Icon::Info),
             &crate::i18n::gettext(app.locale, "About"),
+            false,
         )
         .clicked()
         {
@@ -1958,6 +1989,7 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
             &palette,
             Some(Icon::ExternalLink),
             &crate::i18n::gettext(app.locale, "Source code"),
+            false,
         )
         .clicked()
         {

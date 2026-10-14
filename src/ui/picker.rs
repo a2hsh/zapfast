@@ -562,6 +562,8 @@ fn category_tabs(
                         && app.picker_search.is_empty()
                         && Some(label) == default);
                 let (rect, response) = ui.allocate_exact_size(vec2(cell, cell), Sense::click());
+                // Named by its tooltip, the category it jumps to.
+                widgets::name_button(&response, label);
                 if ui.is_rect_visible(rect) {
                     if selected {
                         ui.painter().rect_filled(
@@ -761,6 +763,8 @@ fn emoji_grid(
                             let selected = *first + offset == app.emoji_selected;
                             let (rect, response) =
                                 ui.allocate_exact_size(vec2(cell, row_height), Sense::click());
+                            // A screen reader names the emoji itself.
+                            widgets::name_button(&response, emoji);
                             if ui.is_rect_visible(rect) {
                                 if selected {
                                     ui.painter().rect_filled(
@@ -995,6 +999,8 @@ fn gif_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                         .frame(Frame::NONE)
                         .desired_width(f32::INFINITY),
                 );
+                // The placeholder is all the field shows of what it is for.
+                widgets::name_field(&response, &gettext(app.locale, "GIPHY API key"));
                 if response.changed() {
                     app.actions.push(Action::SettingsChanged);
                 }
@@ -1040,6 +1046,8 @@ fn gif_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     let gap = 6.0;
     let tile_width = (ui.available_width() - gap * (columns as f32 - 1.0)) / columns as f32;
     let mut picked = None;
+    let locale = app.locale;
+    let mut number = 0;
     egui::ScrollArea::vertical()
         .id_salt("gif-grid")
         .auto_shrink([false, false])
@@ -1052,6 +1060,15 @@ fn gif_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                             (gif.height.max(1) as f32 / gif.width.max(1) as f32).clamp(0.5, 1.4);
                         let size = vec2(tile_width, (tile_width * ratio).min(150.0));
                         let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+                        // GIPHY gives no title, so the tile says where it is.
+                        number += 1;
+                        widgets::name_button(
+                            &response,
+                            &crate::a11y::fill(
+                                &gettext(locale, "GIF {number}"),
+                                &[("number", &number.to_string())],
+                            ),
+                        );
                         if ui.is_rect_visible(rect) {
                             ui.painter().rect_filled(rect, 6.0, palette.surface);
                             if let Some(still) = &gif.still {
@@ -1203,6 +1220,13 @@ fn shelf_strip(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                         (StickerShelf::Pack(_), Some(pack)) => pack.name.clone().into(),
                         (StickerShelf::Pack(_), None) => "".into(),
                     };
+                    // The tooltip names the tab; a pack without one is a pack.
+                    let name = if tip.is_empty() {
+                        gettext(locale, "Sticker pack")
+                    } else {
+                        tip.clone()
+                    };
+                    widgets::name_button(&response, &name);
                     if response
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .on_hover_text(tip.as_ref())
@@ -1458,7 +1482,7 @@ fn add_page(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             ui.add_space(4.0);
             new_pack_row(app, ui, palette);
             ui.add_space(6.0);
-            if theme::soft_button(
+            if theme::soft_action_button(
                 ui,
                 palette,
                 Some(Icon::Image),
@@ -1484,7 +1508,7 @@ fn new_pack_row(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             .corner_radius(CornerRadius::same(theme::RADIUS))
             .inner_margin(Margin::symmetric(10, 6))
             .show(ui, |ui| {
-                ui.add(
+                let field = ui.add(
                     egui::TextEdit::singleline(&mut app.sticker_pack_name)
                         .id(egui::Id::new("sticker-pack-name"))
                         .hint_text(
@@ -1496,7 +1520,10 @@ fn new_pack_row(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                         .text_color(palette.text)
                         .frame(Frame::NONE)
                         .desired_width(ui.available_width() - button - 26.0),
-                )
+                );
+                // The placeholder is all the field shows of what it is for.
+                widgets::name_field(&field, &gettext(locale, "New pack…"));
+                field
             });
         theme::focus_outline(
             ui,
@@ -1507,7 +1534,7 @@ fn new_pack_row(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
         if field.inner.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter)) {
             create = true;
         }
-        if theme::soft_button(ui, palette, Some(Icon::Plus), &label, false).clicked() {
+        if theme::soft_action_button(ui, palette, Some(Icon::Plus), &label, false).clicked() {
             create = true;
         }
     });
@@ -1533,7 +1560,7 @@ fn import_row(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             .corner_radius(CornerRadius::same(theme::RADIUS))
             .inner_margin(Margin::symmetric(10, 6))
             .show(ui, |ui| {
-                ui.add(
+                let field = ui.add(
                     egui::TextEdit::singleline(&mut app.sticker_link)
                         .id(egui::Id::new("sticker-link"))
                         .hint_text(
@@ -1545,7 +1572,10 @@ fn import_row(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                         .text_color(palette.text)
                         .frame(Frame::NONE)
                         .desired_width(ui.available_width() - buttons - 26.0),
-                )
+                );
+                // The placeholder is all the field shows of what it is for.
+                widgets::name_field(&field, &gettext(locale, "Paste a signal.art link"));
+                field
             });
         theme::focus_outline(
             ui,
@@ -1564,14 +1594,14 @@ fn import_row(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                 .push(Action::ImportStickerUrl(app.sticker_link.trim().to_owned()));
         }
         // Open the gallery where users can copy signal.art pack links.
-        if theme::soft_button(ui, palette, Some(Icon::ExternalLink), &find, false)
+        if theme::soft_action_button(ui, palette, Some(Icon::ExternalLink), &find, false)
             .on_hover_text(gettext(locale, "Browse signalstickers.org").as_ref())
             .clicked()
         {
             app.actions
                 .push(Action::OpenUrl("https://signalstickers.org/".to_owned()));
         }
-        if theme::soft_button(ui, palette, Some(Icon::FileText), &open, false).clicked() {
+        if theme::soft_action_button(ui, palette, Some(Icon::FileText), &open, false).clicked() {
             app.actions.push(Action::PickStickerArchive);
         }
     });
@@ -1642,16 +1672,26 @@ fn sticker_grid(
     ];
     labels.extend(grid.local.iter().map(|pack| pack.name.as_str()));
     let menu_width = widgets::menu_width(ui, &labels, true);
-    for row in stickers.chunks(columns) {
+    let sticker = gettext(grid.locale, "Sticker {number}");
+    for (row_index, row) in stickers.chunks(columns).enumerate() {
         ui.horizontal(|ui| {
-            for path in row {
+            for (offset, path) in row.iter().enumerate() {
                 let (rect, response) = ui.allocate_exact_size(Vec2::splat(cell), Sense::click());
+                // A sticker has no words of its own: the tile says where it is.
+                let number = row_index * columns + offset + 1;
+                widgets::name_button(
+                    &response,
+                    &crate::a11y::fill(&sticker, &[("number", &number.to_string())]),
+                );
                 if Some(path) == stickers.first() {
                     ui.ctx()
                         .data_mut(|data| data.insert_temp(first_tile_id(), rect));
                 }
                 paint_tile(ui, palette, path, rect, response.hovered(), animate);
+                // The background takes clicks, not focus: a focusable one
+                // is a nameless Tab stop.
                 egui::Popup::context_menu(&response)
+                    .sense(Sense::CLICK)
                     .width(menu_width)
                     .frame(widgets::menu_frame(palette))
                     .show(|ui| {

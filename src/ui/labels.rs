@@ -270,12 +270,14 @@ pub fn manager(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                     .desired_width(160.0)
                     .font(theme::regular(14.0)),
             );
+            // The placeholder is all the field shows of what it is for.
+            super::widgets::name_field(&field, &gettext(locale, "New label"));
             if field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
                 create(app);
             }
             swatches(app, ui, palette);
             if !app.label_name.trim().is_empty()
-                && theme::soft_button(
+                && theme::soft_action_button(
                     ui,
                     palette,
                     Some(Icon::Plus),
@@ -337,6 +339,7 @@ pub fn manager(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                     .char_limit(crate::archive::NAME_LIMIT)
                     .font(theme::regular(13.5)),
             );
+            super::widgets::name_field(&field, &gettext(locale, "Label name"));
             let swatch_rect =
                 Rect::from_min_size(rect.left_center() + vec2(190.0, -9.0), vec2(18.0, 18.0));
             let swatch = ui.interact(swatch_rect, swatch_id(&label.id), Sense::click());

@@ -1211,14 +1211,17 @@ pub fn soft_button(
 }
 
 /// A [`soft_button`] that runs an action rather than toggling a state:
-/// a screen reader hears a plain button, without "not pressed".
+/// a screen reader hears a plain button, without "not pressed" or
+/// "pressed". It paints exactly as `soft_button` with the same `active`,
+/// which here only gives the button the accent tint for emphasis.
 pub fn soft_action_button(
     ui: &mut egui::Ui,
     palette: &Palette,
     icon: Option<Icon>,
     label: &str,
+    active: bool,
 ) -> Response {
-    let response = soft_button(ui, palette, icon, label, false);
+    let response = soft_button(ui, palette, icon, label, active);
     ui.ctx()
         .accesskit_node_builder(response.id, |node| node.clear_toggled());
     response

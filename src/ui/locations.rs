@@ -27,7 +27,7 @@ pub fn send(app: &mut App, ui: &mut egui::Ui, chat: &str) {
     });
     ui.add_space(8.0);
     let hint = crate::i18n::gettext(app.locale, "Paste a map link or coordinates");
-    ui.add(
+    let field = ui.add(
         egui::TextEdit::singleline(&mut app.location_draft)
             .id_salt("send-location")
             .hint_text(hint.as_ref())
@@ -35,6 +35,8 @@ pub fn send(app: &mut App, ui: &mut egui::Ui, chat: &str) {
             .font(theme::regular(14.0))
             .desired_width(f32::INFINITY),
     );
+    // The placeholder is all the field shows of what it is for.
+    super::widgets::name_field(&field, &hint);
     ui.add_space(6.0);
     // The spot is read again here and shown before it is sent: a pair read the
     // wrong way round is visible in this dialog, not in someone else's chat.
@@ -73,7 +75,7 @@ pub fn send(app: &mut App, ui: &mut egui::Ui, chat: &str) {
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         let cancel = crate::i18n::gettext(app.locale, "Cancel");
-        if theme::soft_button(ui, &palette, None, cancel.as_ref(), false).clicked() {
+        if theme::soft_action_button(ui, &palette, None, cancel.as_ref(), false).clicked() {
             app.actions.push(Action::CloseDialog);
         }
         ui.add_enabled_ui(here.is_some() && app.link.is_connected(), |ui| {

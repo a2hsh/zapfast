@@ -404,6 +404,12 @@ fn identity(app: &mut App, ui: &mut egui::Ui, shown: &Shown, overlay: bool) {
                 };
                 let first_field = name_field(ui, first, "contact-first", "First name");
                 let last_field = name_field(ui, last, "contact-last", "Surname");
+                // The placeholders are all the fields show of what they are for.
+                widgets::name_field(
+                    &first_field,
+                    &crate::i18n::gettext(app.locale, "First name"),
+                );
+                widgets::name_field(&last_field, &crate::i18n::gettext(app.locale, "Surname"));
                 if ui.memory(|memory| memory.focused().is_none()) {
                     first_field.request_focus();
                 }
@@ -667,7 +673,7 @@ fn actions(app: &mut App, ui: &mut egui::Ui, shown: &Shown, mine: bool, editable
         ui.horizontal(|ui| {
             ui.add_space((available - total).max(0.0) / 2.0);
             for (index, (icon, label, actions)) in buttons[start..end].iter().enumerate() {
-                if theme::soft_button(ui, &palette, Some(*icon), label, false)
+                if theme::soft_action_button(ui, &palette, Some(*icon), label, false)
                     .tab_stop(Stop::InfoControl(ACTION_STOP + (start + index) as u8))
                     .clicked()
                 {
@@ -722,9 +728,8 @@ fn members(app: &mut App, ui: &mut egui::Ui, id: &str, window: f32, photo: f32) 
                     egui::vec2(ui.available_width(), row_height),
                     egui::Sense::click(),
                 );
-                response.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name)
-                });
+                // Named by the member whose info it opens.
+                widgets::name_button(&response, crate::a11y::without_push_marker(name));
                 if ui.is_rect_visible(rect) {
                     if response.hovered() {
                         ui.painter().rect_filled(rect, 6.0, palette.surface_hover);
@@ -876,7 +881,7 @@ fn failure_line(app: &mut App, ui: &mut egui::Ui) {
             theme::regular(12.5),
             palette.dim,
         );
-        if theme::soft_button(
+        if theme::soft_action_button(
             ui,
             &palette,
             Some(Icon::Refresh),
@@ -1367,7 +1372,10 @@ fn group_photo(
     )
     .menu(label.to_string());
     let mut first = None;
+    // The background takes clicks, not focus: a focusable one is a nameless
+    // Tab stop.
     let shown = egui::Popup::menu(&response)
+        .sense(egui::Sense::CLICK)
         .width(width)
         .frame(widgets::menu_frame(&palette))
         .show(|ui| {
@@ -1419,7 +1427,7 @@ fn group_name_field(app: &App, ui: &mut egui::Ui, draft: &mut String) -> Option<
             .corner_radius(CornerRadius::same(theme::RADIUS))
             .inner_margin(Margin::symmetric(10, 5))
             .show(ui, |ui| {
-                ui.add(
+                let field = ui.add(
                     egui::TextEdit::singleline(draft)
                         .id(group_name_field_id())
                         .hint_text(
@@ -1435,7 +1443,10 @@ fn group_name_field(app: &App, ui: &mut egui::Ui, draft: &mut String) -> Option<
                         .desired_width(width - 20.0)
                         .horizontal_align(align)
                         .layouter(&mut layouter),
-                )
+                );
+                // The placeholder is all the field shows of what it is for.
+                widgets::name_field(&field, &hint);
+                field
             });
         theme::focus_outline(
             ui,

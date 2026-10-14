@@ -119,6 +119,13 @@ pub(super) fn docked(
         .show_separator_line(false)
         .frame(Frame::new().fill(palette.panel).inner_margin(Margin::ZERO))
         .show(ui, |ui| contents(app, ui));
+    // The edge a drag resizes, named by the pane it sizes.
+    let edge = if id == egui::Id::new("chat-info-pane") {
+        crate::i18n::gettext(app.locale, "Info panel width")
+    } else {
+        crate::i18n::gettext(app.locale, "Search pane width")
+    };
+    super::widgets::name_panel_edge(ui.ctx(), id, &edge);
     let rect = response.response.rect;
     ui.painter().vline(
         rect.left(),

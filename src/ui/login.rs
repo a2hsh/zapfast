@@ -274,7 +274,7 @@ fn pair_code_view(app: &mut App, ui: &mut egui::Ui, code: &str, phone: Option<&s
     ui.add_space(10.0);
     ui.horizontal(|ui| {
         ui.add_space((ui.available_width() - 200.0).max(0.0) / 2.0);
-        if theme::soft_button(ui, &palette, Some(Icon::Copy), "Copy code", false).clicked() {
+        if theme::soft_action_button(ui, &palette, Some(Icon::Copy), "Copy code", false).clicked() {
             app.actions.push(Action::CopyText(code.to_owned()));
         }
     });

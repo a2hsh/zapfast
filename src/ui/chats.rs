@@ -30,6 +30,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         header(app, ui);
         body(app, ui);
     });
+    widgets::name_panel_edge(
+        ui.ctx(),
+        egui::Id::new("chats"),
+        &crate::i18n::gettext(app.locale, "Chat list width"),
+    );
     let width = response.response.rect.width();
     if (width - app.settings.sidebar_width).abs() > 1.0 {
         app.settings.sidebar_width = width;
@@ -131,6 +136,17 @@ fn search_keyboard(app: &mut App, ui: &egui::Ui) {
         app.actions.push(Action::Search(String::new()));
         app.actions.push(Action::OpenChat(chat));
     }
+}
+
+/// Names the chat list's search field for what it searches, apart from
+/// the open chat's search, which shows "Search" too. The field still
+/// shows "Search".
+fn name_chat_search(app: &App, response: &egui::Response) {
+    let locale = app.locale;
+    response.ctx.accesskit_node_builder(response.id, |node| {
+        // Translators: the chat list's search field, for a screen reader.
+        node.set_label(crate::i18n::gettext(locale, "Search chats").into_owned());
+    });
 }
 
 fn header(app: &mut App, ui: &mut egui::Ui) {
@@ -322,6 +338,8 @@ fn search_and_filters(app: &mut App, ui: &mut egui::Ui) {
             width,
         )
         .tab_stop(Stop::Search);
+        // The placeholder is all the field shows of what it is for.
+        widgets::name_field(&response, &hint);
         if app.new_call {
             // The list opens ready for a name, as New chat does.
             if ui.memory(|memory| memory.focused().is_none()) && ui.is_enabled() {
@@ -344,6 +362,7 @@ fn search_and_filters(app: &mut App, ui: &mut egui::Ui) {
         width,
     )
     .tab_stop(Stop::Search);
+    name_chat_search(app, &response);
     if text != app.search {
         app.actions.push(Action::Search(text));
     }
@@ -1145,7 +1164,10 @@ fn starred_row(
     } else {
         None
     };
+    // The background takes clicks, not focus: a focusable one is a nameless
+    // Tab stop.
     let popup = egui::Popup::menu(&response)
+        .sense(egui::Sense::CLICK)
         .open_memory(open)
         .width(conversation::menu_width(
             ui,
@@ -1362,6 +1384,13 @@ fn locked_entry(app: &mut App, ui: &mut egui::Ui) {
         vec2(ui.available_width(), theme::ROW_HEIGHT),
         Sense::click(),
     );
+    // Read as the row shows it: the folder, then how many chats it holds.
+    widgets::name_button_with(&response, || {
+        format!(
+            "{}, {count}",
+            crate::i18n::gettext(app.locale, "Locked chats")
+        )
+    });
     if ui.is_rect_visible(rect) {
         if response.hovered() {
             widgets::row_highlight(ui, &palette, rect, palette.surface_hover);
@@ -1626,6 +1655,26 @@ fn hit_row(app: &mut App, ui: &mut egui::Ui, hit: &Message) {
         );
         words.paint(ui, pos2(x, line_y), palette.dim);
     }
+    // Read as the row shows it: the chat, who wrote the message, its line,
+    // and when.
+    widgets::name_button_with(&response, || {
+        let who = if hit.from_me {
+            crate::i18n::gettext(app.locale, "You").into_owned()
+        } else if crate::model::ChatKind::from_id(&hit.chat) == crate::model::ChatKind::Group {
+            app.display_name_or(&hit.sender, hit.sender_name.as_deref())
+        } else {
+            String::new()
+        };
+        let line = app.preview_line(&hit.summary(), hit);
+        let stamp = crate::util::chat_stamp(app.locale, hit.timestamp);
+        let parts: Vec<String> = [title.as_str(), who.as_str()]
+            .into_iter()
+            .map(|person| crate::a11y::spoken(crate::a11y::without_push_marker(person)))
+            .chain([crate::a11y::spoken(&line), stamp])
+            .filter(|part| !part.is_empty())
+            .collect();
+        parts.join(", ")
+    });
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     if response.clicked() {
         app.actions.push(Action::OpenMessage {
@@ -1672,6 +1721,14 @@ fn person_row(
         vec2(ui.available_width(), theme::ROW_HEIGHT),
         Sense::click(),
     );
+    // Read as the row shows it: the name, then the number or the note.
+    widgets::name_button_with(&response, || {
+        let parts: Vec<&str> = std::iter::once(crate::a11y::without_push_marker(name))
+            .chain(detail)
+            .filter(|part| !part.is_empty())
+            .collect();
+        parts.join(", ")
+    });
     theme::reveal_focus(&response);
     if ui.is_rect_visible(rect) {
         if response.hovered() {
@@ -1978,7 +2035,10 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat, slot: Option<Slot>) -> egu
         ) + 24.0,
     )
     .max(190.0);
+    // egui gives a popup's background a focusable sense, a nameless Tab
+    // stop; it only needs the clicks.
     let popup = egui::Popup::context_menu(&response)
+        .sense(Sense::CLICK)
         .width(menu_width)
         .frame(widgets::menu_frame(&menu_palette));
     let popup_id = response.id.with("popup");

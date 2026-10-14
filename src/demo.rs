@@ -1956,6 +1956,233 @@ fn starred_sample(app: &mut App, menu: Option<&str>) {
     app.open_list_menu = menu.map(|id| (chat, id.to_owned()));
 }
 
+/// Every page `apply_flags` draws, besides a sample chat's id and the
+/// `theme=` and `settings-search=` choices. A page must be listed here to be
+/// drawn at all, so the tests that walk every page, such as the screen
+/// reader name audit, cannot miss a new one.
+pub const DEMO_PAGES: &[&str] = &[
+    "chat",
+    "phone-menu",
+    "chat-menu",
+    "chat-header-menu",
+    "interactive-actions",
+    "interactive-list",
+    "interactive-list-dialog",
+    "carousel",
+    "carousel-pair",
+    "poll-empty",
+    "poll-voted",
+    "poll-results",
+    "photos",
+    "bubbles",
+    "drafts",
+    "attachment-draft-away",
+    "attachment-draft-return",
+    "video",
+    "video-playing",
+    "video-expanded",
+    "shared-contact",
+    "note-playing",
+    "interactive",
+    "interactive-media",
+    "empty",
+    "channel",
+    "meta-ai",
+    "locked",
+    "locked-prompt",
+    "locked-setup",
+    "app-lock",
+    "app-lock-wrong",
+    "app-lock-forgot",
+    "app-lock-settings",
+    "app-lock-setup",
+    "new-chat",
+    "unnamed-group",
+    "locked-open",
+    "keyring",
+    "message-info",
+    "message-info-unknown",
+    "message-info-partial",
+    "message-info-direct",
+    "receipts-off",
+    "receipts-played",
+    "motion",
+    "motion-playing",
+    "motion-preview",
+    "disappearing",
+    "disappearing-direct",
+    "disappearing-off",
+    "arabic-reply",
+    "rtl",
+    "rtl-self",
+    "settings",
+    "wallpaper",
+    "wallpaper-image",
+    "omarchy",
+    "omarchy-light",
+    "themes",
+    "update",
+    "update-downloading",
+    "update-ready",
+    "update-failed",
+    "update-managed",
+    "poll",
+    "poll-create",
+    "shortcuts",
+    "about",
+    "failed",
+    "info",
+    "group-info",
+    "group-info-rename",
+    "group-info-locked",
+    "group-info-saving",
+    "forward",
+    "unlink",
+    "leave-group",
+    "left-group",
+    "leave-channel",
+    "toasts",
+    "delete-chat",
+    "clear-chat",
+    "select",
+    "quotes",
+    "quote-jump",
+    "unread-divider",
+    "invite",
+    "delete-message",
+    "delete-message-mine",
+    "new-contact",
+    "accounts",
+    "accounts-closed",
+    "account-menu",
+    "light",
+    "login",
+    "pair",
+    "phone",
+    "offline",
+    "syncing",
+    "live",
+    "live-phone",
+    "typing",
+    "composer-tools",
+    "mention",
+    "mention-everyone",
+    "emoji-complete",
+    "reply",
+    "edit",
+    "scrolled",
+    "reactions",
+    "unsent-voice",
+    "typers",
+    "nosidebar",
+    "rail",
+    "wide",
+    "search",
+    "voice",
+    "recording",
+    "preview",
+    "compose-emoji",
+    "staged",
+    "archived",
+    "labels",
+    "label-chips",
+    "label-filter",
+    "labels-dialog",
+    "chat-search",
+    "chat-search-rtl",
+    "chat-search-day",
+    "unread",
+    "private",
+    "favorites",
+    "groups",
+    "picker",
+    "stickers",
+    "sticker-favorites",
+    "sticker-received",
+    "sticker-pack",
+    "sticker-search",
+    "sticker-animated",
+    "sticker-add",
+    "sticker-maker",
+    "sticker-pack-message",
+    "sticker-pack-view",
+    "gifs",
+    "gifs-badkey",
+    "voice-menu",
+    "react-menu",
+    "react-picker",
+    "react-picker-empty",
+    "react-custom",
+    "react-other",
+    "history-date",
+    "short-chat",
+    "carousel-viewer",
+    "motion-viewer",
+    "media-album",
+    "media-album-failed",
+    "media-album-partial",
+    "media-album-oversized",
+    "media-album-midnight",
+    "media-album-before",
+    "call",
+    "call-active",
+    "call-outgoing",
+    "call-connecting",
+    "call-failed",
+    "call-devices",
+    "call-ended",
+    "call-strip",
+    "call-group",
+    "call-group-active",
+    "call-group-video",
+    "call-group-muted",
+    "call-link",
+    "call-entries",
+    "calls",
+    "calls-chat",
+    "calls-info",
+    "calls-missed",
+    "calls-missed-none",
+    "calls-link",
+    "new-call",
+    "call-video",
+    "call-video-incoming",
+    "call-video-off",
+    "location",
+    "info-media",
+    "info-docs",
+    "info-links",
+    "forward-selected",
+    "forward-review",
+    "forward-full",
+    "forward-once",
+    "clear-media",
+    "remove-pack",
+    "select-delete",
+    "delete-selection",
+    "new-contact-number",
+    "pinned",
+    "messages",
+    "messages-light",
+    "private-reply",
+    "private-reply-menu",
+    "private-reply-locked-source",
+    "audio-types",
+    "forward-portuguese",
+    "crop",
+    "sticker-view",
+    "starred",
+    "star-menu",
+];
+
+/// Whether `apply_flags` takes `part`: a listed page, a choice, or nothing.
+fn listed_page(part: &str) -> bool {
+    part.is_empty()
+        || DEMO_PAGES.contains(&part)
+        || part.starts_with("theme=")
+        || part.starts_with("settings-search=")
+}
+
 /// Configures synthetic offline demo states and appearance for tests and screenshots.
 /// Audio fixtures vary voice-note and forwarding metadata independently without playback.
 pub fn apply_flags(app: &mut App, page: Option<&str>) {
@@ -1963,6 +2190,12 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
         return;
     };
     for part in page.split(',').map(str::trim) {
+        // An unlisted page is not drawn: listing it is what puts it in
+        // every test that walks the pages.
+        if !listed_page(part) && app.chat(part).is_none() {
+            log::warn!("unknown demo page {part}");
+            continue;
+        }
         match part {
             "history-date" => history_date_sample(app),
             "chat" | "" => {}
@@ -6318,6 +6551,43 @@ mod tests {
             ctx.memory_mut(|memory| memory.request_focus(control));
             render(&mut app, &ctx);
             assert_ne!(ctx.memory(|memory| memory.focused()), Some(control));
+        }
+    }
+
+    /// A reaction chip says what its click does with its emoji, then how
+    /// many reacted and who, the reader as "You"; its text still shows the
+    /// emoji and the count.
+    #[test]
+    fn reaction_chips_say_the_emoji_the_count_and_who() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let chat = app.open_chat.clone().unwrap();
+        let title = app.chat_title(app.chat(&chat).unwrap());
+        let reaction = |sender: &str, from_me: bool, emoji: &str| crate::model::Reaction {
+            sender: sender.to_owned(),
+            from_me,
+            emoji: emoji.to_owned(),
+        };
+        let newest = app
+            .conversations
+            .get_mut(&chat)
+            .unwrap()
+            .messages
+            .last_mut()
+            .unwrap();
+        newest.reactions = vec![
+            reaction(&chat, false, "👍"),
+            reaction(ME, true, "👍"),
+            reaction(&chat, false, "😂"),
+        ];
+        let labels = accessible_labels(&mut app, &ctx);
+        for expected in [
+            format!("Remove your reaction 👍, 2 reactions: {title}, You"),
+            format!("React with 😂, 1 reaction: {title}"),
+        ] {
+            assert!(labels.contains(&expected), "{expected}: {labels:?}");
         }
     }
 
@@ -11741,6 +12011,62 @@ mod tests {
         assert!(!leaks(&labels).is_empty());
     }
 
+    /// Every page `apply_flags` has an arm for is listed in `DEMO_PAGES`. An
+    /// unlisted page is never drawn, so one added upstream would otherwise
+    /// drop out of the demo and of every test that walks the pages.
+    #[test]
+    fn every_page_apply_flags_knows_is_listed() {
+        let source = include_str!("demo.rs");
+        let start = source.find("pub fn apply_flags(").expect("apply_flags");
+        let mut missing = Vec::new();
+        // Nothing but pages: `"a" | "b"`.
+        let pages_only = |text: &str| {
+            text.split(" | ").all(|page| {
+                page.len() > 2
+                    && page.starts_with('"')
+                    && page.ends_with('"')
+                    && page[1..page.len() - 1]
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-')
+            })
+        };
+        // An arm's pages can run over several lines, each line after the
+        // first starting with "| ": these are the pages of its lines so far.
+        let mut arm_start = String::new();
+        for line in source[start..].lines().skip(1) {
+            let line = line.trim_end_matches('\r');
+            if line == "}" {
+                break;
+            }
+            let text = line.trim();
+            let continued = text.strip_prefix("| ");
+            let Some((arm, _)) = text.split_once(" =>") else {
+                let pages = continued.unwrap_or(text);
+                if (continued.is_some() || arm_start.is_empty()) && pages_only(pages) {
+                    arm_start.push_str(pages);
+                    arm_start.push_str(" | ");
+                } else {
+                    arm_start.clear();
+                }
+                continue;
+            };
+            let arm = match arm.strip_prefix("| ") {
+                Some(rest) if !arm_start.is_empty() => format!("{arm_start}{rest}"),
+                _ => arm.to_owned(),
+            };
+            arm_start.clear();
+            if !arm.starts_with('"') {
+                continue;
+            }
+            for page in arm.split(" | ").map(|page| page.trim_matches('"')) {
+                if !page.is_empty() && !DEMO_PAGES.contains(&page) {
+                    missing.push(page.to_owned());
+                }
+            }
+        }
+        assert!(missing.is_empty(), "not in DEMO_PAGES: {missing:?}");
+    }
+
     /// Lays out each synthetic demo screen and checks that its controls fit the visible surface.
     #[test]
     fn keeping_a_crop_stages_the_cropped_picture_and_remembers_its_original() {
@@ -12001,219 +12327,7 @@ mod tests {
             apply_flags(&mut app, Some(id));
             render(&mut app, &ctx);
         }
-        for page in [
-            "chat-menu",
-            "chat-header-menu",
-            "channel",
-            "meta-ai",
-            "locked",
-            "locked-open",
-            "locked-prompt",
-            "locked-setup",
-            "app-lock",
-            "app-lock-wrong",
-            "app-lock-forgot",
-            "app-lock-settings",
-            "app-lock-setup",
-            "new-chat",
-            "new-contact-number",
-            "carousel-viewer",
-            "media-album",
-            "media-album-before",
-            "media-album-oversized",
-            "media-album-oversized,light",
-            "media-album-midnight",
-            "media-album-midnight,light",
-            "unnamed-group",
-            "keyring",
-            "interactive",
-            "interactive-actions",
-            "interactive-media",
-            "interactive-list",
-            "interactive-list-dialog",
-            "carousel",
-            "carousel-pair",
-            "poll-empty",
-            "poll-voted",
-            "poll-results",
-            "message-info",
-            "message-info-unknown",
-            "message-info-partial",
-            "message-info-direct",
-            "motion",
-            "motion-playing",
-            "motion-preview",
-            "motion-viewer",
-            "video",
-            "video-playing",
-            "video-expanded",
-            "shared-contact",
-            "note-playing",
-            "empty",
-            "rtl",
-            "disappearing",
-            "disappearing-direct",
-            "disappearing-off",
-            "disappearing,group-info",
-            "disappearing-direct,info",
-            "disappearing-off,info",
-            "settings",
-            "settings-search=Notifications",
-            "settings-search=System",
-            "settings-search=Storage",
-            "clear-media",
-            "wallpaper",
-            "wallpaper,light",
-            "wallpaper,wallpaper-image",
-            "wallpaper,wallpaper-image,light",
-            "wallpaper,theme=Nord.json",
-            "wallpaper-image",
-            "update",
-            "update-downloading",
-            "update-ready",
-            "update-failed",
-            "update-managed",
-            "themes",
-            "settings,omarchy",
-            "settings,omarchy-light",
-            "poll",
-            "poll-create",
-            "theme=Catppuccin.json",
-            "theme=Catppuccin Latte.json",
-            "theme=Nord.json",
-            "theme=Ristretto.json",
-            "theme=Rose Pine.json",
-            "theme=Rose Pine Moon.json",
-            "theme=Rose Pine Dawn.json",
-            "theme=Tokyo Night.json",
-            "shortcuts",
-            "about",
-            "failed",
-            "info",
-            "info-media",
-            "info-docs",
-            "info-links",
-            "group-info",
-            "group-info-rename",
-            "group-info-locked",
-            "group-info-saving",
-            "forward",
-            "forward-selected",
-            "forward-review",
-            "forward-full",
-            "forward-once",
-            "unlink",
-            "leave-group",
-            "left-group",
-            "leave-channel",
-            "toasts",
-            "delete-chat",
-            "clear-chat",
-            "invite",
-            "unread-divider",
-            "quotes",
-            "quote-jump",
-            "select",
-            "delete-message",
-            "delete-message-mine",
-            "remove-pack",
-            "delete-selection",
-            "select-delete",
-            "new-contact",
-            "accounts",
-            "accounts,light",
-            "accounts-closed",
-            "account-menu",
-            "light",
-            "archived",
-            "chat-search",
-            "chat-search-day",
-            "chat-search-rtl",
-            "unread",
-            "private",
-            "favorites",
-            "groups",
-            "offline",
-            "syncing",
-            "picker",
-            "stickers",
-            "sticker-favorites",
-            "sticker-received",
-            "sticker-pack",
-            "sticker-search",
-            "sticker-animated",
-            "sticker-add",
-            "sticker-view",
-            "sticker-pack-message",
-            "sticker-maker",
-            "sticker-pack-view",
-            "typing",
-            "composer-tools",
-            "mention",
-            "mention-everyone",
-            "emoji-complete",
-            "reply",
-            "private-reply",
-            "private-reply,light",
-            "private-reply-menu",
-            "private-reply-menu,light",
-            "private-reply-locked-source",
-            "private-reply-locked-source,light",
-            "edit",
-            "unsent-voice",
-            "scrolled",
-            "reactions",
-            "typers",
-            "nosidebar",
-            "wide",
-            "rail",
-            "search",
-            "forward-portuguese",
-            "staged",
-            "attachment-draft-away",
-            "attachment-draft-return",
-            "crop",
-            "compose-emoji",
-            "voice",
-            "voice,voice-menu",
-            "recording",
-            "preview",
-            "gifs",
-            "gifs-badkey",
-            "react-menu",
-            "starred",
-            "star-menu",
-            "react-picker",
-            "react-picker-empty",
-            "react-custom",
-            "react-other",
-            "calls",
-            "calls-chat",
-            "calls-info",
-            "calls-missed",
-            "calls-missed-none",
-            "new-call",
-            "call-entries",
-            "call",
-            "call-active",
-            "call-outgoing",
-            "call-connecting",
-            "call-failed",
-            "call-devices",
-            "call-ended",
-            "call-strip",
-            "call-group",
-            "call-group-active",
-            "call-group-video",
-            "call-group-muted",
-            "call-link",
-            "calls-link",
-            "call-video",
-            "call-video,light",
-            "call-video-incoming",
-            "call-video-off",
-            "pinned",
-        ] {
+        for page in SURFACES {
             let mut app = self::app();
             apply_flags(&mut app, Some(page));
             render(&mut app, &ctx);
@@ -12497,6 +12611,486 @@ mod tests {
             assert_eq!(room, crate::ui::CaptionRoom::default());
         });
         output.textures_delta.clear();
+    }
+
+    /// The pages the layout test draws beyond the sample chats, some of them
+    /// mixed (`wallpaper,light`); the name audit draws these and every page
+    /// of `DEMO_PAGES`.
+    const SURFACES: &[&str] = &[
+        "chat-menu",
+        "chat-header-menu",
+        "channel",
+        "meta-ai",
+        "locked",
+        "locked-open",
+        "locked-prompt",
+        "locked-setup",
+        "app-lock",
+        "app-lock-wrong",
+        "app-lock-forgot",
+        "app-lock-settings",
+        "app-lock-setup",
+        "new-chat",
+        "new-contact-number",
+        "carousel-viewer",
+        "media-album",
+        "media-album-before",
+        "media-album-oversized",
+        "media-album-oversized,light",
+        "media-album-midnight",
+        "media-album-midnight,light",
+        "unnamed-group",
+        "keyring",
+        "interactive",
+        "interactive-actions",
+        "interactive-media",
+        "interactive-list",
+        "interactive-list-dialog",
+        "carousel",
+        "carousel-pair",
+        "poll-empty",
+        "poll-voted",
+        "poll-results",
+        "message-info",
+        "message-info-unknown",
+        "message-info-partial",
+        "message-info-direct",
+        "motion",
+        "motion-playing",
+        "motion-preview",
+        "motion-viewer",
+        "video",
+        "video-playing",
+        "video-expanded",
+        "shared-contact",
+        "note-playing",
+        "empty",
+        "rtl",
+        "disappearing",
+        "disappearing-direct",
+        "disappearing-off",
+        "disappearing,group-info",
+        "disappearing-direct,info",
+        "disappearing-off,info",
+        "settings",
+        "settings-search=Notifications",
+        "settings-search=System",
+        "settings-search=Storage",
+        "clear-media",
+        "wallpaper",
+        "wallpaper,light",
+        "wallpaper,wallpaper-image",
+        "wallpaper,wallpaper-image,light",
+        "wallpaper,theme=Nord.json",
+        "wallpaper-image",
+        "update",
+        "update-downloading",
+        "update-ready",
+        "update-failed",
+        "update-managed",
+        "themes",
+        "settings,omarchy",
+        "settings,omarchy-light",
+        "poll",
+        "poll-create",
+        "theme=Catppuccin.json",
+        "theme=Catppuccin Latte.json",
+        "theme=Nord.json",
+        "theme=Ristretto.json",
+        "theme=Rose Pine.json",
+        "theme=Rose Pine Moon.json",
+        "theme=Rose Pine Dawn.json",
+        "theme=Tokyo Night.json",
+        "shortcuts",
+        "about",
+        "failed",
+        "info",
+        "info-media",
+        "info-docs",
+        "info-links",
+        "group-info",
+        "group-info-rename",
+        "group-info-locked",
+        "group-info-saving",
+        "forward",
+        "forward-selected",
+        "forward-review",
+        "forward-full",
+        "forward-once",
+        "unlink",
+        "leave-group",
+        "left-group",
+        "leave-channel",
+        "toasts",
+        "delete-chat",
+        "clear-chat",
+        "invite",
+        "unread-divider",
+        "quotes",
+        "quote-jump",
+        "select",
+        "delete-message",
+        "delete-message-mine",
+        "remove-pack",
+        "delete-selection",
+        "select-delete",
+        "new-contact",
+        "accounts",
+        "accounts,light",
+        "accounts-closed",
+        "account-menu",
+        "light",
+        "archived",
+        "chat-search",
+        "chat-search-day",
+        "chat-search-rtl",
+        "unread",
+        "private",
+        "favorites",
+        "groups",
+        "offline",
+        "syncing",
+        "picker",
+        "stickers",
+        "sticker-favorites",
+        "sticker-received",
+        "sticker-pack",
+        "sticker-search",
+        "sticker-animated",
+        "sticker-add",
+        "sticker-view",
+        "sticker-pack-message",
+        "sticker-maker",
+        "sticker-pack-view",
+        "typing",
+        "composer-tools",
+        "mention",
+        "mention-everyone",
+        "emoji-complete",
+        "reply",
+        "private-reply",
+        "private-reply,light",
+        "private-reply-menu",
+        "private-reply-menu,light",
+        "private-reply-locked-source",
+        "private-reply-locked-source,light",
+        "edit",
+        "unsent-voice",
+        "scrolled",
+        "reactions",
+        "typers",
+        "nosidebar",
+        "wide",
+        "rail",
+        "search",
+        "forward-portuguese",
+        "staged",
+        "attachment-draft-away",
+        "attachment-draft-return",
+        "crop",
+        "compose-emoji",
+        "voice",
+        "voice,voice-menu",
+        "recording",
+        "preview",
+        "gifs",
+        "gifs-badkey",
+        "react-menu",
+        "starred",
+        "star-menu",
+        "react-picker",
+        "react-picker-empty",
+        "react-custom",
+        "react-other",
+        "calls",
+        "calls-chat",
+        "calls-info",
+        "calls-missed",
+        "calls-missed-none",
+        "new-call",
+        "call-entries",
+        "call",
+        "call-active",
+        "call-outgoing",
+        "call-connecting",
+        "call-failed",
+        "call-devices",
+        "call-ended",
+        "call-strip",
+        "call-group",
+        "call-group-active",
+        "call-group-video",
+        "call-group-muted",
+        "call-link",
+        "calls-link",
+        "call-video",
+        "call-video,light",
+        "call-video-incoming",
+        "call-video-off",
+        "pinned",
+    ];
+
+    /// Roles a screen reader announces as something to operate: each needs a
+    /// name, or NVDA says only "unknown" or the bare role.
+    const CONTROL_ROLES: &[egui::accesskit::Role] = {
+        use egui::accesskit::Role;
+        &[
+            Role::Button,
+            Role::DefaultButton,
+            Role::Link,
+            Role::CheckBox,
+            Role::RadioButton,
+            Role::Switch,
+            Role::ComboBox,
+            Role::EditableComboBox,
+            Role::Slider,
+            Role::SpinButton,
+            Role::TextInput,
+            Role::MultilineTextInput,
+            Role::SearchInput,
+            Role::PasswordInput,
+            Role::MenuItem,
+            Role::MenuItemCheckBox,
+            Role::MenuItemRadio,
+            Role::ListBoxOption,
+            Role::MenuListOption,
+            Role::Tab,
+            Role::TreeItem,
+            Role::ColorWell,
+        ]
+    };
+
+    /// Nodes that a screen reader reaches without a name: focusable ones and
+    /// controls whose label is empty and that no other node labels. Each
+    /// entry names the role, the node, and the nearest named ancestor, so a
+    /// failure says where to look.
+    fn unnamed_controls(tree: &egui::accesskit::TreeUpdate) -> Vec<String> {
+        use egui::accesskit::{Action, Node, NodeId, Role};
+        let nodes: HashMap<NodeId, &Node> =
+            tree.nodes.iter().map(|(id, node)| (*id, node)).collect();
+        let mut parents = HashMap::new();
+        for (id, node) in &tree.nodes {
+            for child in node.children() {
+                parents.insert(*child, *id);
+            }
+        }
+        let text = |node: &Node| {
+            node.label()
+                .or_else(|| (node.role() == Role::Label).then(|| node.value()).flatten())
+                .is_some_and(|text| !text.trim().is_empty())
+        };
+        let named = |node: &Node| {
+            text(node)
+                || node
+                    .labelled_by()
+                    .iter()
+                    .any(|id| nodes.get(id).is_some_and(|label| text(label)))
+        };
+        let mut found = Vec::new();
+        for (id, node) in &tree.nodes {
+            let reached =
+                node.supports_action(Action::Focus) || CONTROL_ROLES.contains(&node.role());
+            if !reached || named(node) {
+                continue;
+            }
+            let mut ancestor = parents.get(id).copied();
+            let mut context = String::from("(no named ancestor)");
+            while let Some(parent) = ancestor {
+                if let Some(label) = nodes[&parent].label().filter(|label| !label.is_empty()) {
+                    context = format!("{:?} {label:?}", nodes[&parent].role());
+                    break;
+                }
+                ancestor = parents.get(&parent).copied();
+            }
+            let bounds = node
+                .bounds()
+                .map(|rect| {
+                    format!(
+                        " at ({:.0}, {:.0})-({:.0}, {:.0})",
+                        rect.x0, rect.y0, rect.x1, rect.y1
+                    )
+                })
+                .unwrap_or_default();
+            // A container's first child often says what it holds.
+            let first_child = node
+                .children()
+                .first()
+                .and_then(|child| nodes.get(child))
+                .map(|child| format!(", holding {:?} {:?}", child.role(), child.label()))
+                .unwrap_or_default();
+            found.push(format!(
+                "{:?} node {}{bounds}{first_child}, in {context}",
+                node.role(),
+                id.0
+            ));
+        }
+        found
+    }
+
+    /// The accessibility tree of `page` as drawn in the dark theme, after the
+    /// frames it takes to settle, in `ctx`, which pages share as the layout
+    /// test's do.
+    fn page_tree(ctx: &egui::Context, page: &str) -> egui::accesskit::TreeUpdate {
+        let mut app = self::app();
+        app.attach(ctx);
+        apply_flags(&mut app, Some(page));
+        render(&mut app, ctx);
+        settings_access_tests::tree(&mut app, ctx)
+    }
+
+    /// No demo page leaves a screen reader on a control without a name:
+    /// every focusable node, and every node that is a control, says what it
+    /// is. egui's fallback Tab order reaches anything focusable, so an
+    /// unnamed one is read as "unknown" (the reader's finding F10b).
+    #[test]
+    fn every_control_on_every_page_has_a_name() {
+        // Every page `apply_flags` draws, then the layout test's mixes of
+        // them, such as a page in the light theme.
+        let mut pages: Vec<&str> = sample_ids();
+        pages.extend_from_slice(DEMO_PAGES);
+        pages.extend(SURFACES.iter().filter(|page| !DEMO_PAGES.contains(page)));
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut failures = Vec::new();
+        for page in pages {
+            for unnamed in unnamed_controls(&page_tree(&ctx, page)) {
+                failures.push(format!("{page}: {unnamed}"));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// No text field on any page repeats its name as its placeholder: egui
+    /// gives a field its hint as the placeholder, and a screen reader reads
+    /// the name, then the placeholder ("Type a message to Ada, edit, Type a
+    /// message"). A hint that says more than the name, such as a sample
+    /// number, stays.
+    #[test]
+    fn no_field_repeats_its_name_as_its_placeholder() {
+        use egui::accesskit::Role;
+        let mut pages: Vec<&str> = sample_ids();
+        pages.extend_from_slice(DEMO_PAGES);
+        pages.extend(SURFACES.iter().filter(|page| !DEMO_PAGES.contains(page)));
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut failures = Vec::new();
+        let mut kept = Vec::new();
+        for page in pages {
+            let tree = page_tree(&ctx, page);
+            for (_, node) in &tree.nodes {
+                if !matches!(
+                    node.role(),
+                    Role::TextInput
+                        | Role::MultilineTextInput
+                        | Role::PasswordInput
+                        | Role::SearchInput
+                ) {
+                    continue;
+                }
+                // An empty placeholder, as egui gives a field with no hint,
+                // says nothing.
+                let (Some(label), Some(placeholder)) = (
+                    node.label(),
+                    node.placeholder().filter(|text| !text.trim().is_empty()),
+                ) else {
+                    continue;
+                };
+                if label.to_lowercase().contains(&placeholder.to_lowercase()) {
+                    failures.push(format!(
+                        "{page}: {label:?} with placeholder {placeholder:?}"
+                    ));
+                } else {
+                    kept.push(placeholder.to_owned());
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+        // The new contact's sample number says how to write it.
+        assert!(kept.iter().any(|kept| kept == "15551234567"), "{kept:?}");
+    }
+
+    /// Menus opened from the keyboard name every control too: the message
+    /// menu with its keyboard-only rows, on a plain chat and on a card's
+    /// buttons, and the chat menu with a submenu open. The pages above draw
+    /// the pointer's menus. The submenu's background passes because it is
+    /// named (`widgets::submenu`), not because it is gone: egui gives it a
+    /// focusable sense there is no way to change.
+    #[test]
+    fn every_control_in_an_open_menu_has_a_name() {
+        let mut failures = Vec::new();
+        for page in ["chat", "interactive-actions"] {
+            let mut app = self::app();
+            let ctx = egui::Context::default();
+            app.attach(&ctx);
+            ctx.enable_accesskit();
+            apply_flags(&mut app, Some(page));
+            open_menu_by_keys(&mut app, &ctx);
+            let tree = settings_access_tests::tree(&mut app, &ctx);
+            for unnamed in unnamed_controls(&tree) {
+                failures.push(format!("{page}, message menu: {unnamed}"));
+            }
+        }
+        let mut app = self::app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        ctx.enable_accesskit();
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        press_key(&mut app, &ctx, egui::Key::F10, egui::Modifiers::SHIFT);
+        walk_menu_to(&mut app, &ctx, "Notification sound");
+        press_key(&mut app, &ctx, egui::Key::ArrowRight, egui::Modifiers::NONE);
+        let tree = settings_access_tests::tree(&mut app, &ctx);
+        for unnamed in unnamed_controls(&tree) {
+            failures.push(format!("chat menu, submenu: {unnamed}"));
+        }
+        // The chat header's More and the composer's plus, opened from the
+        // keys, offline too, where Clear chat is reached though unavailable.
+        for (menu, toolbar, last, offline) in [
+            (
+                "header menu",
+                crate::ui::conversation::header_toolbar_id(),
+                true,
+                false,
+            ),
+            (
+                "header menu, offline",
+                crate::ui::conversation::header_toolbar_id(),
+                true,
+                true,
+            ),
+            (
+                "attach menu",
+                crate::ui::conversation::composer_toolbar_id(),
+                false,
+                false,
+            ),
+        ] {
+            let mut app = self::app();
+            if offline {
+                app.link = LinkStatus::Connecting;
+            }
+            let ctx = egui::Context::default();
+            app.attach(&ctx);
+            ctx.enable_accesskit();
+            render(&mut app, &ctx);
+            let buttons = crate::ui::toolbar::buttons(&ctx, toolbar);
+            let button = if last {
+                buttons.last()
+            } else {
+                buttons.first()
+            };
+            let button = *button.expect("the toolbar is drawn");
+            ctx.data_mut(|data| data.insert_temp(crate::theme::keyboard_focus_id(), true));
+            ctx.memory_mut(|memory| memory.request_focus(button));
+            render(&mut app, &ctx);
+            press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+            assert!(egui::Popup::is_any_open(&ctx), "{menu} is open");
+            let tree = settings_access_tests::tree(&mut app, &ctx);
+            for unnamed in unnamed_controls(&tree) {
+                failures.push(format!("{menu}: {unnamed}"));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[test]
@@ -26617,7 +27211,7 @@ mod settings_access_tests {
         output
     }
 
-    fn tree(app: &mut App, ctx: &egui::Context) -> TreeUpdate {
+    pub(super) fn tree(app: &mut App, ctx: &egui::Context) -> TreeUpdate {
         frame(app, ctx, Vec::new())
     }
 
@@ -27358,6 +27952,25 @@ mod settings_access_tests {
             let after: Vec<String> = app.announcer.spoken().map(str::to_owned).into();
             assert_ne!(after, before, "attempt {attempt}: said again");
             assert!(spoke(&app, &reason), "attempt {attempt}: {after:?}");
+        }
+    }
+
+    /// Soft buttons that act, rather than toggle, read as plain buttons:
+    /// neither "not pressed" nor, for the emphasised Update button,
+    /// "pressed".
+    #[test]
+    fn action_soft_buttons_expose_no_toggle_state() {
+        for (flag, label) in [
+            ("offline", "Retry"),
+            ("update-ready", "Restart to update"),
+            // Send location's and the media cache's.
+            ("location", "Cancel"),
+            ("settings", "Clear…"),
+        ] {
+            let (mut app, ctx) = settings(flag);
+            let (_, button) = find(&tree(&mut app, &ctx), Role::Button, label)
+                .unwrap_or_else(|| panic!("a {label} button"));
+            assert_eq!(button.toggled(), None, "{label}");
         }
     }
 

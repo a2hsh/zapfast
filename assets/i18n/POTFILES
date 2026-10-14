@@ -30,3 +30,4 @@ src/ui/rail.rs
 src/ui/mod.rs
 src/a11y.rs
 src/ui/keys.rs
+src/ui/polls.rs
