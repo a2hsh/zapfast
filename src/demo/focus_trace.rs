@@ -32,6 +32,8 @@ struct Frame {
     /// What a reader says of the effective node: a change while it keeps
     /// focus is read out again.
     spoken: String,
+    /// How many nodes the frame's update carries.
+    nodes: usize,
     /// egui's focused widget after the frame.
     egui: Option<egui::Id>,
     /// The layer that widget is on, by its id.
@@ -172,6 +174,7 @@ impl Trace {
             .expect("accessibility tree");
         let effective = effective(&tree);
         self.frames.push(Frame {
+            nodes: tree.nodes.len(),
             step: step.to_owned(),
             action: self.action,
             focus: tree.focus,
@@ -1181,4 +1184,269 @@ fn the_pickers_open_without_a_window_frame() {
     );
     trace.assert_clean(from, "the emoji picker, closed");
     assert_eq!(trace.last().egui, Some(egui::Id::new("composer-text")));
+}
+
+/// A long chat whose newest message replies to message `target`.
+fn replying_to(target: usize) -> App {
+    let mut app = app();
+    long_chat(&mut app, 400);
+    let chat = app.open_chat.clone().expect("the demo opens a chat");
+    let conversation = app.conversations.get_mut(&chat).expect("its messages");
+    let quoted = conversation.messages[target].clone();
+    conversation.messages[399].quoted = Some(crate::model::Quoted {
+        chat: None,
+        id: quoted.id.clone(),
+        sender: quoted.sender.clone(),
+        sender_name: None,
+        summary: quoted.summary(),
+        mentions: Vec::new(),
+    });
+    app
+}
+
+/// Fixes the clock at `now`, in UTC on a 24-hour clock, until the guard
+/// drops. The demo dates its messages from now, so a message gains its day
+/// in its name ("Today, ...") when a local midnight falls just before it.
+fn clock_at(now: i64) -> crate::util::fixed_clock::Guard {
+    crate::util::fixed_clock::set(crate::util::fixed_clock::Clock {
+        now,
+        zone: jiff::tz::TimeZone::UTC,
+        twelve_hour: false,
+    })
+}
+
+/// G on a reply lands on the replied message in the frame after the key,
+/// which egui runs at once after a frame with input. A replied message far
+/// up a long chat costs that frame no more than a near one: the rows laid
+/// out only to place it are not handed to the screen reader. The clock is
+/// fixed, and message 50 is replied to both inside a day and as the day's
+/// first message, which the reader hears with its day.
+#[test]
+fn g_lands_on_the_replied_message_in_the_next_frame() {
+    // 14:00 UTC on Wednesday 11 March 2026: the 400 messages, a minute
+    // apart, all fall on that day.
+    const AFTERNOON: i64 = 1_773_237_600;
+    // A later time that places message 50 just after midnight.
+    let day_start = {
+        let _clock = clock_at(AFTERNOON);
+        let app = replying_to(50);
+        let chat = app.open_chat.as_ref().expect("the demo opens a chat");
+        let sent = app.conversations[chat].messages[50].timestamp;
+        let (_, midnight) = crate::util::day_key(sent)
+            .and_then(crate::util::day_bounds)
+            .expect("the message has a day");
+        AFTERNOON + midnight + 30 - sent
+    };
+    for (target, now, day) in [
+        (398, AFTERNOON, ""),
+        (50, AFTERNOON, ""),
+        (50, day_start, "Today, "),
+    ] {
+        let _clock = clock_at(now);
+        let mut trace = Trace::new(replying_to(target));
+        focus_stop(&mut trace, Stop::Messages);
+        let before = trace.last().clone();
+        let chat = trace.app.open_chat.clone().expect("the demo opens a chat");
+        let heights = |trace: &Trace| -> Vec<f32> {
+            let rows = &trace.app.conversations[&chat].rows;
+            (target.saturating_sub(10)..target)
+                .filter_map(|index| rows.get(&format!("long-{index}")).map(|row| row.height))
+                .collect()
+        };
+        trace.action += 1;
+        let press = trace.mark();
+        trace.frame("G", key_press(egui::Key::G, egui::Modifiers::NONE));
+        trace.frame(
+            "G",
+            vec![egui::Event::Key {
+                key: egui::Key::G,
+                physical_key: Some(egui::Key::G),
+                pressed: false,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        let laid_out_hidden = heights(&trace);
+        trace.settle("G", 4);
+        let scenario = format!("G to message {target} at {now}");
+        trace.assert_clean(press, &scenario);
+        let landed = &trace.frames[press + 1];
+        assert!(
+            landed
+                .spoken
+                .contains(&format!("Some(\"{day}You, Fixture line {target},")),
+            "{scenario}: the reader is on the replied message in the next frame, \
+             not on {}\n{}",
+            landed.spoken,
+            trace.dump(press)
+        );
+        assert!(
+            landed.nodes < before.nodes * 2,
+            "{scenario}: the landing frame carries {} nodes, against {} before",
+            landed.nodes,
+            before.nodes
+        );
+        assert_eq!(
+            laid_out_hidden,
+            heights(&trace),
+            "{scenario}: rows laid out hidden measure as shown"
+        );
+        if target == 50 {
+            // Far from either end: centred in the view, as the jump asks.
+            let bubble = trace
+                .ctx
+                .data(|data| {
+                    data.get_temp::<egui::Rect>(
+                        crate::ui::conversation::bubble_id(&chat, "long-50").with("rect"),
+                    )
+                })
+                .expect("the replied message is drawn");
+            let view = trace
+                .app
+                .selection_view
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .expect("the message view is drawn");
+            assert!(
+                (bubble.center().y - view.center().y).abs() <= 1.0,
+                "{scenario}: {bubble:?} centred in {view:?}"
+            );
+        }
+    }
+}
+
+/// Space on a photo in the message list opens the preview with the reader
+/// on its Close button, in the first pass that shows it and never by way of
+/// the window; Escape closes it, and the reader is back on the photo's
+/// message, not in the message field.
+#[test]
+fn the_image_preview_takes_focus_and_gives_it_back() {
+    let mut trace = Trace::new(photo_chat());
+    focus_stop(&mut trace, Stop::Messages);
+    let row = trace.last().clone();
+    assert!(row.spoken.contains("Photo"), "{}", row.spoken);
+    let press = tap(&mut trace, "Space", egui::Key::Space, egui::Modifiers::NONE);
+    assert!(trace.app.image_preview.is_some());
+    trace.assert_clean(press, "the image preview opened");
+    assert_eq!(
+        trace.frames[press + 1].name,
+        "Button \"Close preview (Esc)\"",
+        "on Close in the frame after the key\n{}",
+        trace.dump(press)
+    );
+    escape_back_to_the_list(&mut trace, &row, "the image preview");
+    assert!(trace.app.image_preview.is_none());
+}
+
+/// A screen reader's own activation of the preview's Close, an AccessKit
+/// action rather than a pointer click, closes it and puts the reader back
+/// on the message it was opened from, with no keyboard navigation noted.
+#[test]
+fn a_screen_readers_activation_of_close_gives_focus_back() {
+    let mut trace = Trace::new(photo_chat());
+    focus_stop(&mut trace, Stop::Messages);
+    let row = trace.last().clone();
+    tap(&mut trace, "Space", egui::Key::Space, egui::Modifiers::NONE);
+    let close = trace.last().clone();
+    assert_eq!(close.name, "Button \"Close preview (Esc)\"");
+    trace
+        .ctx
+        .data_mut(|data| data.insert_temp(crate::theme::keyboard_focus_id(), false));
+    let from = trace.mark();
+    trace.action += 1;
+    trace.frame(
+        "activate Close",
+        vec![egui::Event::AccessKitActionRequest(
+            egui::accesskit::ActionRequest {
+                action: egui::accesskit::Action::Click,
+                target_tree: egui::accesskit::TreeId::ROOT,
+                target_node: close.effective,
+                data: None,
+            },
+        )],
+    );
+    trace.settle("activate Close", 4);
+    assert!(trace.app.image_preview.is_none(), "the action closes it");
+    trace.assert_clean(from, "Close activated by the screen reader");
+    assert_eq!(trace.last().effective, row.effective, "back on the message");
+}
+
+/// The media viewer shows the open chat's media and closes as the reader
+/// moves to another chat, with no key: focus goes to that chat's message
+/// field rather than back to the old chat's list.
+#[test]
+fn the_viewer_closed_by_a_chat_switch_leaves_focus_to_the_new_chat() {
+    let mut trace = Trace::new(photo_chat());
+    focus_stop(&mut trace, Stop::Messages);
+    let old = trace.app.open_chat.clone().expect("the demo opens a chat");
+    tap(&mut trace, "Space", egui::Key::Space, egui::Modifiers::NONE);
+    assert!(trace.app.image_preview.is_some(), "Space opens the viewer");
+    trace.action += 1;
+    trace
+        .app
+        .actions
+        .push(Action::OpenChat(super::SAMPLES[1].id.into()));
+    trace.settle("another chat", 3);
+    assert_eq!(trace.app.open_chat.as_deref(), Some(super::SAMPLES[1].id));
+    assert!(
+        trace.app.image_preview.is_none(),
+        "the chat switch closes the viewer"
+    );
+    assert_ne!(
+        trace.last().egui,
+        Some(crate::ui::conversation::messages_list_id(&old)),
+        "not the old chat's list"
+    );
+    assert_eq!(
+        trace.last().egui,
+        Some(crate::ui::conversation::composer_id()),
+        "the new chat's message field"
+    );
+}
+
+/// A dialog stays open as the reader moves to another chat, such as from a
+/// notification. Escape closes it there, and focus goes to that chat's
+/// message field rather than back to the old chat's list it opened from.
+#[test]
+fn a_dialog_closed_in_another_chat_leaves_focus_to_it() {
+    let mut trace = Trace::new(app());
+    focus_stop(&mut trace, Stop::Messages);
+    let old = trace.app.open_chat.clone().expect("the demo opens a chat");
+    tap(
+        &mut trace,
+        "Ctrl+/",
+        egui::Key::Slash,
+        egui::Modifiers::COMMAND,
+    );
+    assert!(trace.app.dialog.is_some(), "Ctrl+/ opens the shortcuts");
+    trace.action += 1;
+    trace
+        .app
+        .actions
+        .push(Action::OpenChat(super::SAMPLES[1].id.into()));
+    trace.settle("another chat", 3);
+    assert_eq!(trace.app.open_chat.as_deref(), Some(super::SAMPLES[1].id));
+    assert!(
+        trace.app.dialog.is_some(),
+        "the dialog is still open after the chat switch"
+    );
+    let from = tap(
+        &mut trace,
+        "Escape",
+        egui::Key::Escape,
+        egui::Modifiers::NONE,
+    );
+    assert!(trace.app.dialog.is_none(), "Escape closes the dialog");
+    assert_ne!(
+        trace.last().egui,
+        Some(crate::ui::conversation::messages_list_id(&old)),
+        "not the old chat's list\n{}",
+        trace.dump(from)
+    );
+    assert_eq!(
+        trace.last().egui,
+        Some(crate::ui::conversation::composer_id()),
+        "the new chat's message field\n{}",
+        trace.dump(from)
+    );
 }

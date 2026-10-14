@@ -2391,6 +2391,12 @@ pub enum Action {
         path: PathBuf,
         fraction: f32,
     },
+    /// Moves the playing or paused voice message to a fraction from 0 to 1,
+    /// leaving it playing or paused.
+    JumpVoice {
+        message: String,
+        fraction: f32,
+    },
     /// Sets the voice playback speed to one of the supported speeds.
     SetVoiceSpeed(f32),
     /// Plays or pauses a downloaded video inside its message.
@@ -2726,6 +2732,9 @@ pub enum Action {
     MessageMenuOpened,
     /// Scrolls the open chat to a message.
     ScrollTo(String),
+    /// Goes to a replied message from the keys: as `ScrollTo`, but the
+    /// message list moves only once the message is loaded.
+    GoToReplied(String),
     /// Updates chat-list search text.
     Search(String),
     ShowUpdate,

@@ -3976,6 +3976,7 @@ fn contacts_by_id(app: &App) -> HashMap<&str, &Contact> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::MediaState;
     use crate::paths::AppDirs;
     use crate::settings::Settings;
 
@@ -4048,6 +4049,62 @@ mod tests {
         );
         output.textures_delta.clear();
         render(app, ctx);
+    }
+
+    /// One frame in which `key` is let go of.
+    pub(super) fn release_key(app: &mut App, ctx: &egui::Context, key: egui::Key) {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 780.0),
+                )),
+                events: vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: false,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| {
+                let ctx = ui.ctx().clone();
+                app.background_frame(&ctx);
+                app.frame_ui(ui);
+            },
+        );
+        output.textures_delta.clear();
+    }
+
+    /// One frame with `key` still held down, as a keyboard repeats it: the
+    /// repeated press and the text it types.
+    pub(super) fn hold_key(app: &mut App, ctx: &egui::Context, key: egui::Key, text: &str) {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 780.0),
+                )),
+                events: vec![
+                    egui::Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::Text(text.to_owned()),
+                ],
+                ..Default::default()
+            },
+            |ui| {
+                let ctx = ui.ctx().clone();
+                app.background_frame(&ctx);
+                app.frame_ui(ui);
+            },
+        );
+        output.textures_delta.clear();
     }
 
     /// Two contacts typing in the open group keep the window drawing every
@@ -6243,6 +6300,16 @@ mod tests {
         assert!(lists_seen > 0, "the list was in the tree");
     }
 
+    fn node(
+        tree: &egui::accesskit::TreeUpdate,
+        id: egui::accesskit::NodeId,
+    ) -> Option<egui::accesskit::Node> {
+        tree.nodes
+            .iter()
+            .find(|(found, _)| *found == id)
+            .map(|(_, node)| node.clone())
+    }
+
     #[test]
     fn cursor_far_from_view_never_names_a_missing_active_descendant() {
         let mut app = app();
@@ -6976,6 +7043,7 @@ mod tests {
             egui::Key::F,
             egui::Key::S,
             egui::Key::M,
+            egui::Key::G,
         ] {
             app.actions.clear();
             press_key(&mut app, &ctx, key, egui::Modifiers::NONE);
@@ -6998,6 +7066,1409 @@ mod tests {
         press_key(&mut app, &ctx, egui::Key::R, egui::Modifiers::NONE);
         assert_eq!(app.reply_to.as_deref(), Some(newest.as_str()));
         assert!(ctx.memory(|memory| memory.has_focus(egui::Id::new("composer-text"))));
+    }
+
+    /// An app with a playable voice message the list's cursor is on, and the
+    /// list focused.
+    fn app_on_a_voice_message() -> (App, egui::Context, String) {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        apply_flags(&mut app, Some("voice"));
+        render(&mut app, &ctx);
+        let chat = app.open_chat.clone().unwrap();
+        app.message_cursor.insert(chat, "ada-voice".into());
+        focus_messages(&mut app, &ctx);
+        (app, ctx, "ada-voice".to_owned())
+    }
+
+    fn spoke(app: &App, text: &str) -> bool {
+        app.announcer.spoken().contains(&text)
+    }
+
+    #[test]
+    fn space_plays_the_focused_voice_message_without_announcing() {
+        let (mut app, ctx, id) = app_on_a_voice_message();
+        assert_eq!(app.player.status(&id).state, crate::audio::State::Idle);
+        press_key(&mut app, &ctx, egui::Key::Space, egui::Modifiers::NONE);
+        assert_ne!(app.player.status(&id).state, crate::audio::State::Idle);
+        assert_eq!(app.announcer.spoken(), ["", ""], "play is not announced");
+        // It plays once decoded, silently: no test makes a sound or opens
+        // the sound device a test machine may lack.
+        for _ in 0..500 {
+            render(&mut app, &ctx);
+            if app.player.status(&id).state != crate::audio::State::Loading {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(app.player.status(&id).state, crate::audio::State::Playing);
+        assert!(!app.player.uses_device());
+    }
+
+    #[test]
+    fn s_cycles_the_speed_like_the_chip_and_announces_it() {
+        let (mut app, ctx, _) = app_on_a_voice_message();
+        for (speed, said) in [(1.5, "Speed 1.5x"), (2.0, "Speed 2x"), (1.0, "Speed 1x")] {
+            press_key(&mut app, &ctx, egui::Key::S, egui::Modifiers::NONE);
+            assert_eq!(app.player.speed(), speed);
+            assert_eq!(app.settings.voice_speed, speed);
+            assert!(spoke(&app, said), "{said}: {:?}", app.announcer.spoken());
+        }
+        // From a speed outside the cycle, S goes to the next one above it.
+        app.actions.push(crate::model::Action::SetVoiceSpeed(1.25));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::S, egui::Modifiers::NONE);
+        assert_eq!(app.player.speed(), 1.5);
+        app.actions.push(crate::model::Action::SetVoiceSpeed(1.75));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::S, egui::Modifiers::NONE);
+        assert_eq!(app.player.speed(), 2.0);
+    }
+
+    #[test]
+    fn arrows_seek_only_the_message_that_is_playing() {
+        let (mut app, ctx, id) = app_on_a_voice_message();
+        // Nothing plays yet: the arrows do nothing and say nothing.
+        press_key(&mut app, &ctx, egui::Key::ArrowRight, egui::Modifiers::NONE);
+        assert_eq!(app.player.status(&id).state, crate::audio::State::Idle);
+        assert_eq!(app.announcer.spoken(), ["", ""]);
+        press_key(&mut app, &ctx, egui::Key::Space, egui::Modifiers::NONE);
+        // The clip decodes on another thread.
+        for _ in 0..500 {
+            render(&mut app, &ctx);
+            if app.player.status(&id).state != crate::audio::State::Loading {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let status = app.player.status(&id);
+        assert_ne!(status.state, crate::audio::State::Loading, "decoded");
+        assert!(status.total > std::time::Duration::from_secs(5));
+        press_key(&mut app, &ctx, egui::Key::ArrowRight, egui::Modifiers::NONE);
+        let moved = app.player.status(&id).position;
+        assert!(
+            moved >= std::time::Duration::from_millis(4500),
+            "Right moved to {moved:?}"
+        );
+        assert!(
+            spoke(&app, "0:05 of 0:06") || spoke(&app, "0:05 of 0:05"),
+            "{:?}",
+            app.announcer.spoken()
+        );
+        press_key(&mut app, &ctx, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+        assert!(app.player.status(&id).position < moved);
+        // Another message's keys do not seek this one.
+        let chat = app.open_chat.clone().unwrap();
+        app.message_cursor.insert(chat, "you-voice".into());
+        let before = app.player.status(&id).position;
+        press_key(&mut app, &ctx, egui::Key::ArrowRight, egui::Modifiers::NONE);
+        // The clip keeps playing, but it does not jump.
+        assert!(app.player.status(&id).position < before + std::time::Duration::from_secs(2));
+        assert!(!app.player.uses_device(), "played silently");
+    }
+
+    #[test]
+    fn space_does_nothing_on_a_text_message_or_in_the_composer() {
+        let (mut app, ctx, id) = app_on_a_voice_message();
+        let chat = app.open_chat.clone().unwrap();
+        let text = app.conversations[&chat]
+            .messages
+            .iter()
+            .find(|message| matches!(message.content, Content::Text { .. }))
+            .expect("a text message")
+            .id
+            .clone();
+        app.message_cursor.insert(chat.clone(), text);
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Space, egui::Modifiers::NONE);
+        assert_eq!(app.player.status(&id).state, crate::audio::State::Idle);
+        assert!(app.image_preview.is_none());
+        // With the composer focused the same key is typing, not an action.
+        app.message_cursor.insert(chat, id.clone());
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("composer-text")));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Space, egui::Modifiers::NONE);
+        assert_eq!(app.player.status(&id).state, crate::audio::State::Idle);
+    }
+
+    /// Space does what clicking does, and nothing where clicking does nothing.
+    #[test]
+    fn space_runs_what_clicking_the_message_runs() {
+        use crate::model::Action;
+        let ctx = egui::Context::default();
+        let primary = |content: Content| {
+            crate::ui::conversation::primary_key_actions(
+                &ctx,
+                "chat",
+                &message("chat", "m", false, 1, content),
+            )
+        };
+        let text = |text: &str| Content::Text {
+            text: text.to_owned(),
+            preview: None,
+        };
+        assert_eq!(
+            primary(text("read https://example.com/a. thanks")),
+            [Action::OpenUrl("https://example.com/a".into())]
+        );
+        assert_eq!(
+            primary(text(
+                "https://example.com/a and again https://example.com/a"
+            )),
+            [Action::OpenUrl("https://example.com/a".into())],
+            "one address named twice is one link"
+        );
+        assert!(primary(text("no links here")).is_empty());
+        assert_eq!(
+            primary(text("https://example.com/a https://example.com/b")),
+            [Action::OpenUrl("https://example.com/a".into())],
+            "the first of several links, where the item cursor starts"
+        );
+        let file = |name: &str| {
+            let mut file = media("application/pdf", 10, None, None);
+            file.path = Some(std::path::PathBuf::from(name));
+            file
+        };
+        let document = |media| Content::Document {
+            media,
+            file_name: "a.pdf".into(),
+            caption: None,
+            pages: None,
+        };
+        assert_eq!(
+            primary(document(file("a.pdf"))),
+            [Action::OpenFile("a.pdf".into())]
+        );
+        assert_eq!(
+            primary(document(media("application/pdf", 10, None, None))),
+            [Action::Download {
+                manual: true,
+                card: None,
+                chat: "chat".into(),
+                message: "m".into()
+            }],
+            "a document not downloaded yet is fetched first"
+        );
+        assert_eq!(
+            primary(Content::Image {
+                motion: None,
+                media: file("a.png"),
+                caption: None
+            }),
+            [Action::PreviewImage {
+                path: "a.png".into(),
+                chat: "chat".into(),
+                message: "m".into(),
+                card: None,
+            }]
+        );
+        assert_eq!(
+            primary(Content::Video {
+                media: file("a.mp4"),
+                caption: None,
+                seconds: Some(3),
+                gif: false,
+                note: false,
+            }),
+            [Action::PlayVideo {
+                message: "m".into(),
+                path: "a.mp4".into()
+            }]
+        );
+        assert!(primary(Content::Revoked).is_empty());
+        // A sticker does what clicking it does too: a downloaded one opens
+        // on its own card, and one that is not downloaded, or failed to, is
+        // fetched.
+        let sticker = |media, animated| Content::Sticker { media, animated };
+        for animated in [false, true] {
+            assert_eq!(
+                primary(sticker(file("a.webp"), animated)),
+                [Action::PreviewSticker("a.webp".into())]
+            );
+        }
+        let mut failed = media("image/webp", 10, None, None);
+        failed.state = MediaState::Failed("Download failed".into());
+        assert_eq!(
+            primary(sticker(failed, false)),
+            [Action::Download {
+                manual: true,
+                card: None,
+                chat: "chat".into(),
+                message: "m".into()
+            }],
+            "a sticker that failed to download is fetched again"
+        );
+    }
+
+    /// Plays the focused voice message from the keys and waits until it has
+    /// decoded on its own thread.
+    fn play_focused_voice(app: &mut App, ctx: &egui::Context, id: &str) {
+        press_key(app, ctx, egui::Key::Space, egui::Modifiers::NONE);
+        for _ in 0..500 {
+            render(app, ctx);
+            if app.player.status(id).state != crate::audio::State::Loading {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let status = app.player.status(id);
+        assert_eq!(status.state, crate::audio::State::Playing, "decoded");
+        assert!(status.total > std::time::Duration::from_secs(5));
+    }
+
+    /// Seeking a paused voice message only moves it and says where it is:
+    /// it stays paused, also when Left has nowhere further back to go.
+    /// `keys::tests` checks the same without a sound device.
+    #[test]
+    fn arrows_move_a_paused_voice_message_without_playing_it() {
+        use crate::audio::State;
+        let (mut app, ctx, id) = app_on_a_voice_message();
+        play_focused_voice(&mut app, &ctx, &id);
+        press_key(&mut app, &ctx, egui::Key::Space, egui::Modifiers::NONE);
+        assert_eq!(app.player.status(&id).state, State::Paused);
+        press_key(&mut app, &ctx, egui::Key::ArrowRight, egui::Modifiers::NONE);
+        let status = app.player.status(&id);
+        assert_eq!(status.state, State::Paused, "Right started playback");
+        assert!(
+            status.position >= std::time::Duration::from_millis(4500),
+            "Right moved to {:?}",
+            status.position
+        );
+        assert!(spoke(&app, "0:05 of 0:06"), "{:?}", app.announcer.spoken());
+        // Back to the start, then Left again at 0:00: still paused there.
+        for _ in 0..2 {
+            app.announcer = Default::default();
+            press_key(&mut app, &ctx, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+            assert_eq!(
+                app.player.status(&id).state,
+                State::Paused,
+                "Left started playback"
+            );
+            assert!(spoke(&app, "0:00 of 0:06"), "{:?}", app.announcer.spoken());
+        }
+        // A paused clip does not move on by itself.
+        let before = app.player.status(&id).position;
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        render(&mut app, &ctx);
+        let after = app.player.status(&id).position;
+        assert!(after < std::time::Duration::from_secs(1), "{after:?}");
+        assert!(
+            after.saturating_sub(before) < std::time::Duration::from_millis(100),
+            "{before:?} to {after:?}"
+        );
+        assert!(!app.player.uses_device(), "played silently");
+    }
+
+    /// Left first, from the start, then Right last: a slow frame after Right
+    /// could otherwise let the clip run out before the next check.
+    #[test]
+    fn arrows_keep_a_playing_voice_message_playing() {
+        use crate::audio::State;
+        let (mut app, ctx, id) = app_on_a_voice_message();
+        play_focused_voice(&mut app, &ctx, &id);
+        press_key(&mut app, &ctx, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+        assert_eq!(app.player.status(&id).state, State::Playing);
+        assert!(spoke(&app, "0:00 of 0:06"), "{:?}", app.announcer.spoken());
+        press_key(&mut app, &ctx, egui::Key::ArrowRight, egui::Modifiers::NONE);
+        assert_eq!(app.player.status(&id).state, State::Playing);
+        assert!(!app.player.uses_device(), "played silently");
+    }
+
+    /// Every kind of attachment, not downloaded, in `state`.
+    fn attachments(state: &MediaState) -> Vec<(&'static str, Content)> {
+        let file = |mime: &str| {
+            let mut file = media(mime, 120_000, Some(800), Some(600));
+            file.state = state.clone();
+            file
+        };
+        vec![
+            (
+                "voice",
+                Content::Audio {
+                    media: file("audio/ogg"),
+                    seconds: Some(6),
+                    voice_note: true,
+                    waveform: Vec::new(),
+                },
+            ),
+            (
+                "video",
+                Content::Video {
+                    caption: None,
+                    media: file("video/mp4"),
+                    seconds: Some(6),
+                    gif: false,
+                    note: false,
+                },
+            ),
+            (
+                "photo",
+                Content::Image {
+                    motion: None,
+                    caption: None,
+                    media: file("image/jpeg"),
+                },
+            ),
+            (
+                "document",
+                Content::Document {
+                    media: file("application/pdf"),
+                    file_name: "a.pdf".into(),
+                    caption: None,
+                    pages: None,
+                },
+            ),
+            (
+                "sticker",
+                Content::Sticker {
+                    media: file("image/webp"),
+                    animated: false,
+                },
+            ),
+        ]
+    }
+
+    /// A demo app that records its commands and downloads nothing by itself,
+    /// with the list focused on a fixture message holding `content`, and the
+    /// sender of the backend's events, such as a download's result.
+    struct OnAttachment {
+        app: App,
+        ctx: egui::Context,
+        chat: String,
+        events: std::sync::mpsc::Sender<crate::backend::Event>,
+    }
+
+    fn app_on_attachment(content: Content) -> OnAttachment {
+        let root = tempfile::Builder::new()
+            .prefix("zapfast-demo-")
+            .tempdir()
+            .unwrap();
+        let (mut app, events) = App::headless(AppDirs::under(root.path()), Settings::default());
+        ROOTS.with(|roots| roots.borrow_mut().push(root));
+        populate(&mut app);
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        app.backend.record_demo_commands();
+        app.settings.auto_download = false;
+        render(&mut app, &ctx);
+        let chat = focus_fixture_message(&mut app, &ctx, content);
+        app.backend.take_demo_commands();
+        OnAttachment {
+            app,
+            ctx,
+            chat,
+            events,
+        }
+    }
+
+    impl OnAttachment {
+        /// Gives the fixture a thumbnail, as a video sent with one has.
+        fn with_thumbnail(mut self) -> Self {
+            let conversation = self.app.conversations.get_mut(&self.chat).unwrap();
+            let fixture = conversation.message_mut("key-fixture").unwrap();
+            fixture.thumbnail = Some(sample_thumbnail(1));
+            render(&mut self.app, &self.ctx);
+            self
+        }
+
+        fn space(&mut self) {
+            press_key(
+                &mut self.app,
+                &self.ctx,
+                egui::Key::Space,
+                egui::Modifiers::NONE,
+            );
+        }
+
+        /// A primary click on the bubble's part stored as `part`: in its
+        /// middle, or on a carousel card's picture, across its top.
+        fn click(&mut self, part: Part) {
+            let bubble = crate::ui::conversation::bubble_id(&self.chat, "key-fixture");
+            let id = match part {
+                Part::Named(name) => bubble.with(name),
+                Part::Card(index) => bubble.with(("carousel-card", index)),
+            };
+            let rect = self
+                .ctx
+                .data(|data| data.get_temp::<egui::Rect>(id))
+                .unwrap_or_else(|| panic!("no {part:?} drawn"));
+            let at = match part {
+                Part::Named(_) => rect.center(),
+                Part::Card(_) => egui::pos2(rect.center().x, rect.top() + 30.0),
+            };
+            let pointer = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            frame_with(
+                &mut self.app,
+                &self.ctx,
+                vec![egui::Event::PointerMoved(at), pointer(true), pointer(false)],
+            );
+            render(&mut self.app, &self.ctx);
+        }
+
+        /// The backend reports the fixture's download as done, or failed.
+        fn downloaded(&mut self, result: Result<std::path::PathBuf, String>) {
+            self.downloaded_card(None, result);
+        }
+
+        /// [`Self::downloaded`] for a carousel card's picture.
+        fn downloaded_card(
+            &mut self,
+            card: Option<usize>,
+            result: Result<std::path::PathBuf, String>,
+        ) {
+            self.events
+                .send(crate::backend::Event::Media {
+                    card,
+                    chat: self.chat.clone(),
+                    message: "key-fixture".into(),
+                    result,
+                })
+                .unwrap();
+            render(&mut self.app, &self.ctx);
+        }
+    }
+
+    fn sample_video() -> std::path::PathBuf {
+        std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/video/sample.mp4"
+        ))
+    }
+
+    fn fixture_media_state(app: &App, chat: &str) -> MediaState {
+        app.conversations[chat]
+            .message("key-fixture")
+            .and_then(|message| message.content.media())
+            .expect("the fixture's media")
+            .state
+            .clone()
+    }
+
+    fn fetched(app: &App) -> bool {
+        app.backend.take_demo_commands().iter().any(|command| {
+            matches!(
+                command,
+                crate::backend::Command::Download { message, .. } if message == "key-fixture"
+            )
+        })
+    }
+
+    /// Space on an attachment that is not downloaded, or failed to, does what
+    /// the click does there: it starts the download, or retries it.
+    #[test]
+    fn space_fetches_or_retries_an_attachment_as_its_click_does() {
+        let failed = MediaState::Failed("Download failed".into());
+        for state in [MediaState::Idle, failed] {
+            for (kind, content) in attachments(&state) {
+                // A sticker loads as soon as it shows, whatever the setting,
+                // so only a failed one waits for the reader.
+                if kind == "sticker" && state == MediaState::Idle {
+                    continue;
+                }
+                let mut on = app_on_attachment(content);
+                assert_eq!(fixture_media_state(&on.app, &on.chat), state, "{kind}");
+                on.space();
+                assert!(fetched(&on.app), "{kind} {state:?}: nothing fetched");
+                assert_eq!(
+                    fixture_media_state(&on.app, &on.chat),
+                    MediaState::Downloading,
+                    "{kind} {state:?}"
+                );
+            }
+        }
+        // Over the automatic download limit, the retry downloads the whole
+        // file, as the click's does.
+        let mut on = app_on_attachment(large_document());
+        on.space();
+        assert!(fetched(&on.app), "over the limit: nothing fetched");
+        assert_eq!(
+            fixture_media_state(&on.app, &on.chat),
+            MediaState::Downloading
+        );
+    }
+
+    /// A document over the download limit whose download failed.
+    fn large_document() -> Content {
+        let mut large = media(
+            "video/mp4",
+            crate::model::ATTACHMENT_DOWNLOAD_LIMIT + 1,
+            None,
+            None,
+        );
+        large.state = MediaState::Failed("Download failed".into());
+        Content::Document {
+            media: large,
+            file_name: "machines-sing.mp4".into(),
+            caption: None,
+            pages: None,
+        }
+    }
+
+    fn video_to_fetch() -> Content {
+        Content::Video {
+            caption: None,
+            media: media("video/mp4", 120_000, Some(800), Some(600)),
+            seconds: Some(6),
+            gif: false,
+            note: false,
+        }
+    }
+
+    /// A video with no thumbnail shows as a file card, whose click only
+    /// downloads it, and Space too; one with a thumbnail plays once it lands,
+    /// for the click and Space alike.
+    #[test]
+    fn space_on_a_video_plays_it_once_downloaded_only_as_its_click_does() {
+        for thumbnail in [false, true] {
+            let mut on = app_on_attachment(video_to_fetch());
+            // The clip plays once it lands: never through the speakers.
+            on.app.video.silence();
+            if thumbnail {
+                on = on.with_thumbnail();
+            }
+            on.space();
+            assert!(fetched(&on.app), "thumbnail {thumbnail}");
+            on.downloaded(Ok(sample_video()));
+            assert_eq!(
+                on.app.video.message(),
+                thumbnail.then_some("key-fixture"),
+                "thumbnail {thumbnail}"
+            );
+        }
+    }
+
+    /// Where a test clicks in the fixture's bubble.
+    #[derive(Clone, Copy, Debug)]
+    enum Part {
+        /// The part the bubble stores under this name.
+        Named(&'static str),
+        /// A carousel card's picture.
+        Card(usize),
+    }
+
+    /// The state of every file in the fixture: its own, a card's header
+    /// picture, or each carousel card's picture.
+    fn fixture_states(app: &App, chat: &str) -> Vec<MediaState> {
+        let message = app.conversations[chat].message("key-fixture").unwrap();
+        let cards = match &message.content {
+            Content::Interactive {
+                card: Some(card), ..
+            } => card
+                .carousel
+                .iter()
+                .filter_map(|card| card.image.as_ref())
+                .collect(),
+            _ => Vec::new(),
+        };
+        message
+            .content
+            .media()
+            .into_iter()
+            .chain(cards)
+            .map(|media| media.state.clone())
+            .collect()
+    }
+
+    /// A group invite opens inside ZapFast with a command the demo records,
+    /// so a test can tell which link was opened.
+    const INVITE: &str = "https://chat.whatsapp.com/AbCdEf1234567890XyZ";
+
+    fn invite_preview() -> Content {
+        Content::Text {
+            text: format!("Join us {INVITE}"),
+            preview: Some(LinkPreview {
+                url: INVITE.into(),
+                title: Some("Weekend hikes".into()),
+                description: None,
+            }),
+        }
+    }
+
+    fn interactive(card: crate::model::InteractiveCard) -> Content {
+        Content::Interactive {
+            text: card.body.clone(),
+            card: Some(Box::new(card)),
+        }
+    }
+
+    fn picture_in(state: MediaState, size: u64) -> Media {
+        let mut picture = media("image/jpeg", size, Some(800), Some(600));
+        picture.state = state;
+        picture
+    }
+
+    /// A card with a header picture in `state`.
+    fn header_card(state: MediaState, size: u64) -> Content {
+        interactive(crate::model::InteractiveCard {
+            body: "Summer offer".into(),
+            image: Some(picture_in(state, size)),
+            ..Default::default()
+        })
+    }
+
+    /// A carousel of two cards whose pictures are in `state`.
+    fn carousel_cards(state: MediaState) -> Content {
+        let card = |body: &str| crate::model::InteractiveCard {
+            body: body.into(),
+            image: Some(picture_in(state.clone(), 120_000)),
+            ..Default::default()
+        };
+        interactive(crate::model::InteractiveCard {
+            body: String::new(),
+            carousel: vec![card("Card one"), card("Card two")],
+            ..Default::default()
+        })
+    }
+
+    /// Space and a real click on the same bubble send the same commands and
+    /// leave the same state, down to whether a video plays once it lands.
+    #[test]
+    fn a_click_and_space_on_an_attachment_do_the_same() {
+        let failed = |content: Content| {
+            let mut content = content;
+            if let Some(media) = content.media_at_mut(None) {
+                media.state = MediaState::Failed("Download failed".into());
+            }
+            content
+        };
+        let photo = Content::Image {
+            motion: None,
+            caption: None,
+            media: media("image/jpeg", 120_000, Some(800), Some(600)),
+        };
+        let failed_state = MediaState::Failed("Download failed".into());
+        let large = crate::model::ATTACHMENT_DOWNLOAD_LIMIT + 1;
+        let cases = [
+            (Part::Named("card"), video_to_fetch()),
+            (Part::Named("card"), failed(video_to_fetch())),
+            (Part::Named("card"), large_document()),
+            (
+                Part::Named("card"),
+                attachments(&MediaState::Idle).remove(3).1,
+            ),
+            (Part::Named("picture"), failed(photo)),
+            (Part::Named("preview"), invite_preview()),
+            (
+                Part::Named("picture"),
+                header_card(MediaState::Idle, 120_000),
+            ),
+            (
+                Part::Named("picture"),
+                header_card(failed_state.clone(), 120_000),
+            ),
+            (
+                Part::Named("picture"),
+                header_card(failed_state.clone(), large),
+            ),
+            (Part::Card(0), carousel_cards(MediaState::Idle)),
+            (Part::Card(0), carousel_cards(failed_state)),
+        ];
+        for (part, content) in cases {
+            let outcome = |by_click: bool| {
+                let mut on = app_on_attachment(content.clone());
+                if by_click {
+                    on.click(part);
+                } else {
+                    on.space();
+                }
+                let commands = format!("{:?}", on.app.backend.take_demo_commands());
+                let state = fixture_states(&on.app, &on.chat);
+                on.downloaded(Ok(sample_video()));
+                (commands, state, on.app.video.message().map(str::to_owned))
+            };
+            assert_eq!(outcome(true), outcome(false), "{content:?}");
+        }
+    }
+
+    /// Clicking an attachment that is downloading does nothing, and Space
+    /// neither; a video still remembers to play once it lands, as on click.
+    #[test]
+    fn space_does_nothing_while_an_attachment_downloads() {
+        use crate::model::Action;
+        let ctx = egui::Context::default();
+        let primary =
+            |message: &Message| crate::ui::conversation::primary_key_actions(&ctx, "chat", message);
+        for (kind, content) in attachments(&MediaState::Downloading) {
+            // The video has no thumbnail: it shows as a file card.
+            let fixture = message("chat", "key-fixture", false, 1, content.clone());
+            assert!(primary(&fixture).is_empty(), "{kind}");
+            if kind == "video" {
+                let fixture = Message {
+                    thumbnail: Some(sample_thumbnail(1)),
+                    ..fixture
+                };
+                assert_eq!(
+                    primary(&fixture),
+                    [Action::PlayVideoWhenDownloaded("key-fixture".into())]
+                );
+            }
+            let mut on = app_on_attachment(content);
+            on.space();
+            assert!(!fetched(&on.app), "{kind} fetched again");
+            assert_eq!(
+                fixture_media_state(&on.app, &on.chat),
+                MediaState::Downloading,
+                "{kind}"
+            );
+        }
+    }
+
+    /// A picture whose file cannot be drawn opens in the system viewer when
+    /// clicked, so Space opens it there too, not in the preview.
+    #[test]
+    fn space_opens_a_picture_that_cannot_be_drawn_as_its_click_does() {
+        use crate::model::Action;
+        let path = std::path::PathBuf::from("demo/no-such-picture.jpg");
+        let mut photo = media("image/jpeg", 120_000, Some(800), Some(600));
+        photo.path = Some(path.clone());
+        let content = Content::Image {
+            motion: None,
+            caption: None,
+            media: photo,
+        };
+        let fixture = message("chat", "key-fixture", false, 1, content.clone());
+        let primary = |ctx: &egui::Context| {
+            crate::ui::conversation::primary_key_actions(ctx, "chat", &fixture)
+        };
+        let viewer = [Action::PreviewImage {
+            path: path.clone(),
+            chat: "chat".into(),
+            message: "key-fixture".into(),
+            card: None,
+        }];
+        assert_eq!(primary(&egui::Context::default()), viewer);
+        let mut on = app_on_attachment(content);
+        for _ in 0..200 {
+            if primary(&on.ctx) != viewer {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            render(&mut on.app, &on.ctx);
+        }
+        assert_eq!(primary(&on.ctx), [Action::OpenFile(path)]);
+    }
+
+    /// Whether an assertive announcer slot says exactly `text`.
+    fn said_as_error(app: &App, text: &str) -> bool {
+        let assertive = app.announcer.assertive();
+        app.announcer
+            .spoken()
+            .iter()
+            .zip(assertive)
+            .any(|(spoken, assertive)| assertive && spoken.trim_end_matches('\u{200B}') == text)
+    }
+
+    /// Right moves to a carousel's second card and says how its picture
+    /// stands; Space fetches that picture, and its failure is spoken.
+    #[test]
+    fn a_card_picture_fetched_from_the_keys_says_why_it_failed() {
+        let mut on = app_on_attachment(carousel_cards(MediaState::Idle));
+        press_key(
+            &mut on.app,
+            &on.ctx,
+            egui::Key::ArrowRight,
+            egui::Modifiers::NONE,
+        );
+        assert!(
+            spoke(&on.app, "Card 2 of 2, Card two, not downloaded"),
+            "{:?}",
+            on.app.announcer.spoken()
+        );
+        on.space();
+        let commands = on.app.backend.take_demo_commands();
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                crate::backend::Command::Download { card: Some(1), message, .. }
+                    if message == "key-fixture"
+            )),
+            "{commands:?}"
+        );
+        on.app.announcer = Default::default();
+        on.downloaded_card(Some(1), Err("Connection reset".into()));
+        assert!(
+            said_as_error(&on.app, "Connection reset"),
+            "{:?}",
+            on.app.announcer.spoken()
+        );
+    }
+
+    fn failed_document() -> Content {
+        let mut document = attachments(&MediaState::Idle).remove(3).1;
+        if let Some(media) = document.media_at_mut(None) {
+            media.state = MediaState::Failed("Download failed".into());
+        }
+        document
+    }
+
+    /// Spoken once the reader has moved to another message, the failure
+    /// names what failed.
+    #[test]
+    fn a_failure_said_away_from_its_message_names_the_file() {
+        let mut on = app_on_attachment(failed_document());
+        on.space();
+        press_key(
+            &mut on.app,
+            &on.ctx,
+            egui::Key::ArrowUp,
+            egui::Modifiers::NONE,
+        );
+        assert_ne!(
+            on.app.message_cursor.get(&on.chat).map(String::as_str),
+            Some("key-fixture")
+        );
+        on.app.announcer = Default::default();
+        on.downloaded(Err("Connection reset".into()));
+        assert!(
+            said_as_error(&on.app, "a.pdf: Connection reset"),
+            "{:?}",
+            on.app.announcer.spoken()
+        );
+    }
+
+    /// Ctrl with the arrows walks a message's items only from the list: in
+    /// the message input they still move by word.
+    #[test]
+    fn ctrl_arrows_in_the_message_input_walk_no_items() {
+        let mut on = app_on_attachment(Content::text(
+            "see https://a.org, b.org/path and https://c.org",
+        ));
+        let ctrl = egui::Modifiers::COMMAND;
+        press_key(&mut on.app, &on.ctx, egui::Key::ArrowRight, ctrl);
+        assert!(
+            spoke(&on.app, "Link 2 of 3, b.org/path"),
+            "{:?}",
+            on.app.announcer.spoken()
+        );
+        on.ctx
+            .memory_mut(|memory| memory.request_focus(egui::Id::new("composer-text")));
+        render(&mut on.app, &on.ctx);
+        assert!(
+            on.ctx
+                .memory(|memory| memory.has_focus(egui::Id::new("composer-text"))),
+            "the message input has focus"
+        );
+        on.app.announcer = Default::default();
+        press_key(&mut on.app, &on.ctx, egui::Key::ArrowRight, ctrl);
+        assert!(
+            !on.app
+                .announcer
+                .spoken()
+                .iter()
+                .any(|spoken| spoken.starts_with("Link")),
+            "{:?}",
+            on.app.announcer.spoken()
+        );
+    }
+
+    /// The fixture replying to the open chat's oldest loaded message, with
+    /// the list focused on the fixture. Returns the replied message's id.
+    fn on_a_reply() -> (OnAttachment, String) {
+        let mut on = app_on_attachment(Content::text("Agreed"));
+        let target = on.app.conversations[&on.chat].messages[0].clone();
+        let conversation = on.app.conversations.get_mut(&on.chat).unwrap();
+        conversation.message_mut("key-fixture").unwrap().quoted = Some(crate::model::Quoted {
+            chat: None,
+            id: target.id.clone(),
+            sender: target.sender.clone(),
+            sender_name: None,
+            summary: target.summary(),
+            mentions: Vec::new(),
+        });
+        render(&mut on.app, &on.ctx);
+        (on, target.id)
+    }
+
+    /// The fixture replying to a message that is not loaded, with the list
+    /// focused on the fixture. Returns the replied message.
+    fn on_a_reply_not_loaded() -> (OnAttachment, Message) {
+        let mut on = app_on_attachment(Content::text("Agreed"));
+        let oldest = on.app.conversations[&on.chat].messages[0].timestamp;
+        let target = message(
+            &on.chat,
+            "not-loaded",
+            false,
+            oldest - 60,
+            Content::text("Long ago"),
+        );
+        let conversation = on.app.conversations.get_mut(&on.chat).unwrap();
+        conversation.message_mut("key-fixture").unwrap().quoted = Some(crate::model::Quoted {
+            chat: None,
+            id: target.id.clone(),
+            sender: target.sender.clone(),
+            sender_name: None,
+            summary: target.summary(),
+            mentions: Vec::new(),
+        });
+        render(&mut on.app, &on.ctx);
+        (on, target)
+    }
+
+    /// G on a reply whose quoted message is not loaded keeps the list on the
+    /// reply, says it is loading, and moves there once history brings it.
+    #[test]
+    fn g_waits_for_a_replied_message_that_is_not_loaded() {
+        let (mut on, target) = on_a_reply_not_loaded();
+        press_key(&mut on.app, &on.ctx, egui::Key::G, egui::Modifiers::NONE);
+        assert_eq!(
+            current_message(&on),
+            "key-fixture",
+            "the list keeps its place"
+        );
+        assert!(
+            spoke(&on.app, "Loading the replied message"),
+            "{:?}",
+            on.app.announcer.spoken()
+        );
+        assert!(
+            on.app
+                .backend
+                .take_demo_commands()
+                .iter()
+                .any(|command| matches!(
+                    command,
+                    crate::backend::Command::LoadUntil { id, .. } if id == "not-loaded"
+                )),
+            "older history is asked for"
+        );
+        on.events
+            .send(crate::backend::Event::Messages {
+                chat: on.chat.clone(),
+                messages: vec![target],
+                older: true,
+                complete: true,
+            })
+            .unwrap();
+        render(&mut on.app, &on.ctx);
+        assert_eq!(
+            on.app.message_cursor.get(&on.chat).map(String::as_str),
+            Some("not-loaded")
+        );
+    }
+
+    /// G held down asks once and keeps waiting: its repeats, and the text
+    /// they type, are not a key after it, so the replied message still moves
+    /// the list once it arrives, and "Loading" is not said again.
+    #[test]
+    fn holding_g_keeps_waiting_for_the_replied_message() {
+        let (mut on, target) = on_a_reply_not_loaded();
+        press_key(&mut on.app, &on.ctx, egui::Key::G, egui::Modifiers::NONE);
+        assert!(spoke(&on.app, "Loading the replied message"));
+        on.app.announcer = Default::default();
+        for _ in 0..3 {
+            hold_key(&mut on.app, &on.ctx, egui::Key::G, "g");
+        }
+        render(&mut on.app, &on.ctx);
+        assert!(
+            !spoke(&on.app, "Loading the replied message"),
+            "{:?}",
+            on.app.announcer.spoken()
+        );
+        assert_eq!(current_message(&on), "key-fixture", "still waiting");
+        deliver(&mut on, vec![target]);
+        assert_eq!(current_message(&on), "not-loaded");
+    }
+
+    /// History that comes without the replied message says it is not there,
+    /// and the list stays where it was.
+    #[test]
+    fn g_says_when_the_replied_message_is_not_found() {
+        let (mut on, _) = on_a_reply_not_loaded();
+        press_key(&mut on.app, &on.ctx, egui::Key::G, egui::Modifiers::NONE);
+        on.app.announcer = Default::default();
+        on.events
+            .send(crate::backend::Event::Messages {
+                chat: on.chat.clone(),
+                messages: Vec::new(),
+                older: true,
+                complete: false,
+            })
+            .unwrap();
+        render(&mut on.app, &on.ctx);
+        assert!(
+            spoke(&on.app, "Replied message not found"),
+            "{:?}",
+            on.app.announcer.spoken()
+        );
+        assert_eq!(current_message(&on), "key-fixture");
+    }
+
+    /// A page that completes the chat's history without the replied message
+    /// ends the wait at once: no older history can bring it, so nothing more
+    /// is asked for, it is said not to be found, and the list stays.
+    #[test]
+    fn the_end_of_history_without_the_replied_message_says_it_is_not_found() {
+        let (mut on, target) = on_a_reply_not_loaded();
+        // A page already on its way: G waits for it before asking its own.
+        on.app
+            .conversations
+            .get_mut(&on.chat)
+            .unwrap()
+            .loading_older = true;
+        press_key(&mut on.app, &on.ctx, egui::Key::G, egui::Modifiers::NONE);
+        on.app.backend.take_demo_commands();
+        on.app.announcer = Default::default();
+        let other = message(
+            &on.chat,
+            "older-page",
+            false,
+            target.timestamp + 1,
+            Content::text("Older"),
+        );
+        on.events
+            .send(crate::backend::Event::Messages {
+                chat: on.chat.clone(),
+                messages: vec![other],
+                older: true,
+                complete: true,
+            })
+            .unwrap();
+        render(&mut on.app, &on.ctx);
+        assert!(
+            spoke(&on.app, "Replied message not found"),
+            "{:?}",
+            on.app.announcer.spoken()
+        );
+        assert!(
+            !on.app
+                .backend
+                .take_demo_commands()
+                .iter()
+                .any(|command| matches!(command, crate::backend::Command::LoadUntil { .. })),
+            "nothing more to ask for"
+        );
+        assert_eq!(current_message(&on), "key-fixture");
+        deliver(&mut on, vec![target]);
+        assert_eq!(current_message(&on), "key-fixture", "the wait is over");
+    }
+
+    /// The list's current message: its cursor, or the newest without one.
+    fn current_message(on: &OnAttachment) -> String {
+        on.app
+            .message_cursor
+            .get(&on.chat)
+            .cloned()
+            .unwrap_or_else(|| {
+                on.app.conversations[&on.chat]
+                    .messages
+                    .last()
+                    .unwrap()
+                    .id
+                    .clone()
+            })
+    }
+
+    /// The page that brings the replied message `target`.
+    fn deliver(on: &mut OnAttachment, messages: Vec<Message>) {
+        on.events
+            .send(crate::backend::Event::Messages {
+                chat: on.chat.clone(),
+                messages,
+                older: true,
+                complete: false,
+            })
+            .unwrap();
+        render(&mut on.app, &on.ctx);
+    }
+
+    /// Points the fixture's quote at the open chat's oldest loaded message
+    /// and returns that message's id.
+    fn quote_the_oldest(on: &mut OnAttachment) -> String {
+        let target = on.app.conversations[&on.chat].messages[0].clone();
+        let conversation = on.app.conversations.get_mut(&on.chat).unwrap();
+        conversation.message_mut("key-fixture").unwrap().quoted = Some(crate::model::Quoted {
+            chat: None,
+            id: target.id.clone(),
+            sender: target.sender.clone(),
+            sender_name: None,
+            summary: target.summary(),
+            mentions: Vec::new(),
+        });
+        render(&mut on.app, &on.ctx);
+        target.id
+    }
+
+    /// Once the reader moves on, a replied message still loading never takes
+    /// the list back, and nothing more is said about it: after an arrow,
+    /// after G on a reply whose quote is loaded, after a click on a quote,
+    /// and after a search result.
+    #[test]
+    fn a_reply_still_loading_ends_when_the_reader_moves_on() {
+        for way in ["arrow", "g", "click", "search"] {
+            let (mut on, target) = on_a_reply_not_loaded();
+            press_key(&mut on.app, &on.ctx, egui::Key::G, egui::Modifiers::NONE);
+            assert!(spoke(&on.app, "Loading the replied message"), "{way}");
+            match way {
+                "arrow" => press_key(
+                    &mut on.app,
+                    &on.ctx,
+                    egui::Key::ArrowUp,
+                    egui::Modifiers::NONE,
+                ),
+                "g" => {
+                    quote_the_oldest(&mut on);
+                    // Let go of the first G, or egui takes the second for
+                    // the key held down, which jumps only once.
+                    release_key(&mut on.app, &on.ctx, egui::Key::G);
+                    press_key(&mut on.app, &on.ctx, egui::Key::G, egui::Modifiers::NONE);
+                }
+                "click" => {
+                    quote_the_oldest(&mut on);
+                    on.click(Part::Named("quote"));
+                }
+                _ => {
+                    let oldest = on.app.conversations[&on.chat].messages[0].id.clone();
+                    on.app.actions.push(crate::model::Action::OpenMessage {
+                        chat: on.chat.clone(),
+                        message: oldest,
+                    });
+                    render(&mut on.app, &on.ctx);
+                }
+            }
+            let place = current_message(&on);
+            assert_ne!(place, "key-fixture", "{way}: the reader moved");
+            on.app.announcer = Default::default();
+            deliver(&mut on, vec![target.clone()]);
+            assert_eq!(current_message(&on), place, "{way}: the list stays");
+            assert!(
+                on.app
+                    .announcer
+                    .spoken()
+                    .iter()
+                    .all(|spoken| spoken.is_empty()),
+                "{way}: {:?}",
+                on.app.announcer.spoken()
+            );
+        }
+    }
+
+    /// With an older page already on its way, G asks for its own once that
+    /// page is in, and says nothing about a page that was not its answer.
+    #[test]
+    fn a_reply_still_loading_asks_for_its_own_history() {
+        let (mut on, target) = on_a_reply_not_loaded();
+        on.app
+            .conversations
+            .get_mut(&on.chat)
+            .unwrap()
+            .loading_older = true;
+        press_key(&mut on.app, &on.ctx, egui::Key::G, egui::Modifiers::NONE);
+        let asked = |on: &OnAttachment| {
+            on.app.backend.take_demo_commands().iter().any(|command| {
+                matches!(
+                    command,
+                    crate::backend::Command::LoadUntil { id, .. } if id == "not-loaded"
+                )
+            })
+        };
+        assert!(!asked(&on), "a page is already on its way");
+        on.app.announcer = Default::default();
+        let other = message(
+            &on.chat,
+            "older-page",
+            false,
+            target.timestamp + 1,
+            Content::text("Older"),
+        );
+        deliver(&mut on, vec![other]);
+        assert!(asked(&on), "its own request once that page is in");
+        assert!(
+            !on.app
+                .announcer
+                .spoken()
+                .iter()
+                .any(|spoken| spoken.contains("not found")),
+            "{:?}",
+            on.app.announcer.spoken()
+        );
+        deliver(&mut on, vec![target]);
+        assert_eq!(current_message(&on), "not-loaded");
+    }
+
+    /// When the archive says the replied message is not stored, that error
+    /// is the one thing said.
+    /// The same for an archive that cannot be read: the worker answers with
+    /// the error, the error alone is said, in the frame that drains it and
+    /// in every frame after it, and the wait is over, so a later page does
+    /// not move the list.
+    #[test]
+    fn the_archives_error_replaces_replied_message_not_found() {
+        for error in [
+            "This message is not stored on this computer",
+            "Could not read the chat: fixture",
+        ] {
+            let (mut on, target) = on_a_reply_not_loaded();
+            press_key(&mut on.app, &on.ctx, egui::Key::G, egui::Modifiers::NONE);
+            on.app.announcer = Default::default();
+            on.events
+                .send(crate::backend::Event::HistoryUnavailable {
+                    chat: on.chat.clone(),
+                    error: error.into(),
+                })
+                .unwrap();
+            // Frame by frame: "not found" would come in a frame after the
+            // error's, from a wait the error did not end.
+            let mut spoken = String::new();
+            for _ in 0..3 {
+                render(&mut on.app, &on.ctx);
+                spoken.push_str(&on.app.announcer.spoken().concat());
+            }
+            assert!(spoken.contains(error), "{spoken}");
+            assert!(!spoken.contains("Replied message not found"), "{spoken}");
+            assert_eq!(current_message(&on), "key-fixture");
+            deliver(&mut on, vec![target]);
+            assert_eq!(
+                current_message(&on),
+                "key-fixture",
+                "{error}: the wait ended"
+            );
+        }
+    }
+
+    /// An error that is not the answer to G's own request, such as a failed
+    /// send, leaves the wait alone: the page that brings the replied message
+    /// still moves the list there.
+    #[test]
+    fn an_unrelated_error_leaves_the_replied_message_wait() {
+        let (mut on, target) = on_a_reply_not_loaded();
+        press_key(&mut on.app, &on.ctx, egui::Key::G, egui::Modifiers::NONE);
+        on.events
+            .send(crate::backend::Event::Error("Not connected".into()))
+            .unwrap();
+        render(&mut on.app, &on.ctx);
+        assert_eq!(current_message(&on), "key-fixture", "still waiting");
+        deliver(&mut on, vec![target]);
+        assert_eq!(current_message(&on), "not-loaded");
+    }
+
+    /// The quote's own click is as it was: the list's cursor goes to the
+    /// replied message at once, loaded or not.
+    #[test]
+    fn the_quote_click_still_jumps_at_once() {
+        let (mut on, _) = on_a_reply_not_loaded();
+        on.click(Part::Named("quote"));
+        assert_eq!(
+            on.app.message_cursor.get(&on.chat).map(String::as_str),
+            Some("not-loaded")
+        );
+    }
+
+    /// Another chat starts every message's items over.
+    #[test]
+    fn the_item_cursor_starts_over_in_another_chat() {
+        let mut on = app_on_attachment(Content::text(
+            "see https://a.org, b.org/path and https://c.org",
+        ));
+        press_key(
+            &mut on.app,
+            &on.ctx,
+            egui::Key::ArrowRight,
+            egui::Modifiers::NONE,
+        );
+        assert!(on.app.message_item.is_some());
+        let other = on
+            .app
+            .visible_chats()
+            .into_iter()
+            .map(|chat| chat.id.clone())
+            .find(|chat| *chat != on.chat)
+            .unwrap();
+        on.app.actions.push(crate::model::Action::OpenChat(other));
+        render(&mut on.app, &on.ctx);
+        assert!(on.app.message_item.is_none());
+    }
+
+    /// The label of the message list's current message, as a screen reader
+    /// reads it, if the list has focus.
+    fn current_message_label(on: &mut OnAttachment) -> Option<String> {
+        let tree = tree_after(&mut on.app, &on.ctx, None);
+        let list = crate::ui::conversation::messages_list_id(&on.chat).accesskit_id();
+        if tree.focus != list {
+            return None;
+        }
+        let active = node(&tree, list)?.active_descendant()?;
+        node(&tree, active).and_then(|node| node.label().map(str::to_owned))
+    }
+
+    /// G goes where clicking the quote goes: the list moves to the replied
+    /// message, keeps focus, and reads that message.
+    #[test]
+    fn g_goes_to_the_replied_message_as_its_quote_click_does() {
+        let (mut on, target) = on_a_reply();
+        press_key(&mut on.app, &on.ctx, egui::Key::G, egui::Modifiers::NONE);
+        assert_eq!(on.app.message_cursor.get(&on.chat), Some(&target));
+        let label = current_message_label(&mut on).expect("the list keeps focus");
+        let body = on.app.conversations[&on.chat].messages[0].summary();
+        assert!(label.contains(body.trim()), "{label} / {body}");
+        // The click on the quote lands on the same message.
+        let (mut clicked, target) = on_a_reply();
+        clicked.click(Part::Named("quote"));
+        assert_eq!(clicked.app.message_cursor.get(&clicked.chat), Some(&target));
+    }
+
+    /// A failure is never spoken over the lock screen.
+    #[test]
+    fn no_failure_is_spoken_once_the_app_locks() {
+        let mut on = app_on_attachment(failed_document());
+        on.space();
+        on.app.settings.app_lock_hash = Some(crate::app_lock::verifier("fixture password"));
+        on.app.lock_app();
+        on.app.announcer = Default::default();
+        on.downloaded(Err("Connection reset".into()));
+        assert!(
+            !on.app
+                .announcer
+                .spoken()
+                .iter()
+                .any(|spoken| spoken.contains("Connection reset")),
+            "{:?}",
+            on.app.announcer.spoken()
+        );
+    }
+
+    /// A download that Space asked for is spoken when it fails later; one
+    /// that started otherwise fails in its bubble only.
+    #[test]
+    fn a_failed_download_is_spoken_only_when_space_asked_for_it() {
+        let mut document = attachments(&MediaState::Idle).remove(3).1;
+        if let Some(media) = document.media_at_mut(None) {
+            media.state = MediaState::Failed("Download failed".into());
+        }
+        let mut on = app_on_attachment(document);
+        on.space();
+        assert_eq!(
+            fixture_media_state(&on.app, &on.chat),
+            MediaState::Downloading
+        );
+        on.app.announcer = Default::default();
+        on.downloaded(Err("Connection reset".into()));
+        assert!(
+            said_as_error(&on.app, "Connection reset"),
+            "{:?}",
+            on.app.announcer.spoken()
+        );
+        // The same failure of a download Space did not ask for is silent.
+        on.app.announcer = Default::default();
+        on.downloaded(Err("Connection lost".into()));
+        assert_eq!(
+            fixture_media_state(&on.app, &on.chat),
+            MediaState::Failed("Connection lost".into())
+        );
+        assert!(
+            !on.app
+                .announcer
+                .spoken()
+                .iter()
+                .any(|spoken| spoken.contains("Connection lost")),
+            "{:?}",
+            on.app.announcer.spoken()
+        );
     }
 
     /// Shift, Ctrl and Alt with a message key are left alone.
@@ -7431,6 +8902,32 @@ mod tests {
             Some(popup),
             "a menu item has focus"
         );
+    }
+
+    /// The menu Shift+F10 opens on an album item the arrows moved to is that
+    /// item's, with focus inside: its Reply replies to that item.
+    #[test]
+    fn the_menu_of_an_album_item_takes_focus_and_acts_on_it() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        let ids = album_fixture(&mut app, 3);
+        let chat = app.open_chat.clone().unwrap();
+        render(&mut app, &ctx);
+        focus_messages(&mut app, &ctx);
+        app.message_cursor.insert(chat.clone(), ids[0].clone());
+        for _ in 0..2 {
+            press_key(&mut app, &ctx, egui::Key::ArrowRight, egui::Modifiers::NONE);
+        }
+        press_key(&mut app, &ctx, egui::Key::F10, egui::Modifiers::SHIFT);
+        let popup = crate::ui::conversation::bubble_id(&chat, &ids[0]).with("popup");
+        assert_eq!(
+            focused_layer(&ctx).map(|layer| layer.id),
+            Some(popup),
+            "a menu item has focus"
+        );
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(app.reply_to.as_deref(), Some(ids[2].as_str()));
     }
 
     /// A call in the chat is a record, with no replies, reactions or

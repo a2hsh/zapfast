@@ -178,6 +178,12 @@ pub struct Player {
     bars: HashMap<String, Vec<u8>>,
     /// Message whose clip just played to its end, waiting to be taken.
     finished: Option<String>,
+    /// Whether clips reach the sound device. Tests play them silently,
+    /// without opening a device a test machine may lack.
+    audible: bool,
+    /// Opens the sound device when a clip starts to play, reporting its
+    /// stream's errors to the given health.
+    open_device: fn(Health) -> Result<Output, String>,
 }
 
 struct Loaded {
@@ -229,7 +235,34 @@ impl Player {
             stretching: None,
             bars: HashMap::new(),
             finished: None,
+            audible: true,
+            open_device: |health| {
+                open_output(health).map_err(|error| format!("No sound output: {error}"))
+            },
         }
+    }
+
+    /// Plays clips without opening the sound device: their position and
+    /// state move as they would, and nothing is heard.
+    #[cfg(test)]
+    pub(crate) fn silence(&mut self) {
+        self.stop();
+        self.audible = false;
+    }
+
+    /// Plays clips as on a machine with no sound device: opening one fails,
+    /// and none is ever opened.
+    #[cfg(test)]
+    pub(crate) fn without_device(&mut self) {
+        self.output = None;
+        self.audible = true;
+        self.open_device = |_| Err("No sound output: none in this test".to_owned());
+    }
+
+    /// Whether the sound device is open.
+    #[cfg(test)]
+    pub(crate) fn uses_device(&self) -> bool {
+        self.output.is_some()
     }
 
     /// Current playback speed multiplier.
@@ -283,7 +316,12 @@ impl Player {
             return;
         };
         let (wanted, _) = Self::buffer_for(loaded, &self.stretches, self.speed);
-        if self.output.is_none() || Arc::ptr_eq(&wanted, &loaded.buffer) {
+        // A paused clip takes the new buffer even without the device, which
+        // opens when it plays; one that ended keeps what it had.
+        if loaded.done
+            || (self.output.is_none() && !loaded.paused)
+            || Arc::ptr_eq(&wanted, &loaded.buffer)
+        {
             return;
         }
         let total = clip_length(loaded.samples.len());
@@ -293,15 +331,9 @@ impl Player {
             0.0
         }
         .clamp(0.0, 1.0);
-        let paused = loaded.paused;
-        if self.restart(fraction).is_ok() && paused {
-            if let Some((_, sink)) = &self.output {
-                sink.pause();
-            }
-            if let Some(loaded) = self.loaded.as_mut() {
-                loaded.paused = true;
-            }
-        }
+        let playing = !loaded.paused;
+        // A clip that cannot restart stays as it was.
+        let _ = self.restart(fraction, playing);
     }
 
     /// Builds the compression for the current speed in the background, if it
@@ -354,13 +386,20 @@ impl Player {
     pub fn toggle(&mut self, message: &str, path: &Path) -> Result<(), String> {
         match self.loaded.as_mut() {
             Some(loaded) if loaded.message == message => {
-                if loaded.done {
-                    return self.restart(0.0);
+                // A clip moved to its very end while paused has nothing left
+                // to play: like one that ended, it starts again, rather than
+                // ending at once and handing over to the next voice message.
+                let at_end = loaded.paused && loaded.base >= clip_length(loaded.samples.len());
+                if loaded.done || at_end {
+                    return self.restart(0.0, true);
                 }
-                if self.output.is_none() {
-                    // Paused when its output failed: open the device again.
+                // A clip moved while paused without the device, as after it
+                // ended, or paused when its output failed, opens the device
+                // now, from where it waits. A silent player has no device to
+                // open, and only pauses a clip that plays.
+                if self.output.is_none() && (loaded.paused || self.audible) {
                     let fraction = fraction_of(loaded.base, loaded.samples.len());
-                    return self.restart(fraction);
+                    return self.restart(fraction, true);
                 }
                 if let Some((_, sink)) = &self.output {
                     if loaded.paused {
@@ -368,6 +407,8 @@ impl Player {
                     } else {
                         sink.pause();
                     }
+                    loaded.paused = !loaded.paused;
+                } else if !self.audible {
                     loaded.paused = !loaded.paused;
                 }
                 Ok(())
@@ -379,9 +420,41 @@ impl Player {
     /// Seeks to a fraction from 0 to 1 and starts playback.
     pub fn seek(&mut self, message: &str, path: &Path, fraction: f32) -> Result<(), String> {
         match &self.loaded {
-            Some(loaded) if loaded.message == message => self.restart(fraction),
+            Some(loaded) if loaded.message == message => self.restart(fraction, true),
             _ => self.load(message, path, fraction),
         }
+    }
+
+    /// Moves the loaded clip of `message` to a fraction from 0 to 1 and
+    /// leaves it playing or paused, unlike [`Self::seek`]. A clip that played
+    /// to its end is stopped, and waits paused at its new position. Nothing
+    /// happens for a clip that is not loaded.
+    pub fn jump(&mut self, message: &str, fraction: f32) -> Result<(), String> {
+        match &self.loaded {
+            Some(loaded) if loaded.message == message => {
+                let playing = !loaded.paused && !loaded.done;
+                self.restart(fraction, playing)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Loads a silent clip of `seconds` for `message` with no decoding and
+    /// no sound device, now or later: playing, paused, or `State::Idle` for
+    /// one that has played to its end.
+    #[cfg(test)]
+    pub(crate) fn pretend_loaded(&mut self, message: &str, seconds: u32, state: State) {
+        self.silence();
+        let samples = Arc::new(vec![0.0; voice::RATE as usize * seconds as usize]);
+        self.loaded = Some(Loaded {
+            message: message.to_owned(),
+            samples: Arc::clone(&samples),
+            buffer: samples,
+            factor: 1.0,
+            base: Duration::ZERO,
+            paused: state == State::Paused,
+            done: state == State::Idle,
+        });
     }
 
     /// Clears the loaded clip and releases the output device.
@@ -482,7 +555,7 @@ impl Player {
                 paused: false,
                 done: false,
             });
-            self.restart(start)?;
+            self.restart(start, true)?;
             self.ensure_stretch();
         }
         let compressed = self
@@ -546,7 +619,7 @@ impl Player {
             loaded.paused = true;
             return Err("The sound output stopped working. Press play to try again".to_owned());
         }
-        self.restart(fraction)
+        self.restart(fraction, true)
     }
 
     fn load(&mut self, message: &str, path: &Path, start: f32) -> Result<(), String> {
@@ -573,8 +646,8 @@ impl Player {
         Ok(())
     }
 
-    /// Plays the loaded clip from a fraction from 0 to 1.
-    fn restart(&mut self, fraction: f32) -> Result<(), String> {
+    /// Queues the loaded clip from a fraction from 0 to 1, playing or paused.
+    fn restart(&mut self, fraction: f32, play: bool) -> Result<(), String> {
         let Some(loaded) = self.loaded.as_mut() else {
             return Ok(());
         };
@@ -583,30 +656,48 @@ impl Player {
         let (buffer, factor) = Self::buffer_for(loaded, &self.stretches, self.speed);
         let total = clip_length(loaded.samples.len());
         let offset = ((fraction.clamp(0.0, 1.0) * buffer.len() as f32) as usize).min(buffer.len());
-        if self.output.is_none() {
-            let waker = self.waker.clone();
-            let health = Health::waking("voice playback", move || waker.wake());
-            let device =
-                open_output(health).map_err(|error| format!("No sound output: {error}"))?;
-            let sink = rodio::Player::connect_new(device.mixer());
-            self.output = Some((device, sink));
+        // A paused clip needs no device: it waits at its new position and
+        // opens one when it plays, so moving a clip works on a machine
+        // without one, and a clip that cannot open one stays as it was.
+        if self.audible && (play || self.output.is_some()) {
+            if self.output.is_none() {
+                let waker = self.waker.clone();
+                let health = Health::waking("voice playback", move || waker.wake());
+                let device = (self.open_device)(health)?;
+                let sink = rodio::Player::connect_new(device.mixer());
+                self.output = Some((device, sink));
+            }
+            let (device, sink) = self.output.as_mut().expect("just opened");
+            requeue(sink, device.mixer(), buffer[offset..].to_vec(), play);
         }
-        let (_, sink) = self.output.as_ref().expect("just opened");
-        sink.clear();
-        sink.append(SamplesBuffer::new(
-            mono(),
-            rate(),
-            buffer[offset..].to_vec(),
-        ));
-        sink.play();
         loaded.buffer = buffer;
         loaded.factor = factor;
         loaded.base =
             Duration::from_secs_f64(fraction.clamp(0.0, 1.0) as f64 * total.as_secs_f64());
-        loaded.paused = false;
+        loaded.paused = !play;
         loaded.done = false;
         Ok(())
     }
+}
+
+/// Queues `samples` on `mixer` in place of what `sink` played, playing or
+/// paused.
+///
+/// This takes a new player rather than `clear` and `append` on the old one:
+/// rodio zeroes a cleared player's position only when its audio thread next
+/// reaches it, so until then `get_pos` still counts the old clip's place, and
+/// [`Player::status`] would add it to the new starting point. The old player,
+/// dropped, stops what it played at its next control check, within 5 ms. The
+/// video's sound restarts the same way.
+fn requeue(sink: &mut rodio::Player, mixer: &rodio::mixer::Mixer, samples: Vec<f32>, play: bool) {
+    let fresh = rodio::Player::connect_new(mixer);
+    // Paused before anything is queued, a clip that waits at its new
+    // position never plays for a moment first.
+    if !play {
+        fresh.pause();
+    }
+    fresh.append(SamplesBuffer::new(mono(), rate(), samples));
+    *sink = fresh;
 }
 
 /// How soon after a failed output another failure pauses playback rather
@@ -1303,6 +1394,94 @@ mod tests {
         );
     }
 
+    /// A jump never plays: a clip that played to its end waits paused at its
+    /// new position, and a jump for a clip that is not loaded does nothing.
+    /// Never through the sound device: a test machine may have none, and
+    /// opening one from parallel tests can bring the test process down.
+    #[test]
+    fn a_jump_leaves_a_clip_that_ended_paused() {
+        let mut player = Player::new(crate::backend::Waker::default());
+        assert!(player.jump("clip", 0.5).is_ok());
+        assert_eq!(player.status("clip").state, State::Idle);
+        player.pretend_loaded("clip", 6, State::Idle);
+        assert!(player.jump("other", 0.5).is_ok());
+        assert_eq!(player.status("clip").state, State::Idle);
+        assert!(player.jump("clip", 0.5).is_ok());
+        let status = player.status("clip");
+        assert_eq!(status.state, State::Paused, "the jump started playback");
+        assert_eq!(status.position, Duration::from_secs(3));
+        assert!(!player.uses_device(), "the device was opened");
+    }
+
+    /// Play on a clip paused at its very end starts it again from the start,
+    /// rather than ending it at once, without the sound device.
+    #[test]
+    fn play_on_a_clip_paused_at_its_end_starts_it_again() {
+        let mut player = Player::new(crate::backend::Waker::default());
+        player.pretend_loaded("clip", 6, State::Paused);
+        if let Some(loaded) = player.loaded.as_mut() {
+            loaded.base = clip_length(loaded.samples.len());
+        }
+        assert!(player.toggle("clip", Path::new("clip.ogg")).is_ok());
+        let status = player.status("clip");
+        assert_eq!(status.state, State::Playing);
+        assert_eq!(status.position, Duration::ZERO);
+        assert!(!player.uses_device(), "the device was opened");
+        // Play and pause move the state alone.
+        assert!(player.toggle("clip", Path::new("clip.ogg")).is_ok());
+        assert_eq!(player.status("clip").state, State::Paused);
+    }
+
+    /// A clip waiting paused without the device takes a speed whose
+    /// compression is built, rather than preparing it until it plays.
+    #[test]
+    fn a_clip_waiting_without_the_device_takes_a_new_speed() {
+        let mut player = Player::new(crate::backend::Waker::default());
+        player.pretend_loaded("clip", 6, State::Idle);
+        player.without_device();
+        assert_eq!(player.jump("clip", 0.5), Ok(()));
+        player
+            .stretches
+            .push((2.0, Arc::new(vec![0.0; voice::RATE as usize * 3])));
+        assert_eq!(player.set_speed(2.0), 2.0);
+        assert!(!player.preparing_speed("clip"));
+        let status = player.status("clip");
+        assert_eq!(status.state, State::Paused);
+        assert_eq!(status.position, Duration::from_secs(3));
+        assert!(!player.uses_device());
+    }
+
+    /// On a machine with no sound device, a clip that ended still moves: it
+    /// waits paused at its new position, and only playing it asks for the
+    /// device; failing that, it stays where it waits. Played silently, it
+    /// starts from there. No real device is opened.
+    #[test]
+    fn a_clip_that_ended_moves_without_a_sound_device() {
+        let mut player = Player::new(crate::backend::Waker::default());
+        player.pretend_loaded("clip", 6, State::Idle);
+        player.without_device();
+        assert_eq!(player.jump("clip", 0.5), Ok(()));
+        let status = player.status("clip");
+        assert_eq!(status.state, State::Paused);
+        assert_eq!(status.position, Duration::from_secs(3));
+        let error = player
+            .toggle("clip", Path::new("clip.ogg"))
+            .expect_err("playing asks for the device");
+        assert!(error.starts_with("No sound output"), "{error}");
+        let status = player.status("clip");
+        assert_eq!(status.state, State::Paused);
+        assert_eq!(status.position, Duration::from_secs(3));
+        assert!(!player.uses_device());
+
+        player.pretend_loaded("clip", 6, State::Idle);
+        assert_eq!(player.jump("clip", 0.5), Ok(()));
+        assert_eq!(player.toggle("clip", Path::new("clip.ogg")), Ok(()));
+        let status = player.status("clip");
+        assert_eq!(status.state, State::Playing);
+        assert_eq!(status.position, Duration::from_secs(3));
+        assert!(!player.uses_device());
+    }
+
     #[test]
     fn speed_labels_match_the_button() {
         assert_eq!(speed_label(SPEEDS[0]), "1x");
@@ -1509,6 +1688,62 @@ mod tests {
             "position advanced {advanced:?} over {wall:?} of wall time"
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    /// A clip queued again counts from its new start at once, before the
+    /// audio thread runs, and only the new clip is heard after it; one queued
+    /// paused stays silent where it was put. The mixer is pulled here as a
+    /// sound device would pull it, so no device is opened.
+    #[test]
+    fn a_requeued_clip_counts_from_its_new_start_at_once() {
+        let second = voice::RATE as usize;
+        let (mixer, mut device) = rodio::mixer::mixer(mono(), rate());
+        let near = |heard: f32, want: f32| (heard - want).abs() < 1e-6;
+        let mut sink = rodio::Player::connect_new(&mixer);
+        sink.append(SamplesBuffer::new(mono(), rate(), vec![0.25; second * 10]));
+        device.by_ref().take(second * 2).for_each(drop);
+        assert!(
+            sink.get_pos() >= Duration::from_millis(1_990),
+            "the first clip played: {:?}",
+            sink.get_pos()
+        );
+
+        requeue(&mut sink, &mixer, vec![0.5; second * 5], true);
+        assert_eq!(
+            sink.get_pos(),
+            Duration::ZERO,
+            "nothing of the new clip yet"
+        );
+        let heard: Vec<f32> = device.by_ref().take(second).collect();
+        // The old clip stops at its next control check, every 5 ms.
+        assert!(
+            heard[second / 100..]
+                .iter()
+                .all(|&sample| near(sample, 0.5)),
+            "only the new clip is heard"
+        );
+        let position = sink.get_pos();
+        assert!(
+            position >= Duration::from_millis(990) && position <= Duration::from_secs(1),
+            "the new clip counts from its start: {position:?}"
+        );
+
+        requeue(&mut sink, &mixer, vec![0.125; second * 5], false);
+        assert_eq!(sink.get_pos(), Duration::ZERO, "paused at its new start");
+        let heard: Vec<f32> = device.by_ref().take(second / 10).collect();
+        // Until the clip it replaced stops, that clip alone is heard.
+        assert!(
+            heard
+                .iter()
+                .all(|&sample| near(sample, 0.0) || near(sample, 0.5)),
+            "the paused clip never plays"
+        );
+        assert!(
+            heard[second / 100..]
+                .iter()
+                .all(|&sample| near(sample, 0.0))
+        );
+        assert_eq!(sink.get_pos(), Duration::ZERO, "still at its new start");
     }
 
     /// Records one second from the default microphone:
