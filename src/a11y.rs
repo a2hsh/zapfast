@@ -458,6 +458,121 @@ fn spoken_list(locale: Locale, parts: &[String]) -> Option<String> {
     })
 }
 
+/// Everything read for one chat row, in reading order.
+pub struct ChatLabel<'a> {
+    pub title: &'a str,
+    /// Counted unread messages.
+    pub unread: u32,
+    /// Marked unread by hand; read only when there is no count.
+    pub marked_unread: bool,
+    /// An unread message mentions us: the row's "@" mark.
+    pub mentioned: bool,
+    pub last: Option<ChatLast<'a>>,
+    /// `crate::util::chat_stamp(..)`, empty when the chat has no activity.
+    pub time: &'a str,
+    pub pinned: bool,
+    pub muted: bool,
+    pub favorite: bool,
+    pub disappearing: bool,
+    /// The chat open in the conversation pane. Said last, so the one open
+    /// row can be told apart while every other row says no state at all.
+    pub open: bool,
+}
+
+/// What the row shows as the chat's last line.
+pub enum ChatLast<'a> {
+    /// The latest message. `group_sender` is the sender's full display name,
+    /// though the row paints only its first word; a one-to-one chat has none,
+    /// because the title already says who it is.
+    Message {
+        from_me: bool,
+        group_sender: Option<&'a str>,
+        text: &'a str,
+        /// `status_word(..)` for the ticks the row draws beside our own
+        /// message, said after the time; someone else's message has none.
+        status: Option<&'a str>,
+    },
+    /// Unsent text waiting in the message field.
+    Draft(&'a str),
+    /// Someone is typing; the name only in groups.
+    Typing(Option<&'a str>),
+}
+
+/// Joins the parts a screen reader announces for a chat row with ", ".
+pub fn chat_label(locale: Locale, label: &ChatLabel<'_>) -> String {
+    let mut parts: Vec<String> = vec![spoken(without_push_marker(label.title))];
+    if label.unread > 0 {
+        parts.push(fill(
+            &ngettext(locale, "{count} unread", "{count} unread", label.unread),
+            &[("count", &label.unread.to_string())],
+        ));
+    } else if label.marked_unread {
+        parts.push(gettext(locale, "marked unread").into_owned());
+    }
+    if label.mentioned {
+        parts.push(gettext(locale, "mentioned you").into_owned());
+    }
+    let mut status = None;
+    match &label.last {
+        Some(ChatLast::Message {
+            from_me,
+            group_sender,
+            text,
+            status: ticks,
+        }) => {
+            status = ticks.filter(|_| *from_me);
+            let text = spoken(text);
+            parts.push(if *from_me {
+                fill(&gettext(locale, "You: {text}"), &[("text", &text)])
+            } else if let Some(sender) = group_sender {
+                fill(
+                    &gettext(locale, "{sender}: {text}"),
+                    &[("sender", &spoken(sender)), ("text", &text)],
+                )
+            } else {
+                text
+            });
+        }
+        Some(ChatLast::Draft(text)) => {
+            parts.push(format!("{} {}", gettext(locale, "Draft:"), spoken(text)));
+        }
+        Some(ChatLast::Typing(Some(name))) => parts.push(fill(
+            &gettext(locale, "{name} is typing…"),
+            &[("name", &spoken(name))],
+        )),
+        Some(ChatLast::Typing(None)) => parts.push(gettext(locale, "typing…").into_owned()),
+        None => {}
+    }
+    parts.push(label.time.to_owned());
+    if let Some(status) = status {
+        parts.push(status.to_owned());
+    }
+    if label.pinned {
+        parts.push(gettext(locale, "pinned").into_owned());
+    }
+    if label.muted {
+        parts.push(gettext(locale, "muted").into_owned());
+    }
+    if label.favorite {
+        parts.push(gettext(locale, "favorite").into_owned());
+    }
+    if label.disappearing {
+        parts.push(gettext(locale, "disappearing messages on").into_owned());
+    }
+    if label.open {
+        parts.push(gettext(locale, "open").into_owned());
+    }
+    parts.retain(|part| !part.is_empty());
+    parts.join(", ")
+}
+
+/// Whether a screen reader is attached. egui has no public flag, but the
+/// node builder exists only while AccessKit is on, so probing one widget
+/// tells idle frames to skip building labels nobody reads.
+pub fn screen_reader_active(ctx: &egui::Context, id: egui::Id) -> bool {
+    ctx.accesskit_node_builder(id, |_| ()).is_some()
+}
+
 /// What a message's content is, in words. `text` is the plain message text or
 /// caption, with mentions and markup already resolved by the caller.
 pub fn content_description(locale: Locale, content: &Content, text: &str) -> String {
@@ -1311,6 +1426,263 @@ mod tests {
         );
         assert_eq!(fill("", &values), "");
         assert_eq!(fill("no placeholders", &[]), "no placeholders");
+    }
+
+    fn chat<'a>() -> ChatLabel<'a> {
+        ChatLabel {
+            title: "Ahmed",
+            unread: 2,
+            marked_unread: false,
+            mentioned: false,
+            last: Some(ChatLast::Message {
+                from_me: false,
+                group_sender: None,
+                text: "see you at 5",
+                status: None,
+            }),
+            time: "10:32 PM",
+            pinned: true,
+            muted: true,
+            favorite: false,
+            disappearing: false,
+            open: false,
+        }
+    }
+
+    #[test]
+    fn chat_rows_follow_the_spec_examples() {
+        let en = Locale::default();
+        assert_eq!(
+            chat_label(en, &chat()),
+            "Ahmed, 2 unread, see you at 5, 10:32 PM, pinned, muted"
+        );
+        let own = ChatLabel {
+            last: Some(ChatLast::Message {
+                from_me: true,
+                group_sender: None,
+                text: "see you at 5",
+                status: None,
+            }),
+            ..chat()
+        };
+        assert_eq!(
+            chat_label(en, &own),
+            "Ahmed, 2 unread, You: see you at 5, 10:32 PM, pinned, muted"
+        );
+        let group = ChatLabel {
+            title: "Family",
+            unread: 5,
+            last: Some(ChatLast::Message {
+                from_me: false,
+                group_sender: Some("Sara"),
+                text: "dinner at 8",
+                status: None,
+            }),
+            time: "9:15 PM",
+            pinned: false,
+            ..chat()
+        };
+        assert_eq!(
+            chat_label(en, &group),
+            "Family, 5 unread, Sara: dinner at 8, 9:15 PM, muted"
+        );
+        let group_own = ChatLabel {
+            title: "Family",
+            unread: 0,
+            last: Some(ChatLast::Message {
+                from_me: true,
+                group_sender: None,
+                text: "on my way",
+                status: None,
+            }),
+            time: "9:20 PM",
+            pinned: false,
+            muted: false,
+            ..chat()
+        };
+        assert_eq!(
+            chat_label(en, &group_own),
+            "Family, You: on my way, 9:20 PM"
+        );
+        // A name known only from the person's profile is drawn "~Ana"; the
+        // row reads it as the name, as the message list's name does.
+        let profile_name = ChatLabel {
+            title: "~Ana",
+            ..chat()
+        };
+        assert_eq!(
+            chat_label(en, &profile_name),
+            "Ana, 2 unread, see you at 5, 10:32 PM, pinned, muted"
+        );
+    }
+
+    #[test]
+    fn a_chat_row_says_our_last_messages_ticks_after_the_time() {
+        let en = Locale::default();
+        let own = |group_sender, status| ChatLabel {
+            last: Some(ChatLast::Message {
+                from_me: true,
+                group_sender,
+                text: "see you at 5",
+                status,
+            }),
+            ..chat()
+        };
+        assert_eq!(
+            chat_label(en, &own(None, Some("read"))),
+            "Ahmed, 2 unread, You: see you at 5, 10:32 PM, read, pinned, muted"
+        );
+        assert_eq!(
+            chat_label(
+                en,
+                &ChatLabel {
+                    title: "Family",
+                    ..own(None, Some("delivered"))
+                }
+            ),
+            "Family, 2 unread, You: see you at 5, 10:32 PM, delivered, pinned, muted"
+        );
+        assert_eq!(
+            chat_label(en, &own(None, None)),
+            "Ahmed, 2 unread, You: see you at 5, 10:32 PM, pinned, muted"
+        );
+        // Someone else's message has no ticks to read.
+        let theirs = ChatLabel {
+            last: Some(ChatLast::Message {
+                from_me: false,
+                group_sender: Some("Sara"),
+                text: "hi",
+                status: Some("read"),
+            }),
+            ..chat()
+        };
+        assert_eq!(
+            chat_label(en, &theirs),
+            "Ahmed, 2 unread, Sara: hi, 10:32 PM, pinned, muted"
+        );
+    }
+
+    #[test]
+    fn chat_rows_read_drafts_typing_and_every_state() {
+        let en = Locale::default();
+        let quiet = ChatLabel {
+            unread: 0,
+            pinned: false,
+            muted: false,
+            ..chat()
+        };
+        let draft = ChatLabel {
+            last: Some(ChatLast::Draft("on  my\nway")),
+            ..quiet
+        };
+        assert_eq!(chat_label(en, &draft), "Ahmed, Draft: on my way, 10:32 PM");
+        let typing = ChatLabel {
+            last: Some(ChatLast::Typing(None)),
+            ..chat()
+        };
+        assert_eq!(
+            chat_label(en, &typing),
+            "Ahmed, 2 unread, typing…, 10:32 PM, pinned, muted"
+        );
+        let group_typing = ChatLabel {
+            last: Some(ChatLast::Typing(Some("Sara"))),
+            unread: 1,
+            pinned: false,
+            muted: false,
+            ..chat()
+        };
+        assert_eq!(
+            chat_label(en, &group_typing),
+            "Ahmed, 1 unread, Sara is typing…, 10:32 PM"
+        );
+        let marked = ChatLabel {
+            unread: 0,
+            marked_unread: true,
+            last: None,
+            time: "",
+            pinned: true,
+            muted: true,
+            favorite: true,
+            disappearing: true,
+            ..chat()
+        };
+        assert_eq!(
+            chat_label(en, &marked),
+            "Ahmed, marked unread, pinned, muted, favorite, disappearing messages on"
+        );
+        // A count wins over the manual mark, which would only repeat it.
+        let both = ChatLabel {
+            marked_unread: true,
+            ..chat()
+        };
+        assert!(!chat_label(en, &both).contains("marked"));
+    }
+
+    #[test]
+    fn only_the_open_chat_row_says_open_and_says_it_last() {
+        let en = Locale::default();
+        let open = ChatLabel {
+            unread: 2,
+            open: true,
+            ..chat()
+        };
+        assert_eq!(
+            chat_label(
+                en,
+                &ChatLabel {
+                    pinned: false,
+                    muted: false,
+                    ..open
+                }
+            ),
+            "Ahmed, 2 unread, see you at 5, 10:32 PM, open"
+        );
+        assert_eq!(
+            chat_label(
+                en,
+                &ChatLabel {
+                    open: true,
+                    ..chat()
+                }
+            ),
+            "Ahmed, 2 unread, see you at 5, 10:32 PM, pinned, muted, open"
+        );
+        assert!(!chat_label(en, &chat()).contains("open"));
+    }
+
+    #[test]
+    fn a_group_row_reads_the_full_sender_name() {
+        let en = Locale::default();
+        let group = ChatLabel {
+            title: "Family",
+            last: Some(ChatLast::Message {
+                from_me: false,
+                group_sender: Some("The Annoying Person"),
+                text: "hello",
+                status: None,
+            }),
+            ..chat()
+        };
+        assert!(chat_label(en, &group).contains(", The Annoying Person: hello, "));
+    }
+
+    #[test]
+    fn chat_rows_do_not_refill_braces_in_user_text() {
+        let en = Locale::default();
+        let label = ChatLabel {
+            title: "A{text}B",
+            last: Some(ChatLast::Message {
+                from_me: false,
+                group_sender: Some("S{text}"),
+                text: "hi {sender} {}",
+                status: None,
+            }),
+            ..chat()
+        };
+        assert_eq!(
+            chat_label(en, &label),
+            "A{text}B, 2 unread, S{text}: hi {sender} {}, 10:32 PM, pinned, muted"
+        );
     }
 
     #[test]

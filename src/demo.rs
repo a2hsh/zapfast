@@ -15135,6 +15135,264 @@ mod tests {
         assert!(app.toasts.iter().any(|toast| toast.message == "Copied"));
     }
 
+    /// A chat row reads the marks it draws: the "@" of an unread mention as
+    /// "mentioned you", and the disappearing timer only while one is set; a
+    /// timer of 0 is off, and drawn as off (#424).
+    #[test]
+    fn a_chat_row_reads_its_mention_and_its_timer_as_drawn() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = app();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let chat = SAMPLES[1].id.to_owned();
+        let title = app.chat_title(app.chat(&chat).unwrap());
+        let row = |app: &mut App, unread: u32, timer: Option<u32>| {
+            let known = app.chats.iter_mut().find(|known| known.id == chat).unwrap();
+            known.unread = unread;
+            known.unread_mention = Some("mention".into());
+            known.ephemeral_expiration = timer;
+            render(app, &ctx);
+            accessible_nodes(app, &ctx, Vec::new())
+                .into_iter()
+                .map(|(text, _, _)| text)
+                .find(|text| text.starts_with(&title) && text.contains(" unread"))
+                .unwrap_or_default()
+        };
+        let label = row(&mut app, 2, Some(0));
+        assert!(label.contains("2 unread, mentioned you, "), "{label}");
+        assert!(!label.contains("disappearing"), "{label}");
+        let label = row(&mut app, 2, Some(86_400));
+        assert!(label.contains(", disappearing messages on"), "{label}");
+    }
+
+    /// A chat left with only a staged picture reads it as its draft, as its
+    /// row shows it (#340).
+    #[test]
+    fn a_chat_left_with_a_staged_picture_reads_it_as_its_draft() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = app();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let left = app.open_chat.clone().unwrap();
+        app.composer.clear();
+        app.stage(crate::app::Pending::Picture {
+            width: 1,
+            height: 1,
+            rgba: std::sync::Arc::new(vec![0; 4]),
+            texture: None,
+        });
+        app.actions
+            .push(crate::model::Action::OpenChat(SAMPLES[1].id.into()));
+        render(&mut app, &ctx);
+        assert_ne!(app.open_chat.as_deref(), Some(left.as_str()));
+        let title = app.chat_title(app.chat(&left).unwrap());
+        let nodes = accessible_nodes(&mut app, &ctx, Vec::new());
+        assert!(
+            nodes
+                .iter()
+                .any(|(text, _, _)| text.starts_with(&title) && text.contains(", Draft: Image, ")),
+            "the row reads the staged picture as its draft: {:?}",
+            nodes
+                .iter()
+                .filter(|(text, _, _)| text.starts_with(&title))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// A chat row says the delivery status of our own last message after its
+    /// time, as its ticks show it: in a one-to-one chat and in a group, a read
+    /// receipt hidden while ours are off as delivered (#458), and nothing for
+    /// someone else's message, a draft or typing, which draw no ticks.
+    #[test]
+    fn a_chat_row_reads_the_ticks_of_our_last_message_as_drawn() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = app();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        // Sets the chat's last message and returns its row's label, found by
+        // how it starts, and the time the row shows.
+        fn row(
+            app: &mut App,
+            ctx: &egui::Context,
+            chat: &str,
+            from_me: bool,
+            status: Delivery,
+            start: &str,
+        ) -> (String, String) {
+            let locale = app.locale;
+            let known = app.chats.iter_mut().find(|known| known.id == chat).unwrap();
+            let last = known.last.as_mut().unwrap();
+            last.from_me = from_me;
+            last.status = status;
+            let stamp = crate::util::chat_stamp(locale, known.last_activity);
+            let label = accessible_nodes(app, ctx, Vec::new())
+                .into_iter()
+                .map(|(text, _, _)| text)
+                .find(|text| text.starts_with(start) && text.contains(&format!(", {stamp}")))
+                .unwrap_or_else(|| panic!("no row starts with {start:?}"));
+            (label, stamp)
+        }
+        let ada = SAMPLES[0].id;
+        let family = SAMPLES[4].id;
+        for (status, word) in [
+            (Delivery::Read, "read"),
+            (Delivery::Delivered, "delivered"),
+            (Delivery::Sent, "sent"),
+        ] {
+            for (chat, start) in [(ada, "Ada Lovelace, You: "), (family, "Family, You: ")] {
+                let (label, stamp) = row(&mut app, &ctx, chat, true, status, start);
+                assert!(label.contains(&format!(", {stamp}, {word}")), "{label}");
+            }
+        }
+        // Read receipts off: a one-to-one chat draws delivered, a group read.
+        app.account_receipts_off = true;
+        let (label, stamp) = row(
+            &mut app,
+            &ctx,
+            ada,
+            true,
+            Delivery::Read,
+            "Ada Lovelace, You: ",
+        );
+        assert!(label.contains(&format!(", {stamp}, delivered")), "{label}");
+        assert!(!label.contains(", read"), "{label}");
+        let (label, stamp) = row(
+            &mut app,
+            &ctx,
+            family,
+            true,
+            Delivery::Read,
+            "Family, You: ",
+        );
+        assert!(label.contains(&format!(", {stamp}, read")), "{label}");
+        app.account_receipts_off = false;
+        // Someone else's message: no ticks drawn, none read.
+        let grace = SAMPLES[2].id;
+        let (label, stamp) = row(
+            &mut app,
+            &ctx,
+            grace,
+            false,
+            Delivery::Read,
+            "Grace Hopper, ",
+        );
+        assert!(!label.contains(&format!(", {stamp}, read")), "{label}");
+        let known = app
+            .chats
+            .iter_mut()
+            .find(|known| known.id == family)
+            .unwrap();
+        let last = known.last.as_mut().unwrap();
+        last.sender = "999999999999@s.whatsapp.net".to_owned();
+        last.sender_name = Some("Sara Quinn".to_owned());
+        let (label, stamp) = row(
+            &mut app,
+            &ctx,
+            family,
+            false,
+            Delivery::Read,
+            "Family, Sara Quinn: ",
+        );
+        assert!(!label.contains(&format!(", {stamp}, read")), "{label}");
+        // A draft or typing takes the last line's place, and its ticks.
+        let katherine = SAMPLES[3].id;
+        app.drafts
+            .insert(katherine.into(), "Bring the spare HDMI adapter".into());
+        let (label, stamp) = row(
+            &mut app,
+            &ctx,
+            katherine,
+            true,
+            Delivery::Read,
+            "Katherine Johnson, Draft: Bring the spare HDMI adapter",
+        );
+        assert!(!label.contains(&format!(", {stamp}, read")), "{label}");
+        let (label, stamp) = row(
+            &mut app,
+            &ctx,
+            SAMPLES[1].id,
+            true,
+            Delivery::Read,
+            "Rust Berlin, 14 unread, mentioned you, Mira is typing…",
+        );
+        assert!(!label.contains(&format!(", {stamp}, read")), "{label}");
+    }
+
+    /// The chat list reads each row whole: name, unread count, last message,
+    /// time and states, with no sender prefix in one-to-one chats.
+    #[test]
+    fn chat_rows_are_read_whole() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = app();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let nodes = accessible_nodes(&mut app, &ctx, Vec::new());
+        // The time follows the clock and time zone, so labels match around it.
+        let has = |start: &str, end: &str| {
+            nodes
+                .iter()
+                .any(|(text, _, _)| text.starts_with(start) && text.ends_with(end))
+        };
+        assert!(
+            has(
+                "Ada Lovelace, You: btw I made my own Spotify app from scratch! https://spotifast.rocks/, ",
+                ", pinned, favorite, open"
+            ),
+            "your last message in a one-to-one chat starts with You:"
+        );
+        assert!(
+            has(
+                "Rust Berlin, 14 unread, mentioned you, Mira is typing…, ",
+                ", muted"
+            ),
+            "a group row names who is typing, after the mention it draws"
+        );
+        assert!(
+            nodes
+                .iter()
+                .all(|(text, _, _)| !text.contains("unread messages")),
+            "the old count wording is gone"
+        );
+        // The open chat's row; no other chat says open. Beside the list the
+        // rail shows no avatars: they fill it only while the list is hidden.
+        let open: Vec<_> = nodes
+            .iter()
+            .filter(|(text, _, _)| text.ends_with(", open"))
+            .collect();
+        assert_eq!(open.len(), 1, "the open chat's row: {open:?}");
+        assert!(
+            open.iter()
+                .all(|(text, _, _)| text.starts_with("Ada Lovelace, ")),
+            "only the open chat says open: {open:?}"
+        );
+        // A group row reads its sender in full, though the row paints the
+        // first word of the name.
+        let family = SAMPLES[4].id;
+        let last = app
+            .chats
+            .iter_mut()
+            .find(|chat| chat.id == family)
+            .and_then(|chat| chat.last.as_mut())
+            .expect("the Family chat has a last message");
+        last.from_me = false;
+        last.sender = "999999999999@s.whatsapp.net".to_owned();
+        last.sender_name = Some("The Annoying Person".to_owned());
+        let nodes = accessible_nodes(&mut app, &ctx, Vec::new());
+        assert!(
+            nodes.iter().any(|(text, _, _)| text
+                .starts_with("Family, The Annoying Person: Bring the good bread")),
+            "the sender is read in full: {:?}",
+            nodes
+                .iter()
+                .filter(|(text, _, _)| text.starts_with("Family"))
+                .collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn history_fidelity_message_menu_requests_before_the_chosen_message() {
         let ctx = egui::Context::default();

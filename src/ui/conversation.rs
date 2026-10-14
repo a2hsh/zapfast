@@ -3382,7 +3382,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat, under: f32) {
                         // Built only while a screen reader is attached; the
                         // probe returns None when AccessKit is off, so idle
                         // frames pay nothing for the label.
-                        if ui.ctx().accesskit_node_builder(row.inner, |_| ()).is_some() {
+                        if crate::a11y::screen_reader_active(ui.ctx(), row.inner) {
                             let sender = if message.from_me {
                                 crate::i18n::gettext(view.locale, "You").into_owned()
                             } else {

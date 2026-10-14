@@ -1428,12 +1428,13 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
     theme::reveal_focus(&response);
     // The preview area and the whole last message, when the row cuts it short.
     let mut full_preview: Option<(Rect, String, String)> = None;
+    let label = spoken_label(app, ui.ctx(), response.id, chat, &title, now);
     response.widget_info(|| {
         egui::WidgetInfo::selected(
             egui::WidgetType::SelectableLabel,
             ui.is_enabled(),
             selected,
-            unread_announcement(&title, chat),
+            label.clone(),
         )
     });
     if ui.is_rect_visible(rect) {
@@ -1915,12 +1916,13 @@ fn compact_row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response 
         ui.allocate_exact_size(vec2(ui.available_width(), COMPACT_CELL), Sense::click());
     // A short window leaves the rail's avatars little more than one row.
     theme::reveal_focus_in(ui, &response);
+    let label = spoken_label(app, ui.ctx(), response.id, chat, &title, crate::util::now());
     response.widget_info(|| {
         egui::WidgetInfo::selected(
             egui::WidgetType::SelectableLabel,
             ui.is_enabled(),
             selected,
-            unread_announcement(&title, chat),
+            label.clone(),
         )
     });
     if ui.is_rect_visible(rect) {
@@ -2105,16 +2107,96 @@ fn context_menu(app: &mut App, ui: &mut egui::Ui, chat: &Chat, palette: &Palette
     }
 }
 
-/// What a screen reader reads out for a chat's unread state. A chat marked
-/// unread by hand has no count to read, so it must not announce zero.
-fn unread_announcement(title: &str, chat: &Chat) -> String {
-    if chat.marked_unread && chat.unread == 0 {
-        format!("{title}, unread")
-    } else if chat.unread > 0 && chat.unread_mention.is_some() {
-        format!("{title}, {} unread messages, mentioned you", chat.unread)
-    } else {
-        format!("{title}, {} unread messages", chat.unread)
+/// What a screen reader reads for a chat row, built from the same values the
+/// row paints. Empty while no screen reader is attached, so idle frames pay
+/// nothing for it.
+fn spoken_label(
+    app: &App,
+    ctx: &egui::Context,
+    id: egui::Id,
+    chat: &Chat,
+    title: &str,
+    now: i64,
+) -> String {
+    if !crate::a11y::screen_reader_active(ctx, id) {
+        return String::new();
     }
+    let typing = app.typing_in(&chat.id);
+    let draft = app.draft_preview(&chat.id);
+    // The row paints a group sender by first word; the spoken label keeps the
+    // whole name, so "The Annoying Person" is not read as "The".
+    let sender;
+    let summary;
+    let typist;
+    let status;
+    let last = if let Some((_, name)) = typing.first() {
+        typist = name.trim_start_matches('~').to_owned();
+        Some(crate::a11y::ChatLast::Typing(
+            chat.is_group().then_some(typist.as_str()),
+        ))
+    } else if let Some(draft) = &draft {
+        Some(crate::a11y::ChatLast::Draft(draft))
+    } else if let Some(last) = &chat.last {
+        summary = crate::markup::plain(&app.resolve_mention_tokens(&last.summary), &[]);
+        let group_sender = if !last.from_me && chat.is_group() {
+            // A name only known from a push name carries a "~" marker; it is not
+            // part of the name, and the typing branch drops it the same way.
+            sender = app
+                .display_name_or(&last.sender, last.sender_name.as_deref())
+                .trim_start_matches('~')
+                .to_owned();
+            Some(sender.as_str())
+        } else {
+            None
+        };
+        // The ticks the row draws beside our own message, as drawn: a read
+        // receipt hidden while ours are off reads as delivered.
+        status = last
+            .from_me
+            .then(|| {
+                crate::a11y::status_word(
+                    app.locale,
+                    super::conversation::display_delivery(
+                        last.status,
+                        last.from_me,
+                        chat.kind,
+                        app.account_receipts_off,
+                    ),
+                )
+            })
+            .flatten();
+        Some(crate::a11y::ChatLast::Message {
+            from_me: last.from_me,
+            group_sender,
+            text: &summary,
+            status: status.as_deref(),
+        })
+    } else {
+        None
+    };
+    let time = if chat.last_activity > 0 {
+        crate::util::chat_stamp(app.locale, chat.last_activity)
+    } else {
+        String::new()
+    };
+    crate::a11y::chat_label(
+        app.locale,
+        &crate::a11y::ChatLabel {
+            title,
+            unread: chat.unread,
+            marked_unread: chat.marked_unread,
+            last,
+            time: &time,
+            pinned: chat.pinned,
+            muted: chat.muted(now),
+            favorite: chat.favorite,
+            // As the row draws them: the "@" while an unread message
+            // mentions us, and the timer only while one is set.
+            mentioned: chat.unread > 0 && chat.unread_mention.is_some(),
+            disappearing: chat.disappearing_timer().is_some(),
+            open: app.open_chat.as_deref() == Some(chat.id.as_str()),
+        },
+    )
 }
 
 /// A chat's own notification sound, overriding Settings for this chat.
