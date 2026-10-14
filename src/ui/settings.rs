@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 
+use egui::accesskit::Role;
 use egui::{Align, CornerRadius, Frame, Layout, Margin, Rect, Sense, Stroke, Vec2, pos2, vec2};
 
 use crate::app::App;
@@ -58,6 +59,14 @@ struct Row {
     title: Text,
     description: Text,
     keywords: Vec<Text>,
+}
+
+impl Row {
+    /// Whether the row is a setting the search counts, rather than a note
+    /// between settings, which has neither a title nor keywords.
+    fn is_setting(&self) -> bool {
+        !self.title.shown.is_empty() || !self.keywords.is_empty()
+    }
 }
 
 /// The settings search, folded like chat search so case and accents do not
@@ -276,12 +285,21 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         );
                     });
                     ui.add_space(14.0);
-                    search(app, ui);
+                    let down = search(app, ui);
+                    let start = widgets::drawn_count(ui);
                     ui.add_space(6.0);
                     let filter = Filter::new(&app.settings_search);
                     let mut found = false;
                     for section in sections(app) {
                         found |= section.show(ui, app, &filter);
+                    }
+                    // Down from the search goes to the first setting it left,
+                    // drawn in this pass.
+                    if down && let Some(first) = widgets::focusable_since(ui, start).first() {
+                        ui.memory_mut(|memory| memory.request_focus(*first));
+                        ui.ctx().data_mut(|data| {
+                            data.insert_temp(theme::keyboard_focus_id(), true);
+                        });
                     }
                     if !found {
                         ui.add_space(24.0);
@@ -299,6 +317,23 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         });
 }
 
+/// How many settings the current search leaves on the page, as it lists
+/// them; the notes between them do not count.
+pub fn match_count(app: &App) -> usize {
+    let filter = Filter::new(&app.settings_search);
+    sections(app)
+        .into_iter()
+        .map(|section| {
+            section
+                .visible(&filter)
+                .1
+                .iter()
+                .filter(|(row, _)| row.is_setting())
+                .count()
+        })
+        .sum()
+}
+
 /// Widest the settings column grows.
 const COLUMN_WIDTH: f32 = 640.0;
 /// Least space beside the settings column.
@@ -314,19 +349,29 @@ pub fn column_id() -> egui::Id {
     egui::Id::new("settings-column")
 }
 
-/// The search field above the settings. Ctrl+F focuses it.
-fn search(app: &mut App, ui: &mut egui::Ui) {
+/// The search field above the settings. Ctrl+F focuses it. Returns whether
+/// Down was pressed in it, which moves on to the first setting.
+fn search(app: &mut App, ui: &mut egui::Ui) -> bool {
     let palette = app.palette;
+    let id = egui::Id::new(SEARCH_ID);
+    // Taken before the field sees it, and egui's own move cancelled: Down
+    // would otherwise go to whatever lies nearest below on screen.
+    let down = ui.memory(|memory| memory.has_focus(id))
+        && ui.input_mut(|input| super::keys::take_plain(input, egui::Key::ArrowDown));
+    if down {
+        ui.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
+    }
     let mut text = app.settings_search.clone();
     let response = widgets::search_field(
         ui,
         &palette,
-        egui::Id::new(SEARCH_ID),
+        id,
         &mut text,
         &crate::i18n::gettext(app.locale, "Search settings"),
         ui.available_width(),
     );
-    if text != app.settings_search {
+    let typed = text != app.settings_search;
+    if typed {
         app.actions.push(Action::SearchSettings(text));
     }
     if app.focus_settings_search {
@@ -334,6 +379,20 @@ fn search(app: &mut App, ui: &mut egui::Ui) {
         response.request_focus();
         response.scroll_to_me(Some(Align::Min));
     }
+    // Down typed with text in one frame goes to the first setting the new
+    // text leaves: in the next pass, which the search has reached, not in
+    // this one, still drawn for the text before.
+    let later = id.with("down");
+    if down && typed {
+        ui.ctx().data_mut(|data| data.insert_temp(later, true));
+        ui.ctx().request_repaint();
+        return false;
+    }
+    let waited = ui
+        .ctx()
+        .data_mut(|data| data.remove_temp::<bool>(later))
+        .unwrap_or(false);
+    down || (waited && ui.memory(|memory| memory.has_focus(id)))
 }
 
 /// Every settings section, in page order, with the rows this setup offers.
@@ -370,7 +429,20 @@ fn sections(app: &App) -> Vec<Section> {
             } else {
                 wallpaper_label(app.locale, app.settings.wallpaper_color_for(palette.dark))
             };
-            if theme::soft_button(ui, &palette, Some(Icon::ChevronRight), &label, false).clicked() {
+            let response =
+                theme::soft_action_button(ui, &palette, Some(Icon::ChevronRight), &label);
+            // The button shows the current wallpaper; its name says which
+            // setting that is.
+            let name = crate::a11y::fill(
+                &crate::i18n::gettext(app.locale, "{setting}: {value}"),
+                &[
+                    ("setting", &crate::i18n::gettext(app.locale, "Wallpaper")),
+                    ("value", &label),
+                ],
+            );
+            ui.ctx()
+                .accesskit_node_builder(response.id, |node| node.set_label(name));
+            if response.clicked() {
                 app.actions.push(Action::Open(Page::Wallpaper));
             }
         },
@@ -465,17 +537,8 @@ fn sections(app: &App) -> Vec<Section> {
         ),
         move |ui, app| {
             let mut keep = app.settings.keep_chats_archived;
-            let response = widgets::switch(ui, &palette, &mut keep);
-            theme::reveal_focus(&response);
             let label = crate::i18n::gettext(app.locale, "Keep chats archived");
-            response.widget_info(|| {
-                egui::WidgetInfo::selected(
-                    egui::WidgetType::Checkbox,
-                    ui.is_enabled(),
-                    keep,
-                    label.as_ref(),
-                )
-            });
+            let response = widgets::switch(ui, &palette, &mut keep, &label);
             if response.changed() {
                 app.actions.push(Action::SetKeepChatsArchived(keep));
             }
@@ -543,10 +606,17 @@ fn sections(app: &App) -> Vec<Section> {
                 let palette = app.palette;
                 let locale = app.locale;
                 let selected = app.account().settings.limit_notifications;
-                let response = egui::ComboBox::from_id_salt("limit_notifications")
-                    .selected_text(selected.label(locale))
-                    .width(200.0_f32.min(ui.available_width()))
-                    .show_ui(ui, |ui| {
+                let shown = selected.label(locale);
+                let width = 200.0_f32.min(ui.available_width());
+                // Named by its row, with the current choice as its value, as
+                // the other drop-downs here.
+                widgets::dropdown(
+                    ui,
+                    "limit_notifications",
+                    &crate::i18n::gettext(locale, "Limit repeat notifications"),
+                    &shown,
+                    |combo| combo.selected_text(shown.as_ref()).width(width),
+                    |ui| {
                         for limit in crate::settings::NotificationLimit::ALL {
                             if theme_option(
                                 ui,
@@ -558,8 +628,8 @@ fn sections(app: &App) -> Vec<Section> {
                                 app.account_mut().mark_settings_dirty();
                             }
                         }
-                    });
-                theme::reveal_focus(&response.response);
+                    },
+                );
             },
         );
         notifications.toggle(
@@ -664,17 +734,8 @@ fn sections(app: &App) -> Vec<Section> {
                 let Some(mut enabled) = app.start_with_system else {
                     return;
                 };
-                let response = widgets::switch(ui, &palette, &mut enabled);
-                theme::reveal_focus(&response);
                 let label = crate::i18n::gettext(app.locale, "Start at login");
-                response.widget_info(|| {
-                    egui::WidgetInfo::selected(
-                        egui::WidgetType::Checkbox,
-                        ui.is_enabled(),
-                        enabled,
-                        label.as_ref(),
-                    )
-                });
+                let response = widgets::switch(ui, &palette, &mut enabled, &label);
                 if response.changed() {
                     app.actions.push(Action::SetStartWithSystem(enabled));
                 }
@@ -788,7 +849,7 @@ fn sections(app: &App) -> Vec<Section> {
         {
             let open_folder = open_folder.clone();
             move |ui, app| {
-                if theme::soft_button(ui, &palette, Some(Icon::ExternalLink), &open_folder, false)
+                if theme::soft_action_button(ui, &palette, Some(Icon::ExternalLink), &open_folder)
                     .clicked()
                 {
                     app.actions.push(Action::OpenFolder(state));
@@ -804,30 +865,28 @@ fn sections(app: &App) -> Vec<Section> {
         translated(locale, "Downloads"),
         media.display().to_string(),
         move |ui, app| {
-            if theme::soft_button(ui, &palette, Some(Icon::ExternalLink), &open_folder, false)
+            if theme::soft_action_button(ui, &palette, Some(Icon::ExternalLink), &open_folder)
                 .clicked()
             {
                 let _ = std::fs::create_dir_all(&media);
                 app.actions.push(Action::OpenFolder(media.clone()));
             }
-            if theme::soft_button(
+            if theme::soft_action_button(
                 ui,
                 &palette,
                 None,
                 &crate::i18n::gettext(app.locale, "Change…"),
-                false,
             )
             .clicked()
             {
                 app.actions.push(Action::PickDownloadFolder);
             }
             if custom.is_some()
-                && theme::soft_button(
+                && theme::soft_action_button(
                     ui,
                     &palette,
                     None,
                     &crate::i18n::gettext(app.locale, "Use default"),
-                    false,
                 )
                 .clicked()
             {
@@ -852,12 +911,11 @@ fn sections(app: &App) -> Vec<Section> {
         translated(locale, "Log"),
         log.display().to_string(),
         move |ui, app| {
-            if theme::soft_button(
+            if theme::soft_action_button(
                 ui,
                 &palette,
                 Some(Icon::FileText),
                 &crate::i18n::gettext(app.locale, "Open"),
-                false,
             )
             .clicked()
             {
@@ -913,7 +971,7 @@ fn app_lock_rows(app: &App, privacy: &mut Section) {
                 vec![(FormMode::Set, gettext(app.locale, "Set password…"))]
             };
             for (mode, label) in modes {
-                if theme::soft_button(ui, &palette, None, &label, false).clicked() {
+                if theme::soft_action_button(ui, &palette, None, &label).clicked() {
                     app.actions.push(Action::AppLockForm(Some(mode)));
                 }
             }
@@ -938,10 +996,15 @@ fn app_lock_rows(app: &App, privacy: &mut Section) {
             )),
             move |ui, app| {
                 let selected = app.settings.app_lock_after;
-                let response = egui::ComboBox::from_id_salt("app_lock_after")
-                    .selected_text(selected.label(app.locale))
-                    .width(200.0_f32.min(ui.available_width()))
-                    .show_ui(ui, |ui| {
+                let value = selected.label(app.locale);
+                let width = 200.0_f32.min(ui.available_width());
+                widgets::dropdown(
+                    ui,
+                    "app_lock_after",
+                    &crate::i18n::gettext(app.locale, "Lock after"),
+                    &value,
+                    |combo| combo.selected_text(value.as_ref()).width(width),
+                    |ui| {
                         for after in crate::settings::AutoLock::ALL {
                             if theme_option(
                                 ui,
@@ -952,8 +1015,8 @@ fn app_lock_rows(app: &App, privacy: &mut Section) {
                                 app.actions.push(Action::SetAutoLock(after));
                             }
                         }
-                    });
-                theme::reveal_focus(&response.response);
+                    },
+                );
             },
         );
     }
@@ -1015,10 +1078,16 @@ fn app_lock_form(ui: &mut egui::Ui, app: &mut App) {
             egui::TextEdit::singleline(text)
                 .id(id)
                 .password(true)
-                .hint_text(hint)
+                .hint_text(hint.as_str())
                 .font(theme::regular(13.0))
                 .desired_width(320.0_f32.min(ui.available_width())),
         );
+        // The hint is all the field shows of what it is for. As the name,
+        // it is no placeholder too: a screen reader would read it twice.
+        ui.ctx().accesskit_node_builder(response.id, |node| {
+            node.set_label(hint);
+            node.clear_placeholder();
+        });
         if index == 0 && focus_first && !busy {
             response.request_focus();
         }
@@ -1029,6 +1098,18 @@ fn app_lock_form(ui: &mut egui::Ui, app: &mut App) {
         FormError::Mismatch => gettext(locale, "The two new passwords are different.").into_owned(),
         FormError::WrongCurrent => gettext(locale, "Wrong password. Try again.").into_owned(),
     });
+    // Spoken once per refusal, the same reason again too, as nothing else
+    // tells a screen reader the form refused the password.
+    let spoken_id = egui::Id::new("app-lock-form-error");
+    let heard = (form.error, form.refused);
+    let spoken = ui.data(|data| data.get_temp::<(Option<FormError>, u32)>(spoken_id));
+    if spoken != Some(heard) {
+        ui.data_mut(|data| data.insert_temp(spoken_id, heard));
+        if let Some(error) = &error {
+            app.announcer
+                .say(crate::announcer::Category::Error, error.clone());
+        }
+    }
     if let Some(error) = error {
         widgets::rich_text(ui, &error, theme::regular(12.5), palette.danger);
     }
@@ -1073,11 +1154,14 @@ fn theme_picker(ui: &mut egui::Ui, app: &mut App) {
             .as_deref()
             .map(fastframe_theme::display_name)
             .unwrap_or_else(|| app.settings.theme.label());
-        let response = egui::ComboBox::from_id_salt("appearance_theme")
-            .selected_text(" ")
-            .width(200.0_f32.min(ui.available_width()))
-            .height(320.0)
-            .show_ui(ui, |ui| {
+        let width = 200.0_f32.min(ui.available_width());
+        let response = widgets::dropdown(
+            ui,
+            "appearance_theme",
+            &crate::i18n::gettext(app.locale, "Theme"),
+            selected,
+            |combo| combo.selected_text(" ").width(width).height(320.0),
+            |ui| {
                 for &choice in ThemeChoice::ALL {
                     if theme_option(
                         ui,
@@ -1102,9 +1186,9 @@ fn theme_picker(ui: &mut egui::Ui, app: &mut App) {
                             .push(Action::SetCustomTheme(custom.filename.clone()));
                     }
                 }
-            });
-        theme::reveal_focus(&response.response);
-        let rect = response.response.rect;
+            },
+        );
+        let rect = response.rect;
         let text = widgets::line(
             ui,
             selected,
@@ -1118,29 +1202,16 @@ fn theme_picker(ui: &mut egui::Ui, app: &mut App) {
             egui::pos2(rect.left() + 8.0, rect.center().y - text.size().y / 2.0),
             palette.text,
         );
-        response.response.widget_info(|| {
-            let mut info =
-                egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, ui.is_enabled(), "Theme");
-            info.current_text_value = Some(selected.to_owned());
-            info
-        });
-        if theme::soft_button(
-            ui,
-            &palette,
-            Some(Icon::ExternalLink),
-            "Open themes folder",
-            false,
-        )
-        .clicked()
+        if theme::soft_action_button(ui, &palette, Some(Icon::ExternalLink), "Open themes folder")
+            .clicked()
         {
             app.actions.push(Action::OpenThemesFolder);
         }
-        if theme::soft_button(
+        if theme::soft_action_button(
             ui,
             &palette,
             Some(Icon::ExternalLink),
             &crate::i18n::gettext(app.locale, "How to make a theme"),
-            false,
         )
         .clicked()
         {
@@ -1162,17 +1233,22 @@ fn font_picker(ui: &mut egui::Ui, app: &mut App) {
         FontChoice::System => crate::i18n::gettext(app.locale, choice.label()).into_owned(),
         FontChoice::Inter => choice.label().to_owned(),
     };
-    let response = egui::ComboBox::from_id_salt("interface_font")
-        .selected_text(label(selected))
-        .width(200.0_f32.min(ui.available_width()))
-        .show_ui(ui, |ui| {
+    let value = label(selected);
+    let width = 200.0_f32.min(ui.available_width());
+    widgets::dropdown(
+        ui,
+        "interface_font",
+        &crate::i18n::gettext(app.locale, "Font"),
+        &value,
+        |combo| combo.selected_text(value.as_str()).width(width),
+        |ui| {
             for choice in FontChoice::ALL {
                 if theme_option(ui, &palette, &label(choice), selected == choice) {
                     app.actions.push(Action::SetFont(choice));
                 }
             }
-        });
-    theme::reveal_focus(&response.response);
+        },
+    );
 }
 
 fn language_picker(ui: &mut egui::Ui, app: &mut App) {
@@ -1182,10 +1258,14 @@ fn language_picker(ui: &mut egui::Ui, app: &mut App) {
         Some(locale) => locale.label().to_owned(),
         None => crate::i18n::gettext(app.locale, "Auto").into_owned(),
     };
-    let response = egui::ComboBox::from_id_salt("interface_language")
-        .selected_text(label)
-        .width(200.0_f32.min(ui.available_width()))
-        .show_ui(ui, |ui| {
+    let width = 200.0_f32.min(ui.available_width());
+    widgets::dropdown(
+        ui,
+        "interface_language",
+        &crate::i18n::gettext(app.locale, "Language"),
+        &label,
+        |combo| combo.selected_text(label.as_str()).width(width),
+        |ui| {
             if theme_option(
                 ui,
                 &palette,
@@ -1199,8 +1279,8 @@ fn language_picker(ui: &mut egui::Ui, app: &mut App) {
                     app.actions.push(Action::SetInterfaceLanguage(Some(locale)));
                 }
             }
-        });
-    theme::reveal_focus(&response.response);
+        },
+    );
 }
 
 /// Wallpaper colour picker and live preview.
@@ -1240,16 +1320,23 @@ pub fn wallpaper_show(app: &mut App, ui: &mut egui::Ui) {
                             ),
                         |ui| {
                             ui.add_space(24.0);
-                            if theme::icon_button(
+                            let back = theme::icon_button(
                                 ui,
                                 Icon::ArrowLeft,
                                 20.0,
                                 palette.secondary,
                                 palette.text,
                                 "Back to settings",
-                            )
-                            .clicked()
+                            );
+                            // Opened from the keyboard, or with a screen
+                            // reader, the page starts on its first control.
+                            if std::mem::take(&mut app.focus_wallpaper_back)
+                                && (keyboard_focus(ui.ctx())
+                                    || crate::a11y::screen_reader_active(ui.ctx(), back.id))
                             {
+                                back.request_focus();
+                            }
+                            if back.clicked() {
                                 app.actions.push(Action::Open(Page::Settings));
                             }
                             theme::text(ui, "Set chat wallpaper", theme::bold(18.0), palette.text);
@@ -1360,6 +1447,12 @@ pub fn wallpaper_show(app: &mut App, ui: &mut egui::Ui) {
     );
 }
 
+/// Whether focus last moved by keyboard.
+fn keyboard_focus(ctx: &egui::Context) -> bool {
+    ctx.data(|data| data.get_temp::<bool>(theme::keyboard_focus_id()))
+        .unwrap_or(false)
+}
+
 /// "Choose image…", and "Remove image" while one is set, centred over the
 /// colours. An image replaces the colour and doodles in the chat.
 fn image_buttons(app: &mut App, ui: &mut egui::Ui, width: f32) {
@@ -1377,11 +1470,11 @@ fn image_buttons(app: &mut App, ui: &mut egui::Ui, width: f32) {
         Layout::left_to_right(Align::Center),
         |ui| {
             ui.add_space(((width - row_width) / 2.0).max(0.0));
-            if theme::soft_button(ui, &palette, Some(Icon::Image), &choose, false).clicked() {
+            if theme::soft_action_button(ui, &palette, Some(Icon::Image), &choose).clicked() {
                 app.actions.push(Action::PickWallpaperImage);
             }
             if has_image
-                && theme::soft_button(ui, &palette, Some(Icon::Trash), &remove, false).clicked()
+                && theme::soft_action_button(ui, &palette, Some(Icon::Trash), &remove).clicked()
             {
                 app.actions.push(Action::RemoveWallpaperImage);
             }
@@ -1572,7 +1665,8 @@ fn storage_bar_row(
     ui.add_space(8.0);
 }
 
-/// A titled group of settings on a rounded card.
+/// A titled group of settings on a rounded card. A screen reader hears it
+/// as a group named by its title, said as focus moves into it.
 fn section(
     ui: &mut egui::Ui,
     palette: &Palette,
@@ -1580,23 +1674,32 @@ fn section(
     add_contents: impl FnOnce(&mut egui::Ui),
 ) {
     ui.add_space(12.0);
-    theme::text(ui, title, theme::bold(18.0), palette.text);
-    ui.add_space(8.0);
-    Frame::new()
-        .fill(theme::blend(palette.panel, palette.surface, 0.5))
-        .stroke(Stroke::new(1.0, palette.outline))
-        .corner_radius(CornerRadius::same(theme::RADIUS + 2))
-        // Every row ends with its own gap, so the bottom margin is smaller.
-        .inner_margin(Margin {
-            left: 20,
-            right: 20,
-            top: 16,
-            bottom: 6,
-        })
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            add_contents(ui);
+    // A scope leaves the layout exactly as it was without it, and gives
+    // the section a node of its own.
+    ui.scope(|ui| {
+        let label = title.to_owned();
+        ui.ctx().accesskit_node_builder(ui.unique_id(), |node| {
+            node.set_role(Role::Group);
+            node.set_label(label);
         });
+        theme::text(ui, title, theme::bold(18.0), palette.text);
+        ui.add_space(8.0);
+        Frame::new()
+            .fill(theme::blend(palette.panel, palette.surface, 0.5))
+            .stroke(Stroke::new(1.0, palette.outline))
+            .corner_radius(CornerRadius::same(theme::RADIUS + 2))
+            // Every row ends with its own gap, so the bottom margin is smaller.
+            .inner_margin(Margin {
+                left: 20,
+                right: 20,
+                top: 16,
+                bottom: 6,
+            })
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                add_contents(ui);
+            });
+    });
     ui.add_space(8.0);
 }
 
@@ -1681,12 +1784,11 @@ fn account(app: &mut App, ui: &mut egui::Ui) {
             // With other numbers here, unlinking this one also takes it off
             // the switcher; the last one stays, waiting to be linked again.
             if app.has_several_accounts() {
-                if theme::soft_button(
+                if theme::soft_action_button(
                     ui,
                     &palette,
                     Some(Icon::LogOut),
                     &crate::i18n::gettext(app.locale, "Remove this account"),
-                    false,
                 )
                 .clicked()
                 {
@@ -1694,23 +1796,21 @@ fn account(app: &mut App, ui: &mut egui::Ui) {
                     app.actions
                         .push(Action::ShowDialog(Dialog::ConfirmRemoveAccount(id)));
                 }
-            } else if theme::soft_button(
+            } else if theme::soft_action_button(
                 ui,
                 &palette,
                 Some(Icon::LogOut),
                 &crate::i18n::gettext(app.locale, "Unlink this computer"),
-                false,
             )
             .clicked()
             {
                 app.actions.push(Action::ShowDialog(Dialog::ConfirmUnlink));
             }
-            if theme::soft_button(
+            if theme::soft_action_button(
                 ui,
                 &palette,
                 Some(Icon::Plus),
                 &crate::i18n::gettext(app.locale, "Add account"),
-                false,
             )
             .clicked()
             {
@@ -1775,6 +1875,9 @@ fn profile_field(
             .char_limit(limit)
             .desired_width(ui.available_width()),
     );
+    // The caption above is the field's name.
+    ui.ctx()
+        .accesskit_node_builder(response.id, |node| node.set_label(label));
     response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter))
 }
 
@@ -1809,38 +1912,35 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
         if let Some(update) = &app.update {
             let label = crate::i18n::gettext(app.locale, "Update to {version}")
                 .replace("{version}", &update.version);
-            if theme::soft_button(ui, &palette, Some(Icon::Download), &label, false).clicked() {
+            if theme::soft_action_button(ui, &palette, Some(Icon::Download), &label).clicked() {
                 app.actions.push(Action::ShowUpdate);
             }
         }
-        if theme::soft_button(
+        if theme::soft_action_button(
             ui,
             &palette,
             Some(Icon::Keyboard),
             &crate::i18n::gettext(app.locale, "Keyboard shortcuts"),
-            false,
         )
         .clicked()
         {
             app.actions.push(Action::ShowDialog(Dialog::Shortcuts));
         }
-        if theme::soft_button(
+        if theme::soft_action_button(
             ui,
             &palette,
             Some(Icon::Info),
             &crate::i18n::gettext(app.locale, "About"),
-            false,
         )
         .clicked()
         {
             app.actions.push(Action::ShowDialog(Dialog::About));
         }
-        if theme::soft_button(
+        if theme::soft_action_button(
             ui,
             &palette,
             Some(Icon::ExternalLink),
             &crate::i18n::gettext(app.locale, "Source code"),
-            false,
         )
         .clicked()
         {
@@ -1861,11 +1961,8 @@ fn custom_titlebar_switch(ui: &mut egui::Ui, app: &mut App) {
     let palette = app.palette;
     let label = crate::i18n::gettext(app.locale, "Custom title bar");
     let mut value = app.settings.custom_titlebar;
-    let response = widgets::switch(ui, &palette, &mut value);
-    theme::reveal_focus(&response);
-    response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), value, &label)
-    });
+    // The switch names itself and shows its focus ring.
+    let response = widgets::switch(ui, &palette, &mut value, &label);
     if response.changed() {
         app.actions.push(Action::SetCustomTitlebar(value));
     }
@@ -1882,12 +1979,7 @@ fn toggle(
     let mut value = *field(&mut app.settings);
     let mut changed = false;
     widgets::setting_row(ui, &palette, label, description, |ui| {
-        let response = widgets::switch(ui, &palette, &mut value);
-        theme::reveal_focus(&response);
-        response.widget_info(|| {
-            egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), value, label)
-        });
-        changed = response.changed();
+        changed = widgets::switch(ui, &palette, &mut value, label).changed();
     });
     if changed {
         *field(&mut app.settings) = value;
@@ -1906,12 +1998,7 @@ fn account_toggle(
     let mut value = *field(&mut app.account_mut().settings);
     let mut changed = false;
     widgets::setting_row(ui, &palette, label, description, |ui| {
-        let response = widgets::switch(ui, &palette, &mut value);
-        theme::reveal_focus(&response);
-        response.widget_info(|| {
-            egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), value, label)
-        });
-        changed = response.changed();
+        changed = widgets::switch(ui, &palette, &mut value, label).changed();
     });
     if changed {
         *field(&mut app.account_mut().settings) = value;
@@ -1975,24 +2062,28 @@ fn sound_control(ui: &mut egui::Ui, app: &mut App, mention: bool) {
     {
         app.actions.push(Action::PreviewSound(current.clone()));
     }
-    let response = egui::ComboBox::from_id_salt(("notification-sound", mention))
-        .selected_text(selected)
-        .width(170.0_f32.min(ui.available_width()))
-        .show_ui(ui, |ui| {
+    let width = 170.0_f32.min(ui.available_width());
+    let (title, _) = sound_text(locale, mention);
+    widgets::dropdown(
+        ui,
+        ("notification-sound", mention),
+        &title.shown,
+        &selected,
+        |combo| combo.selected_text(selected.as_str()).width(width),
+        |ui| {
             for (sound, name) in choices {
-                if ui.selectable_label(current == sound, name).clicked() {
+                let response = ui.selectable_label(current == sound, name);
+                if widgets::dropdown_choice(ui, &response, current == sound) {
                     app.actions
                         .push(Action::SetNotificationSound { mention, sound });
                 }
             }
-            if ui
-                .selectable_label(false, gettext(locale, "Choose a file…"))
-                .clicked()
-            {
+            let response = ui.selectable_label(false, gettext(locale, "Choose a file…"));
+            if widgets::dropdown_choice(ui, &response, false) {
                 app.actions.push(Action::PickNotificationSound { mention });
             }
-        });
-    theme::reveal_focus(&response.response);
+        },
+    );
 }
 
 /// One account privacy category's picker: what the phone holds, and the
@@ -2007,10 +2098,14 @@ fn privacy_control(ui: &mut egui::Ui, app: &mut App, kind: PrivacyKind) {
     ui.add_enabled_ui(!pending, |ui| {
         ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
             let salt = format!("privacy_{}", kind.wire_name());
-            let response = egui::ComboBox::from_id_salt(salt)
-                .selected_text(" ")
-                .width(220.0_f32.min(ui.available_width()))
-                .show_ui(ui, |ui| {
+            let width = 220.0_f32.min(ui.available_width());
+            let response = widgets::dropdown(
+                ui,
+                salt,
+                &kind.label(locale),
+                &selected,
+                |combo| combo.selected_text(" ").width(width),
+                |ui| {
                     for choice in kind.choices() {
                         if theme_option(
                             ui,
@@ -2024,9 +2119,9 @@ fn privacy_control(ui: &mut egui::Ui, app: &mut App, kind: PrivacyKind) {
                             });
                         }
                     }
-                });
-            theme::reveal_focus(&response.response);
-            let rect = response.response.rect;
+                },
+            );
+            let rect = response.rect;
             let text = widgets::line(
                 ui,
                 &selected,
@@ -2040,15 +2135,6 @@ fn privacy_control(ui: &mut egui::Ui, app: &mut App, kind: PrivacyKind) {
                 egui::pos2(rect.left() + 8.0, rect.center().y - text.size().y / 2.0),
                 palette.text,
             );
-            response.response.widget_info(|| {
-                let mut info = egui::WidgetInfo::labeled(
-                    egui::WidgetType::ComboBox,
-                    ui.is_enabled(),
-                    kind.label(locale),
-                );
-                info.current_text_value = Some(selected.to_string());
-                info
-            });
         });
     });
 }
@@ -2082,7 +2168,7 @@ fn theme_option(ui: &mut egui::Ui, palette: &theme::Palette, text: &str, selecte
             text,
         )
     });
-    response.clicked()
+    widgets::dropdown_choice(ui, &response, selected)
 }
 
 #[cfg(test)]

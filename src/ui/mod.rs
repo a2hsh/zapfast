@@ -128,6 +128,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     overlay::finish(ctx);
     drop_target(app, ctx);
     toasts(app, ctx);
+    return_focus(app, ctx);
     focus_ring(app, ctx);
     announce(app, ctx);
     window_chrome(app, ui);
@@ -141,6 +142,26 @@ fn list_pane_only(app: &App) -> bool {
         Page::Chats => app.current_chat().is_none(),
         Page::Calls => app.current_chat().is_none() || !app.call_picked(),
         Page::Settings | Page::Wallpaper => false,
+    }
+}
+
+/// Gives focus back to the widget a page change remembered
+/// (`App::return_focus`), such as the gear once Settings close, in the pass
+/// that draws it: AccessKit must never hear of focus on a node missing from
+/// its tree. A widget no pass draws within a few frames is let go, and the
+/// message field takes focus instead, as when nothing was remembered. Each
+/// frame it waits is asked for: an idle window draws none otherwise.
+fn return_focus(app: &mut App, ctx: &egui::Context) {
+    let Some((id, frames)) = app.return_focus.take() else {
+        return;
+    };
+    if ctx.viewport(|viewport| viewport.this_pass.widgets.contains(id)) {
+        ctx.memory_mut(|memory| memory.request_focus(id));
+    } else if frames > 1 {
+        app.return_focus = Some((id, frames - 1));
+        ctx.request_repaint();
+    } else {
+        app.refocus_composer(ctx);
     }
 }
 

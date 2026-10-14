@@ -925,3 +925,20 @@ stops in this cycle. The React and Reply
 buttons that appear beside a hovered message are for the pointer only;
 keyboard and screen-reader users reach both from the message menu.
 Alt+Up/Down switches conversations.
+
+Settings opens with focus in its search field, from the Settings button,
+the profile picture or Ctrl+, (Command+, on macOS), and closing it the same
+way, with Escape or with Back returns focus to where it was. Each section
+(Appearance, Chats, Notifications and the rest) is a group that the screen
+reader names as focus enters it. Switches read as check boxes, checked or
+not checked, and say their new state when Space flips them; every control
+also reads its setting's description. Drop-downs read their name and
+current value: Enter, Space or Alt+Down opens one on the current choice, Up
+and Down move between the choices, Enter takes one and Escape closes the
+list unchanged, and either way focus returns to the drop-down with its
+value. Typing in the search says how many settings are left once you pause,
+such as "4 settings" or "No settings match", and Down moves from the field
+to the first setting left. Escape in a non-empty search clears it and says
+"Search cleared"; the next Escape leaves Settings. Changing the zoom says
+the new size. The wallpaper page, opened from the keyboard, starts on its
+Back button, and going back lands on the Wallpaper button again.

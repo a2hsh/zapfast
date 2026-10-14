@@ -127,6 +127,9 @@ pub struct Form {
     pub new: String,
     pub confirm: String,
     pub error: Option<FormError>,
+    /// How many submissions were refused, so that each refusal is heard,
+    /// the same reason twice too.
+    pub refused: u32,
     /// A check or a new verifier is being worked out.
     pub busy: bool,
 }
@@ -139,6 +142,7 @@ impl Form {
             new: String::new(),
             confirm: String::new(),
             error: None,
+            refused: 0,
             busy: false,
         }
     }
@@ -394,6 +398,7 @@ impl AppLock {
         };
         if let Err(error) = form.check() {
             form.error = Some(error);
+            form.refused += 1;
             return;
         }
         form.error = None;

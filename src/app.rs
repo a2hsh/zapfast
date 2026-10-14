@@ -829,6 +829,17 @@ pub struct App {
     /// What the Settings page is filtered by.
     pub settings_search: String,
     pub focus_settings_search: bool,
+    /// The typing in the settings search, until its result count is spoken.
+    settings_search_settle: Option<crate::announcer::Settle>,
+    /// What had focus when Settings opened, to have it again on leaving.
+    settings_return_focus: Option<egui::Id>,
+    /// What had focus on Settings when the wallpaper page opened from there.
+    wallpaper_return_focus: Option<egui::Id>,
+    /// A widget to focus once a pass draws it, and how many more frames to
+    /// wait for one that does; see `ui::return_focus`.
+    pub return_focus: Option<(egui::Id, u8)>,
+    /// One-shot: focus the wallpaper page's Back button when it is drawn.
+    pub focus_wallpaper_back: bool,
     pub quit_requested: bool,
     pub window_focused: bool,
     /// A notification went out this frame: highlight the taskbar entry of a
@@ -1603,6 +1614,11 @@ impl App {
             focus_search: false,
             settings_search: String::new(),
             focus_settings_search: false,
+            settings_search_settle: None,
+            settings_return_focus: None,
+            wallpaper_return_focus: None,
+            return_focus: None,
+            focus_wallpaper_back: false,
             quit_requested: false,
             window_focused: false,
             wants_attention: false,
@@ -1892,6 +1908,12 @@ impl App {
         self.typing_announced.clear();
         // Messages held to be spoken belong to the previous account's chat.
         self.message_hold.clear();
+        // Settings closes without handing focus back: the window shows
+        // another account's chats now.
+        self.settings_return_focus = None;
+        self.wallpaper_return_focus = None;
+        // The Settings search count waits for a page that just closed.
+        self.settings_search_settle = None;
     }
 
     fn add_account(&mut self) {
@@ -2250,6 +2272,13 @@ impl App {
     /// longer reading their chat.
     pub(crate) fn flush_announcements(&mut self, now: Instant) -> Option<Instant> {
         self.sent_queued = false;
+        let search_due = self.settings_search_settle.map(|settle| {
+            settle.deadline(crate::announcer::SEARCH_QUIET, crate::announcer::MAX_HOLD)
+        });
+        if search_due.is_some_and(|due| now >= due) {
+            self.settings_search_settle = None;
+            self.announce_settings_matches();
+        }
         let stale = self
             .message_hold
             .chat()
@@ -2288,7 +2317,62 @@ impl App {
             self.announcer
                 .say(crate::announcer::Category::Message, text);
         }
-        self.message_hold.deadline()
+        let search_due = self.settings_search_settle.map(|settle| {
+            settle.deadline(crate::announcer::SEARCH_QUIET, crate::announcer::MAX_HOLD)
+        });
+        self.message_hold
+            .deadline()
+            .into_iter()
+            .chain(search_due)
+            .min()
+    }
+
+    /// Filters the Settings page by `text`, typed at `now`. The number of
+    /// settings left is spoken once the typing settles, rather than at every
+    /// letter; see `flush_announcements`.
+    pub(crate) fn search_settings(&mut self, text: String, now: Instant) {
+        if text == self.settings_search {
+            return;
+        }
+        self.settings_search = text;
+        self.settings_search_settle = if self.settings_search.trim().is_empty() {
+            None
+        } else {
+            let mut settle = self
+                .settings_search_settle
+                .unwrap_or_else(|| crate::announcer::Settle::new(now));
+            settle.touch(now);
+            Some(settle)
+        };
+    }
+
+    /// Speaks how many settings the search leaves, while Settings show.
+    fn announce_settings_matches(&mut self) {
+        if self.page != Page::Settings || self.settings_search.trim().is_empty() {
+            return;
+        }
+        let count = u32::try_from(crate::ui::settings::match_count(self)).unwrap_or(u32::MAX);
+        let text = if count == 0 {
+            crate::i18n::gettext(self.locale, "No settings match").into_owned()
+        } else {
+            crate::a11y::fill(
+                &crate::i18n::ngettext(self.locale, "{count} setting", "{count} settings", count),
+                &[("count", &count.to_string())],
+            )
+        };
+        self.announcer.say(crate::announcer::Category::Status, text);
+    }
+
+    /// Speaks the zoom just set, which the keys change from anywhere.
+    fn announce_zoom(&mut self) {
+        let percent = format!("{:.0}", self.settings.zoom * 100.0);
+        self.announcer.say(
+            crate::announcer::Category::Status,
+            crate::a11y::fill(
+                &crate::i18n::gettext(self.locale, "Zoom {percent}%"),
+                &[("percent", &percent)],
+            ),
+        );
     }
 
     /// A message's content as its message-list label describes it: the
@@ -5928,7 +6012,7 @@ impl App {
 
     /// Returns keyboard focus to the open conversation when no search or
     /// overlay is active.
-    fn refocus_composer(&mut self, ctx: &egui::Context) {
+    pub(crate) fn refocus_composer(&mut self, ctx: &egui::Context) {
         let search_focused = ctx.memory(|memory| memory.has_focus(egui::Id::new("chat-search")));
         if self.chat_view()
             && self.dialog.is_none()
@@ -6758,6 +6842,24 @@ impl App {
         match action {
             Action::Open(page) => {
                 let opens_chats = page == Page::Chats;
+                let focused = ctx.memory(|memory| memory.focused());
+                // Focus comes back to where it was when the page that took it
+                // closes: the gear, the composer, the Wallpaper row.
+                let mut give_back = None;
+                if page == Page::Settings && !matches!(self.page, Page::Settings | Page::Wallpaper)
+                {
+                    // From the chats or the Calls page alike.
+                    self.settings_return_focus = focused;
+                    // A reader starts in the search, as Ctrl+F puts them.
+                    self.focus_settings_search = true;
+                } else if page == Page::Wallpaper && self.page == Page::Settings {
+                    self.wallpaper_return_focus = focused;
+                    self.focus_wallpaper_back = true;
+                } else if page == Page::Settings && self.page == Page::Wallpaper {
+                    give_back = self.wallpaper_return_focus.take();
+                } else if opens_chats && matches!(self.page, Page::Settings | Page::Wallpaper) {
+                    give_back = self.settings_return_focus.take();
+                }
                 // Privacy can change on the phone at any time, and nothing
                 // announces it: read it again whenever Settings opens.
                 if page == Page::Settings && self.page != Page::Settings && self.is_connected() {
@@ -6802,7 +6904,15 @@ impl App {
                 if opens_chats {
                     // Settings open unfiltered next time.
                     self.settings_search.clear();
-                    self.refocus_composer(ctx);
+                    self.settings_search_settle = None;
+                    if give_back.is_none() {
+                        self.refocus_composer(ctx);
+                    }
+                }
+                if let Some(id) = give_back {
+                    // The page drawing it comes next frame; a few frames
+                    // cover a widget that appears a little later.
+                    self.return_focus = Some((id, 3));
                 }
             }
             Action::ToggleSettings => {
@@ -8593,7 +8703,17 @@ impl App {
                 self.page = Page::Settings;
                 self.focus_settings_search = true;
             }
-            Action::SearchSettings(text) => self.settings_search = text,
+            Action::SearchSettings(text) => self.search_settings(text, Instant::now()),
+            Action::ClearSettingsSearch => {
+                self.search_settings(String::new(), Instant::now());
+                // Escape took focus away from the field; it stays the place
+                // to type the next search.
+                self.focus_settings_search = true;
+                self.announcer.say(
+                    crate::announcer::Category::Status,
+                    crate::i18n::gettext(self.locale, "Search cleared"),
+                );
+            }
             Action::FocusComposer => {
                 self.focus_search = false;
                 self.focus_composer = true;
@@ -9135,11 +9255,13 @@ impl App {
                 self.settings.zoom = (self.settings.zoom + delta).clamp(0.6, 2.0);
                 self.zoom_applied = false;
                 self.mark_settings_dirty();
+                self.announce_zoom();
             }
             Action::ResetZoom => {
                 self.settings.zoom = 1.0;
                 self.zoom_applied = false;
                 self.mark_settings_dirty();
+                self.announce_zoom();
             }
             Action::PairWithPhone(phone) => {
                 let digits: String = phone.chars().filter(char::is_ascii_digit).collect();
@@ -9654,6 +9776,7 @@ impl App {
                 if let Some(form) = &mut self.app_lock.form {
                     form.busy = false;
                     form.error = Some(FormError::WrongCurrent);
+                    form.refused += 1;
                 }
             }
             Outcome::Set(verifier) => {
@@ -11411,6 +11534,48 @@ mod tests {
             speak_at(&mut app, t0 + ms(400) + crate::announcer::QUIET).as_deref(),
             Some("3 new messages")
         );
+    }
+
+    #[test]
+    fn the_settings_search_count_is_spoken_once_the_typing_settles() {
+        use crate::announcer::SEARCH_QUIET;
+        let root = tempfile::tempdir().unwrap();
+        let (mut app, _events) = App::headless(AppDirs::under(root.path()), Settings::default());
+        app.page = Page::Settings;
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        // A letter every 150 ms: each one puts the count off again.
+        for (index, text) in ["u", "up", "upd", "updates"].into_iter().enumerate() {
+            let at = t0 + ms(150) * index as u32;
+            app.search_settings(text.into(), at);
+            assert_eq!(speak_at(&mut app, at), None, "nothing while typing");
+            assert_eq!(app.flush_announcements(at), Some(at + SEARCH_QUIET));
+        }
+        let last = t0 + ms(450);
+        assert_eq!(speak_at(&mut app, last + ms(399)), None);
+        assert_eq!(
+            speak_at(&mut app, last + SEARCH_QUIET).as_deref(),
+            Some("3 settings")
+        );
+        assert_eq!(speak_at(&mut app, last + ms(5000)), None, "said once");
+
+        app.search_settings("enter sends".into(), t0);
+        assert_eq!(
+            speak_at(&mut app, t0 + SEARCH_QUIET).as_deref(),
+            Some("1 setting")
+        );
+        app.search_settings("zzz".into(), t0);
+        assert_eq!(
+            speak_at(&mut app, t0 + SEARCH_QUIET).as_deref(),
+            Some("No settings match")
+        );
+        // Emptied before it settles, or left for another page: nothing.
+        app.search_settings("sound".into(), t0);
+        app.search_settings(String::new(), t0 + ms(100));
+        assert_eq!(speak_at(&mut app, t0 + ms(1000)), None);
+        app.search_settings("sound".into(), t0);
+        app.page = Page::Chats;
+        assert_eq!(speak_at(&mut app, t0 + ms(1000)), None);
     }
 
     #[test]
@@ -13361,6 +13526,31 @@ mod tests {
         assert!(app.message_hold.chat().is_some());
         app.apply(Action::SwitchAccount(AccountId::parse("2").unwrap()), &ctx);
         assert!(app.message_hold.chat().is_none());
+    }
+
+    /// Settings left by switching accounts gives no stale focus back later.
+    #[test]
+    fn switching_accounts_forgets_where_settings_return_focus() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _commands) = two_accounts(directory.path());
+        let ctx = egui::Context::default();
+        app.settings_return_focus = Some(egui::Id::new("gear"));
+        app.wallpaper_return_focus = Some(egui::Id::new("wallpaper-row"));
+        app.apply(Action::SwitchAccount(AccountId::parse("2").unwrap()), &ctx);
+        assert!(app.settings_return_focus.is_none());
+        assert!(app.wallpaper_return_focus.is_none());
+    }
+
+    /// The Settings search count does not wait on after the switch closed
+    /// Settings.
+    #[test]
+    fn switching_accounts_ends_the_settings_search_count_wait() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _commands) = two_accounts(directory.path());
+        let ctx = egui::Context::default();
+        app.settings_search_settle = Some(crate::announcer::Settle::new(Instant::now()));
+        app.apply(Action::SwitchAccount(AccountId::parse("2").unwrap()), &ctx);
+        assert!(app.settings_search_settle.is_none());
     }
 
     #[test]
@@ -23940,6 +24130,32 @@ mod app_lock_tests {
         chat.unread = 1;
         app.handle_chat_updated(chat, true);
         assert_eq!(app.chat(CHAT).unwrap().unread, 1);
+    }
+
+    /// Each wrong current password counts as a refusal of its own, so the
+    /// form says it again though the reason is the same.
+    #[test]
+    fn every_wrong_current_password_counts_as_a_refusal() {
+        let ctx = egui::Context::default();
+        let mut app = app_with(settings(None));
+        app.apply(Action::AppLockForm(Some(FormMode::Set)), &ctx);
+        let form = app.app_lock.form.as_mut().unwrap();
+        form.new = "first-password".into();
+        form.confirm = "first-password".into();
+        app.apply(Action::SubmitAppLockForm, &ctx);
+        finish(&mut app, &ctx);
+        app.apply(Action::AppLockForm(Some(FormMode::Change)), &ctx);
+        for refused in 1..=2 {
+            let form = app.app_lock.form.as_mut().unwrap();
+            form.current = "wrong".into();
+            form.new = "second-password".into();
+            form.confirm = "second-password".into();
+            app.apply(Action::SubmitAppLockForm, &ctx);
+            finish(&mut app, &ctx);
+            let form = app.app_lock.form.as_ref().unwrap();
+            assert_eq!(form.error, Some(FormError::WrongCurrent));
+            assert_eq!(form.refused, refused);
+        }
     }
 
     #[test]

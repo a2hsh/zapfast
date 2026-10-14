@@ -254,6 +254,38 @@ impl Announcer {
 pub const QUIET: Duration = Duration::from_millis(1000);
 /// The longest a message waits, so a steady stream is still heard.
 pub const MAX_HOLD: Duration = Duration::from_millis(2500);
+/// How long a search must stay unchanged before its result count is spoken:
+/// long enough to cover the gap between two typed letters.
+pub const SEARCH_QUIET: Duration = Duration::from_millis(400);
+
+/// A run of events, such as messages arriving or letters typed, that has
+/// settled once `quiet` has passed since the latest of them, or `cap` since
+/// the first, so a steady stream is still heard. Time comes from the caller,
+/// so tests need no sleeping.
+#[derive(Clone, Copy, Debug)]
+pub struct Settle {
+    first: Instant,
+    last: Instant,
+}
+
+impl Settle {
+    pub fn new(now: Instant) -> Self {
+        Self {
+            first: now,
+            last: now,
+        }
+    }
+
+    /// Another event of the run.
+    pub fn touch(&mut self, now: Instant) {
+        self.last = now;
+    }
+
+    /// When the run counts as settled.
+    pub fn deadline(&self, quiet: Duration, cap: Duration) -> Instant {
+        (self.last + quiet).min(self.first + cap)
+    }
+}
 
 /// Incoming messages for the chat being read, held until the chat goes
 /// quiet so that a burst is spoken as one line rather than one per message.
@@ -270,8 +302,7 @@ struct Held {
     /// The full line for the first message, spoken as is if no other comes.
     line: String,
     count: u32,
-    first: Instant,
-    last: Instant,
+    settle: Settle,
 }
 
 /// What a hold has to say once it is due.
@@ -291,7 +322,7 @@ impl MessageHold {
             && held.chat == chat
         {
             held.count += 1;
-            held.last = now;
+            held.settle.touch(now);
             if held.sender.as_ref().is_some_and(|(id, _)| id != sender) {
                 held.sender = None;
             }
@@ -302,8 +333,7 @@ impl MessageHold {
             sender: Some((sender.to_owned(), name)),
             line,
             count: 1,
-            first: now,
-            last: now,
+            settle: Settle::new(now),
         });
     }
 
@@ -335,7 +365,7 @@ impl MessageHold {
     pub fn deadline(&self) -> Option<Instant> {
         self.held
             .as_ref()
-            .map(|held| (held.last + QUIET).min(held.first + MAX_HOLD))
+            .map(|held| held.settle.deadline(QUIET, MAX_HOLD))
     }
 
     /// The chat whose messages are held.
@@ -694,6 +724,17 @@ mod tests {
             hold.due(t0 + QUIET),
             Some(Burst::One("Grace in Work: b".into()))
         );
+    }
+
+    #[test]
+    fn a_run_settles_after_quiet_or_at_the_cap() {
+        let t0 = Instant::now();
+        let mut run = Settle::new(t0);
+        assert_eq!(run.deadline(SEARCH_QUIET, MAX_HOLD), t0 + SEARCH_QUIET);
+        run.touch(t0 + ms(300));
+        assert_eq!(run.deadline(SEARCH_QUIET, MAX_HOLD), t0 + ms(700));
+        run.touch(t0 + ms(2400));
+        assert_eq!(run.deadline(SEARCH_QUIET, MAX_HOLD), t0 + MAX_HOLD);
     }
 
     #[test]

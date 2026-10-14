@@ -99,13 +99,9 @@ pub fn create(app: &mut App, ui: &mut egui::Ui, chat: &str) {
         }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            widgets::switch(ui, &palette, &mut app.poll_draft.multiple);
-            theme::text(
-                ui,
-                "Allow multiple answers",
-                theme::regular(13.5),
-                palette.text,
-            );
+            let label = "Allow multiple answers";
+            widgets::switch(ui, &palette, &mut app.poll_draft.multiple, label);
+            theme::text(ui, label, theme::regular(13.5), palette.text);
         });
     });
     ui.add_space(8.0);

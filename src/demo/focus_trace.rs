@@ -621,6 +621,11 @@ fn adding_an_account_from_the_keys_lands_on_its_linking_screen() {
     let from = trace.mark();
     trace.press("Enter", egui::Key::Enter, egui::Modifiers::NONE);
     assert!(trace.app.adding_account);
+    assert!(
+        trace.last().name.ends_with("\"Cancel\""),
+        "{}",
+        trace.last().name
+    );
     trace.assert_clean(from, "adding an account");
     // Focus is on the way back, Cancel: Enter takes it.
     trace.press("Enter", egui::Key::Enter, egui::Modifiers::NONE);
@@ -664,6 +669,11 @@ fn choosing_an_unlinked_account_from_the_keys_lands_on_its_linking_screen() {
     trace.press("Enter", egui::Key::Enter, egui::Modifiers::NONE);
     assert_eq!(trace.app.account().id.as_str(), "2");
     assert!(!trace.app.adding_account);
+    assert!(
+        trace.last().name.ends_with("\"Use another account\""),
+        "{}",
+        trace.dump(from - 1)
+    );
     trace.assert_clean(from, "choosing an unlinked account");
     // Focus is on the way back, "Use another account": Enter opens the
     // switcher with focus in it.

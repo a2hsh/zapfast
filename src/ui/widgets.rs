@@ -881,14 +881,21 @@ pub fn search_field(
 /// Switch control.
 /// Switch that shows its state by shape as well as colour: off is an
 /// outlined track with a small grey knob, on a filled track with a larger
-/// white knob carrying a check (WCAG 1.4.1).
-pub fn switch(ui: &mut Ui, palette: &Palette, on: &mut bool) -> egui::Response {
+/// white knob carrying a check (WCAG 1.4.1). A screen reader hears it as a
+/// check box named `label`, checked or not, and hears the new state when
+/// Space or a click flips it.
+pub fn switch(ui: &mut Ui, palette: &Palette, on: &mut bool, label: &str) -> egui::Response {
     let size = vec2(40.0, 22.0);
     let (rect, mut response) = ui.allocate_exact_size(size, Sense::click());
     if response.clicked() {
         *on = !*on;
         response.mark_changed();
     }
+    theme::reveal_focus(&response);
+    // Read after the flip, so the node carries the state just set.
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *on, label)
+    });
     if ui.is_rect_visible(rect) {
         let t = ui.ctx().animate_bool(response.id, *on);
         let fill = egui::lerp(
@@ -950,7 +957,10 @@ pub fn credit(ui: &mut Ui, palette: &Palette, locale: crate::i18n::Locale) -> bo
     clicked
 }
 
-/// Labeled settings row.
+/// Labeled settings row. A screen reader names an unnamed control in it
+/// (a text field, a drop-down) by the row's title, and describes every
+/// control with the row's description, and with the title too when the
+/// control has a name of its own ("Open folder" under "Message archive").
 pub fn setting_row(
     ui: &mut Ui,
     palette: &Palette,
@@ -977,9 +987,170 @@ pub fn setting_row(
                 }
             }
         });
+        let start = drawn_count(ui);
         ui.with_layout(Layout::right_to_left(Align::Center), control);
+        for id in focusable_since(ui, start) {
+            ui.ctx().accesskit_node_builder(id, |node| {
+                if node.label().is_none_or(str::is_empty) {
+                    node.set_label(label);
+                }
+                let mut parts = Vec::new();
+                if node.label() != Some(label) {
+                    parts.push(label);
+                }
+                if !description.is_empty() {
+                    parts.push(description);
+                }
+                if !parts.is_empty() {
+                    node.set_description(parts.join(", "));
+                }
+            });
+        }
     });
     ui.add_space(10.0);
+}
+
+/// How many widgets this pass has laid out so far on `ui`'s layer: a mark
+/// for [`focusable_since`].
+pub fn drawn_count(ui: &Ui) -> usize {
+    let layer = ui.layer_id();
+    ui.ctx()
+        .viewport(|viewport| viewport.this_pass.widgets.get_layer(layer).count())
+}
+
+/// The focusable widgets laid out on `ui`'s layer in this pass since the
+/// mark `start` from [`drawn_count`], in order. Popups are layers of their
+/// own, so a drop-down's choices are not among them.
+pub fn focusable_since(ui: &Ui, start: usize) -> Vec<egui::Id> {
+    let layer = ui.layer_id();
+    ui.ctx().viewport(|viewport| {
+        viewport
+            .this_pass
+            .widgets
+            .get_layer(layer)
+            .skip(start)
+            .filter(|widget| widget.sense.is_focusable())
+            .map(|widget| widget.id)
+            .collect()
+    })
+}
+
+/// Where a drop-down records the current choice of its open list.
+fn current_choice_id() -> egui::Id {
+    egui::Id::new("dropdown-current-choice")
+}
+
+fn dropdown_mark_id(id: egui::Id) -> egui::Id {
+    id.with("dropdown")
+}
+
+/// A drop-down: egui's ComboBox, set up by `combo`, whose node a screen
+/// reader hears as a combo box named `label` with `value`, expanded while
+/// its list is open. From the keyboard, Enter, Space or Alt+Down opens it
+/// with focus on the current choice; Up and Down move between the choices
+/// and wrap, Enter takes one and Escape closes the list without a change.
+/// Either way focus returns to the drop-down, which then reads its new
+/// value. Each choice in `add_contents` goes through [`dropdown_choice`].
+pub fn dropdown(
+    ui: &mut Ui,
+    id_salt: impl std::hash::Hash + std::fmt::Debug,
+    label: &str,
+    value: &str,
+    combo: impl FnOnce(egui::ComboBox) -> egui::ComboBox,
+    add_contents: impl FnOnce(&mut Ui),
+) -> egui::Response {
+    let ctx = ui.ctx().clone();
+    // The id egui's ComboBox gives its button: `from_id_salt` hashes the
+    // salt into an IdSalt, which the button's Ui id is then combined with.
+    let id = ui.make_persistent_id(egui::IdSalt::new(&id_salt));
+    let popup = id.with("popup");
+    let frame = ctx.cumulative_frame_nr();
+    ctx.data_mut(|data| data.insert_temp(dropdown_mark_id(id), frame));
+    let mut requested = false;
+    if ctx.memory(|memory| memory.has_focus(id)) && !egui::Popup::is_id_open(&ctx, popup) {
+        let (alt_down, activate) = ctx.input_mut(|input| {
+            let alt_down =
+                super::keys::take_exact(input, egui::Modifiers::ALT, egui::Key::ArrowDown);
+            // Enter and Space click the focused button, and the click opens
+            // the list below.
+            let activate =
+                input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space);
+            (alt_down, activate)
+        });
+        if alt_down {
+            egui::Popup::open_id(&ctx, popup);
+        }
+        requested = alt_down || activate;
+        if requested {
+            // Opening from the keys is keyboard navigation, as Tab is: the
+            // focus they move into the list is shown.
+            ctx.data_mut(|data| data.insert_temp(theme::keyboard_focus_id(), true));
+        }
+    }
+    let key_menu = super::list_nav::KeyMenu::begin(&ctx, popup, requested, false);
+    ctx.data_mut(|data| data.remove::<egui::Id>(current_choice_id()));
+    let shown = combo(egui::ComboBox::from_id_salt(&id_salt)).show_ui(ui, add_contents);
+    let response = shown.response;
+    debug_assert_eq!(
+        response.id, id,
+        "the drop-down's id is known before it is drawn"
+    );
+    theme::reveal_focus(&response);
+    let layer = shown
+        .inner
+        .is_some()
+        .then(|| egui::LayerId::new(egui::Order::Foreground, popup));
+    // The list opens on the current choice, or else on its first.
+    let first = ctx
+        .data(|data| data.get_temp::<egui::Id>(current_choice_id()))
+        .or_else(|| {
+            let layer = layer?;
+            ctx.viewport(|viewport| {
+                viewport
+                    .this_pass
+                    .widgets
+                    .get_layer(layer)
+                    .find(|widget| widget.sense.is_focusable() && widget.id != popup.with("move"))
+                    .map(|widget| widget.id)
+            })
+        });
+    let open = key_menu.finish(&ctx, layer, false, first, id);
+    response.widget_info(|| {
+        let mut info =
+            egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, ui.is_enabled(), label);
+        info.current_text_value = Some(value.to_owned());
+        info
+    });
+    ctx.accesskit_node_builder(id, |node| node.set_expanded(open));
+    response
+}
+
+/// One choice in a [`dropdown`]'s list, given its `response`: it scrolls
+/// into view when the keys reach it, marks the current choice for the keys
+/// to start on, and closes the list once taken, from the keyboard as from
+/// the pointer. Returns whether it was taken.
+pub fn dropdown_choice(ui: &Ui, response: &egui::Response, current: bool) -> bool {
+    theme::reveal_focus(response);
+    if current {
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(current_choice_id(), response.id));
+    }
+    let taken = response.clicked();
+    if taken {
+        // A pointer click closes the list on its own; Enter does not.
+        ui.close();
+    }
+    taken
+}
+
+/// Whether keyboard focus is on a [`dropdown`] drawn this frame or the last:
+/// Alt+Down then opens it rather than switching chats.
+pub fn dropdown_focused(ctx: &egui::Context) -> bool {
+    let frame = ctx.cumulative_frame_nr();
+    ctx.memory(|memory| memory.focused()).is_some_and(|id| {
+        ctx.data(|data| data.get_temp::<u64>(dropdown_mark_id(id)))
+            .is_some_and(|drawn| drawn + 1 >= frame)
+    })
 }
 
 pub fn paint_vertical_gradient(ui: &Ui, rect: Rect, top: Color32, bottom: Color32) {
@@ -2472,7 +2643,7 @@ mod tests {
         crate::theme::install(&ctx);
         let mut value = on;
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            switch(ui, &crate::theme::Palette::light(), &mut value);
+            switch(ui, &crate::theme::Palette::light(), &mut value, "Fixture");
         });
         output.textures_delta.clear();
         let mut knob = 0.0_f32;

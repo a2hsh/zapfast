@@ -2739,6 +2739,9 @@ pub enum Action {
     FocusSettingsSearch,
     /// Filters the Settings page to the rows matching this text.
     SearchSettings(String),
+    /// Escape in a filtered Settings page: empties the search, says so, and
+    /// leaves focus in the search field.
+    ClearSettingsSearch,
     FocusComposer,
     SetShortcutHints(bool),
     DismissChatLockHint,

@@ -26575,3 +26575,387 @@ mod rail_tests {
         assert!(rail_rect(&ctx).is_some() && list_header(&ctx).is_some());
     }
 }
+
+/// The Settings page with a screen reader and the keyboard: what each
+/// control says, and where focus goes.
+#[cfg(test)]
+mod settings_access_tests {
+    use super::tests::{app, press_key, render};
+    use super::*;
+    use egui::accesskit::{Action, ActionRequest, Node, NodeId, Role, Toggled, TreeId, TreeUpdate};
+
+    fn frame(app: &mut App, ctx: &egui::Context, events: Vec<egui::Event>) -> TreeUpdate {
+        ctx.enable_accesskit();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 780.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                let ctx = ui.ctx().clone();
+                app.background_frame(&ctx);
+                app.frame_ui(ui);
+            },
+        );
+        output.textures_delta.clear();
+        output
+            .platform_output
+            .accesskit_update
+            .expect("accessibility tree")
+    }
+
+    fn tree(app: &mut App, ctx: &egui::Context) -> TreeUpdate {
+        frame(app, ctx, Vec::new())
+    }
+
+    fn find(tree: &TreeUpdate, role: Role, label: &str) -> Option<(NodeId, Node)> {
+        tree.nodes
+            .iter()
+            .find(|(_, node)| node.role() == role && node.label() == Some(label))
+            .map(|(id, node)| (*id, node.clone()))
+    }
+
+    fn node(tree: &TreeUpdate, id: NodeId) -> Node {
+        tree.nodes
+            .iter()
+            .find(|(found, _)| *found == id)
+            .map(|(_, node)| node.clone())
+            .expect("the node is in the tree")
+    }
+
+    fn focused(tree: &TreeUpdate) -> Node {
+        node(tree, tree.focus)
+    }
+
+    /// Every node under `id`, at any depth.
+    fn descendants(tree: &TreeUpdate, id: NodeId) -> Vec<Node> {
+        let mut found = Vec::new();
+        let mut stack = node(tree, id).children().to_vec();
+        while let Some(child) = stack.pop() {
+            let child = node(tree, child);
+            stack.extend_from_slice(child.children());
+            found.push(child);
+        }
+        found
+    }
+
+    /// Focus moved to `id` as a screen reader moves it, then frames to settle.
+    fn focus(app: &mut App, ctx: &egui::Context, id: NodeId) {
+        frame(
+            app,
+            ctx,
+            vec![egui::Event::AccessKitActionRequest(ActionRequest {
+                action: Action::Focus,
+                target_tree: TreeId::ROOT,
+                target_node: id,
+                data: None,
+            })],
+        );
+        render(app, ctx);
+    }
+
+    fn settings(flag: &str) -> (App, egui::Context) {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        apply_flags(&mut app, Some(flag));
+        render(&mut app, &ctx);
+        (app, ctx)
+    }
+
+    fn spoke(app: &App, text: &str) -> bool {
+        app.announcer
+            .spoken()
+            .iter()
+            .any(|spoken| spoken.trim_end_matches('\u{200B}') == text)
+    }
+
+    #[test]
+    fn a_switch_reads_its_name_state_and_description_and_space_flips_it() {
+        let (mut app, ctx) = settings("settings");
+        assert!(app.settings.enter_sends);
+        let (id, switch) =
+            find(&tree(&mut app, &ctx), Role::CheckBox, "Enter sends").expect("the switch");
+        assert_eq!(switch.toggled(), Some(Toggled::True));
+        // The description names the keys as the platform does: Command
+        // on macOS.
+        let description = crate::ui::keys::label("When off, Ctrl+Enter sends.");
+        assert_eq!(switch.description(), Some(description.as_str()));
+        focus(&mut app, &ctx, id);
+        press_key(&mut app, &ctx, egui::Key::Space, egui::Modifiers::NONE);
+        assert!(!app.settings.enter_sends);
+        let tree = tree(&mut app, &ctx);
+        assert_eq!(tree.focus, id);
+        assert_eq!(focused(&tree).toggled(), Some(Toggled::False));
+    }
+
+    #[test]
+    fn a_dropdown_is_a_combo_box_named_by_its_row_with_its_value() {
+        let (mut app, ctx) = settings("settings");
+        let tree = tree(&mut app, &ctx);
+        for (label, value) in [("Font", "System"), ("Language", "Auto"), ("Theme", "Dark")] {
+            let (_, combo) = find(&tree, Role::ComboBox, label)
+                .unwrap_or_else(|| panic!("a combo box named {label}"));
+            assert_eq!(combo.value(), Some(value), "{label}");
+            assert_eq!(combo.is_expanded(), Some(false), "{label}");
+        }
+    }
+
+    /// The notification limit (#406) is one of these drop-downs too.
+    #[test]
+    fn the_notification_limit_is_a_named_dropdown() {
+        let (mut app, ctx) = settings("settings");
+        app.account_mut().settings.notifications = true;
+        render(&mut app, &ctx);
+        let tree = tree(&mut app, &ctx);
+        let label = "Limit repeat notifications";
+        let (_, combo) = find(&tree, Role::ComboBox, label)
+            .unwrap_or_else(|| panic!("a combo box named {label}"));
+        let value = app.account().settings.limit_notifications.label(app.locale);
+        assert_eq!(combo.value(), Some(value.as_ref()));
+        assert_eq!(combo.is_expanded(), Some(false));
+    }
+
+    #[test]
+    fn a_dropdown_opened_from_the_keys_chooses_and_returns_focus() {
+        use crate::settings::FontChoice;
+        let (mut app, ctx) = settings("settings");
+        let (id, _) = find(&tree(&mut app, &ctx), Role::ComboBox, "Font").expect("Font");
+        focus(&mut app, &ctx, id);
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        let tree_open = tree(&mut app, &ctx);
+        assert_eq!(
+            focused(&tree_open).label(),
+            Some("System"),
+            "the list opens on the current choice"
+        );
+        assert_eq!(node(&tree_open, id).is_expanded(), Some(true));
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        assert_eq!(focused(&tree(&mut app, &ctx)).label(), Some("Inter"));
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(app.settings.font, FontChoice::Inter);
+        let chosen = tree(&mut app, &ctx);
+        assert_eq!(chosen.focus, id, "focus is back on the drop-down");
+        assert_eq!(focused(&chosen).value(), Some("Inter"));
+        assert_eq!(focused(&chosen).is_expanded(), Some(false));
+
+        // Alt+Down opens it too; Escape closes the list and changes nothing.
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::ALT);
+        assert_eq!(focused(&tree(&mut app, &ctx)).label(), Some("Inter"));
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        assert_eq!(
+            focused(&tree(&mut app, &ctx)).label(),
+            Some("System"),
+            "Down wraps from the last choice to the first"
+        );
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert_eq!(app.settings.font, FontChoice::Inter);
+        assert_eq!(
+            app.page,
+            crate::model::Page::Settings,
+            "Escape only closes the list"
+        );
+        let closed = tree(&mut app, &ctx);
+        assert_eq!(closed.focus, id);
+        assert_eq!(focused(&closed).is_expanded(), Some(false));
+    }
+
+    #[test]
+    fn each_settings_section_is_a_named_group_holding_its_controls() {
+        let (mut app, ctx) = settings("settings");
+        let tree = tree(&mut app, &ctx);
+        let (chats, _) = find(&tree, Role::Group, "Chats").expect("a Chats group");
+        let (appearance, _) = find(&tree, Role::Group, "Appearance").expect("an Appearance group");
+        let holds = |group: NodeId, role: Role, label: &str| {
+            descendants(&tree, group)
+                .iter()
+                .any(|node| node.role() == role && node.label() == Some(label))
+        };
+        assert!(holds(chats, Role::CheckBox, "Enter sends"));
+        assert!(holds(appearance, Role::ComboBox, "Font"));
+        assert!(!holds(appearance, Role::CheckBox, "Enter sends"));
+    }
+
+    #[test]
+    fn down_from_the_settings_search_reaches_the_first_control() {
+        let (mut app, ctx) = settings("settings");
+        press_key(&mut app, &ctx, egui::Key::F, egui::Modifiers::COMMAND);
+        let search = egui::Id::new(crate::ui::settings::SEARCH_ID);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(search));
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        let tree = tree(&mut app, &ctx);
+        let first = focused(&tree);
+        assert_eq!(first.role(), Role::ComboBox);
+        assert_eq!(first.label(), Some("Theme"));
+    }
+
+    /// Text and Down typed in one frame: Down reaches the first setting the
+    /// new text leaves, as when Down comes after it.
+    #[test]
+    fn down_typed_with_the_search_reaches_a_setting_it_leaves() {
+        let search = egui::Id::new(crate::ui::settings::SEARCH_ID);
+        let down = || egui::Event::Key {
+            key: egui::Key::ArrowDown,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let typed = || egui::Event::Text("sound".into());
+        // The events in one frame each, or all in one frame.
+        let focus_after = |frames: Vec<Vec<egui::Event>>| {
+            let (mut app, ctx) = settings("settings");
+            press_key(&mut app, &ctx, egui::Key::F, egui::Modifiers::COMMAND);
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(search));
+            for events in frames {
+                frame(&mut app, &ctx, events);
+            }
+            assert_eq!(app.settings_search, "sound");
+            let tree = tree(&mut app, &ctx);
+            focused(&tree).label().map(str::to_owned)
+        };
+        let apart = focus_after(vec![vec![typed()], vec![down()]]);
+        assert_ne!(
+            apart.as_deref(),
+            Some("Theme"),
+            "a setting the search leaves"
+        );
+        assert_eq!(focus_after(vec![vec![typed(), down()]]), apart);
+    }
+
+    /// A remembered widget not drawn yet is waited for frame by frame, and
+    /// each of those frames is asked for: an idle window draws none
+    /// otherwise, and focus would never come back.
+    #[test]
+    fn a_focus_return_waiting_for_its_widget_asks_for_the_next_frame() {
+        // What `ui::return_focus` asked for in the frame before the last
+        // one, by where it asked from: the page asks for frames of its own
+        // in tests too.
+        let asked = |ctx: &egui::Context| {
+            ctx.repaint_causes()
+                .iter()
+                .any(|cause| std::path::Path::new(cause.file).ends_with("src/ui/mod.rs"))
+        };
+        let (mut app, ctx) = settings("settings");
+        for _ in 0..2 {
+            frame(&mut app, &ctx, Vec::new());
+        }
+        assert!(!asked(&ctx), "{:?}", ctx.repaint_causes());
+        app.return_focus = Some((egui::Id::new("drawn later"), 3));
+        for _ in 0..2 {
+            frame(&mut app, &ctx, Vec::new());
+        }
+        assert_eq!(app.return_focus, Some((egui::Id::new("drawn later"), 1)));
+        assert!(asked(&ctx), "the next frame is asked for");
+    }
+
+    #[test]
+    fn escape_clears_the_settings_search_says_so_and_keeps_the_field() {
+        let (mut app, ctx) = settings("settings-search=sound");
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(app.settings_search.is_empty());
+        assert_eq!(app.page, crate::model::Page::Settings);
+        render(&mut app, &ctx);
+        assert!(
+            spoke(&app, "Search cleared"),
+            "{:?}",
+            app.announcer.spoken()
+        );
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(egui::Id::new(crate::ui::settings::SEARCH_ID))
+        );
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert_eq!(app.page, crate::model::Page::Chats);
+    }
+
+    #[test]
+    fn ctrl_comma_focuses_the_settings_search_and_closing_returns_focus() {
+        let (mut app, ctx) = settings("chat");
+        let composer = egui::Id::new("composer-text");
+        ctx.memory_mut(|memory| memory.request_focus(composer));
+        render(&mut app, &ctx);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(composer));
+        press_key(&mut app, &ctx, egui::Key::Comma, egui::Modifiers::COMMAND);
+        assert_eq!(app.page, crate::model::Page::Settings);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(egui::Id::new(crate::ui::settings::SEARCH_ID))
+        );
+        press_key(&mut app, &ctx, egui::Key::Comma, egui::Modifiers::COMMAND);
+        assert_eq!(app.page, crate::model::Page::Chats);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(composer));
+    }
+
+    /// From the Calls page, Settings start in their search as from the
+    /// chats. Closing them goes to the chats, which do not draw the call
+    /// history that had focus: the message field takes it instead.
+    #[test]
+    fn settings_from_the_calls_page_start_in_the_search_and_end_in_the_chat() {
+        let (mut app, ctx) = settings("calls-chat");
+        assert_eq!(app.page, crate::model::Page::Calls);
+        let history = crate::ui::calls::history_list_id();
+        ctx.memory_mut(|memory| memory.request_focus(history));
+        render(&mut app, &ctx);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(history));
+        press_key(&mut app, &ctx, egui::Key::Comma, egui::Modifiers::COMMAND);
+        assert_eq!(app.page, crate::model::Page::Settings);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(egui::Id::new(crate::ui::settings::SEARCH_ID))
+        );
+        press_key(&mut app, &ctx, egui::Key::Comma, egui::Modifiers::COMMAND);
+        render(&mut app, &ctx);
+        assert_eq!(app.page, crate::model::Page::Chats);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(egui::Id::new("composer-text"))
+        );
+    }
+
+    /// The app lock form says why it refused the password each time it
+    /// does, the same reason again too.
+    #[test]
+    fn the_lock_form_says_every_refusal() {
+        let (mut app, ctx) = settings("app-lock-setup");
+        let reason = format!(
+            "The password needs at least {} characters.",
+            crate::app_lock::MIN_PASSWORD_CHARS
+        );
+        assert!(spoke(&app, &reason), "{:?}", app.announcer.spoken());
+        for attempt in 0..3 {
+            let before: Vec<String> = app.announcer.spoken().map(str::to_owned).into();
+            app.actions.push(crate::model::Action::SubmitAppLockForm);
+            render(&mut app, &ctx);
+            let after: Vec<String> = app.announcer.spoken().map(str::to_owned).into();
+            assert_ne!(after, before, "attempt {attempt}: said again");
+            assert!(spoke(&app, &reason), "attempt {attempt}: {after:?}");
+        }
+    }
+
+    /// The rail's gear as a screen reader names it: with Command on macOS.
+    fn gear_label() -> String {
+        crate::ui::keys::label("Settings (Ctrl+,)")
+    }
+
+    #[test]
+    fn the_gear_opens_settings_on_the_search_and_escape_returns_to_it() {
+        let (mut app, ctx) = settings("chat");
+        let (gear, _) = find(&tree(&mut app, &ctx), Role::Button, &gear_label()).expect("the gear");
+        focus(&mut app, &ctx, gear);
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(app.page, crate::model::Page::Settings);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(egui::Id::new(crate::ui::settings::SEARCH_ID))
+        );
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert_eq!(app.page, crate::model::Page::Chats);
+        let tree = tree(&mut app, &ctx);
+        assert_eq!(tree.focus, gear, "focus is back on the gear");
+    }
+}
