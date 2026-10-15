@@ -982,6 +982,21 @@ pub struct MediaItem {
     pub path: Option<std::path::PathBuf>,
     /// The stored thumbnail, drawn instead of decoding the file.
     pub thumbnail: Option<Vec<u8>>,
+    /// Who sent it and its caption, which the viewer says for it.
+    pub about: MediaAbout,
+}
+
+/// Who sent an album item and its caption, as the viewer names the item:
+/// the archive's row carries them for a message the transcript has not
+/// loaded.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MediaAbout {
+    pub from_me: bool,
+    /// The sender's id, and the name they gave, for `App::display_name_or`.
+    pub sender: String,
+    pub sender_name: Option<String>,
+    /// The photo's or video's caption, as written.
+    pub caption: Option<String>,
 }
 
 impl MediaItem {
@@ -1008,6 +1023,15 @@ impl MediaItem {
             video,
             path,
             thumbnail: thumbnail.map(<[u8]>::to_vec),
+            about: MediaAbout {
+                caption: match content {
+                    Content::Image { caption, .. } | Content::Video { caption, .. } => {
+                        caption.clone()
+                    }
+                    _ => None,
+                },
+                ..MediaAbout::default()
+            },
         };
         if let Some(kind) = content.gallery_kind() {
             let path = content
@@ -1052,13 +1076,19 @@ impl MediaItem {
 
     /// The album items of a message already in memory, checking its files.
     pub fn of_message(message: &Message) -> Vec<MediaItem> {
-        Self::of_content(
+        let mut items = Self::of_content(
             &message.id,
             message.timestamp,
             &message.content,
             message.thumbnail.as_deref(),
             Path::is_file,
-        )
+        );
+        for item in &mut items {
+            item.about.from_me = message.from_me;
+            item.about.sender.clone_from(&message.sender);
+            item.about.sender_name.clone_from(&message.sender_name);
+        }
+        items
     }
 }
 

@@ -4991,6 +4991,73 @@ impl App {
         });
     }
 
+    /// The viewer's name for item `index` of `album`, from `chat`: "Photo 3
+    /// of 12", who sent it, when, and its caption, as `a11y::ViewerItem`
+    /// says them. A message the transcript holds names its mentions too.
+    pub(crate) fn viewer_item_label(
+        &self,
+        chat: &str,
+        album: &[crate::model::MediaItem],
+        index: usize,
+    ) -> Option<String> {
+        let item = album.get(index)?;
+        let about = &item.about;
+        let loaded = self
+            .conversations
+            .get(chat)
+            .and_then(|conversation| conversation.message(&item.id));
+        let sender = if about.from_me {
+            crate::i18n::gettext(self.locale, "You").into_owned()
+        } else if about.sender.is_empty() {
+            String::new()
+        } else {
+            self.display_name_or(&about.sender, about.sender_name.as_deref())
+        };
+        let mentions: Vec<crate::markup::Mention> = loaded
+            .map(|message| {
+                message
+                    .mentions
+                    .iter()
+                    .map(|mention| crate::markup::Mention {
+                        user: mention.user.clone(),
+                        name: self.mention_name(&mention.id),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let caption = about
+            .caption
+            .as_deref()
+            .map(|caption| crate::markup::plain(caption, &mentions))
+            .unwrap_or_default();
+        Some(crate::a11y::viewer_item_label(
+            self.locale,
+            &crate::a11y::ViewerItem {
+                video: item.video,
+                position: index + 1,
+                total: album.len(),
+                sender: &sender,
+                day: &crate::util::day_label(self.locale, item.timestamp),
+                time: &crate::util::clock(item.timestamp),
+                caption: &caption,
+            },
+        ))
+    }
+
+    /// Says the viewer's item, as the arrows or the strip moved to it, or as
+    /// the arrows found the end of the album.
+    fn say_viewer_item(&mut self) {
+        let Some(preview) = self.image_preview.as_ref() else {
+            return;
+        };
+        let Some(index) = preview.position(&self.viewer_media) else {
+            return;
+        };
+        if let Some(text) = self.viewer_item_label(preview.chat(), &self.viewer_media, index) {
+            self.announcer.say(crate::announcer::Category::Item, text);
+        }
+    }
+
     /// Drops a message from the viewer's album and from its download
     /// state, for a message deleted while the viewer is open.
     fn forget_viewer_item(&mut self, chat: &str, id: &str) {
@@ -5051,12 +5118,22 @@ impl App {
                         preview.show_item(Some(path.clone()), id.to_owned());
                     }
                     self.viewer_media_state.remove(id);
+                    // Nothing is said: the picture takes the download button's
+                    // focus as it is drawn, and a clip's frame keeps its own.
+                    self.take_download_heard(chat, id, None);
                 }
                 Err(error) => {
-                    self.viewer_media_state.insert(
-                        id.to_owned(),
-                        MediaState::Failed(download_notice(error.clone())),
-                    );
+                    let failed = MediaState::Failed(download_notice(error.clone()));
+                    // Asked for in the viewer from the keys or with a screen
+                    // reader: why it failed is said, as for Space or Enter in
+                    // the list. The transcript's copy below then says nothing
+                    // more.
+                    if self.take_download_heard(chat, id, None)
+                        && let Some(said) = crate::a11y::download_state(self.locale, &failed)
+                    {
+                        self.announcer.say(crate::announcer::Category::Error, said);
+                    }
+                    self.viewer_media_state.insert(id.to_owned(), failed);
                 }
             }
         }
@@ -6888,6 +6965,8 @@ impl App {
                 if let Some(preview) = &mut self.image_preview {
                     preview.show_album_item(path, item.id.clone(), item.card);
                 }
+                // Its tile keeps focus: the item it shows now is said.
+                self.say_viewer_item();
             }
             Action::ViewerStep(step) => {
                 let Some(preview) = self.image_preview.as_ref() else {
@@ -6905,11 +6984,13 @@ impl App {
                 let Some(index) = preview.position(&self.viewer_media) else {
                     return;
                 };
-                // Stepping stops at either end of the album, as it always has.
+                // Stepping stops at either end of the album, as it always has,
+                // and says the end item again, as the message list's keys do.
                 let Some(next) = index
                     .checked_add_signed(isize::from(step))
                     .filter(|next| *next < self.viewer_media.len())
                 else {
+                    self.say_viewer_item();
                     return;
                 };
                 let item = self.viewer_media[next].clone();
@@ -6923,6 +7004,8 @@ impl App {
                 if let Some(preview) = &mut self.image_preview {
                     preview.show_album_item(path, item.id.clone(), item.card);
                 }
+                // Focus stays where it was: the new item is said.
+                self.say_viewer_item();
             }
             Action::OpenFile(path) => {
                 if crate::safety::can_open_attachment(&path) && path.is_file() {
@@ -13929,6 +14012,7 @@ mod tests {
                 video: false,
                 path: Some(PathBuf::from(format!("/fixture/{index}.png"))),
                 thumbnail: None,
+                about: Default::default(),
             })
             .collect();
         app.viewer_media_chat = Some(chat);
@@ -14317,6 +14401,7 @@ mod tests {
             video: false,
             path: Some(PathBuf::from(format!("/fixture/{id}.png"))),
             thumbnail: None,
+            about: Default::default(),
         };
         app.viewer_media = vec![item("m0"), item("m1")];
         app.viewer_media_chat = Some(chat.into());

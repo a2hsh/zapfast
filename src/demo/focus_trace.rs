@@ -730,6 +730,8 @@ fn the_sticker_pack_and_the_expanded_video_give_focus_back() {
         let mut app = app();
         if overlay == "video" {
             super::video_sample(&mut app, None);
+            // The clip plays as the viewer opens: never through the speakers.
+            app.video.silence();
         } else if overlay == "sticker view" {
             super::sample_files(&app);
         } else {
@@ -1449,4 +1451,38 @@ fn a_dialog_closed_in_another_chat_leaves_focus_to_it() {
         "the new chat's message field\n{}",
         trace.dump(from)
     );
+}
+
+/// A clip opened in the viewer from the keys takes focus on its frame, so
+/// Space plays or pauses it, as it always did, rather than pressing Close,
+/// the first control, and closing the viewer.
+#[test]
+fn a_clip_opened_in_the_viewer_takes_focus_on_its_frame() {
+    let mut app = app();
+    super::video_sample(&mut app, None);
+    // Nothing here may make a sound.
+    app.video.silence();
+    let mut trace = Trace::new(app);
+    focus_stop(&mut trace, Stop::Messages);
+    let from = trace.mark();
+    trace.action += 1;
+    let path = trace.app.dirs.media_cache_dir().join("demo-video.mp4");
+    trace.app.actions.push(Action::ExpandVideo {
+        message: "demo-video".into(),
+        path,
+    });
+    trace.settle("open the clip", 4);
+    trace.assert_clean(from, "the clip opened");
+    assert_eq!(
+        trace.last().name,
+        "Button \"Play or pause the video\"",
+        "{}",
+        trace.dump(from)
+    );
+    tap(&mut trace, "Space", egui::Key::Space, egui::Modifiers::NONE);
+    assert!(
+        trace.app.image_preview.is_some(),
+        "Space played or paused, the viewer stays"
+    );
+    trace.app.video.stop();
 }

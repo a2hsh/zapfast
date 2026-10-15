@@ -7829,6 +7829,15 @@ mod tests {
     }
 
     fn app_on_attachment(content: Content) -> OnAttachment {
+        app_on_attachment_with(content, |_| {})
+    }
+
+    /// `app_on_attachment`, with `setup` run on the context before the first
+    /// frame, as an image loader must be to answer every load of a picture.
+    fn app_on_attachment_with(
+        content: Content,
+        setup: impl FnOnce(&egui::Context),
+    ) -> OnAttachment {
         let root = tempfile::Builder::new()
             .prefix("zapfast-demo-")
             .tempdir()
@@ -7838,6 +7847,7 @@ mod tests {
         populate(&mut app);
         let ctx = egui::Context::default();
         app.attach(&ctx);
+        setup(&ctx);
         app.backend.record_demo_commands();
         app.settings.auto_download = false;
         render(&mut app, &ctx);
@@ -8462,6 +8472,460 @@ mod tests {
         assert_eq!(current_message(&on), "key-fixture", "still waiting");
         deliver(&mut on, vec![target]);
         assert_eq!(current_message(&on), "not-loaded");
+    }
+
+    /// How the viewer's picture decodes in a test.
+    #[derive(Clone, Copy, Debug)]
+    enum Decode {
+        /// At once, so the first frame draws it.
+        Ready,
+        /// Never: it is still decoding as long as the test runs.
+        Held,
+        /// It cannot be decoded.
+        Failed,
+    }
+
+    /// Answers every load of one picture at once, never from a decoding
+    /// thread, so a test sees the state it asked for whatever the machine's
+    /// speed. Every other image goes to the usual loaders.
+    struct OnePicture {
+        uri: String,
+        decode: std::sync::Arc<std::sync::Mutex<Decode>>,
+    }
+
+    impl egui::load::ImageLoader for OnePicture {
+        fn id(&self) -> &str {
+            "zapfast::demo::tests::OnePicture"
+        }
+
+        fn load(
+            &self,
+            _ctx: &egui::Context,
+            uri: &str,
+            _size_hint: egui::load::SizeHint,
+        ) -> egui::load::ImageLoadResult {
+            if uri != self.uri {
+                return Err(egui::load::LoadError::NotSupported);
+            }
+            match *self
+                .decode
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+            {
+                Decode::Ready => Ok(egui::load::ImagePoll::Ready {
+                    image: std::sync::Arc::new(egui::ColorImage::filled(
+                        [800, 600],
+                        egui::Color32::from_rgb(20, 40, 60),
+                    )),
+                }),
+                Decode::Held => Ok(egui::load::ImagePoll::Pending { size: None }),
+                Decode::Failed => Err(egui::load::LoadError::Loading("Fixture failure".into())),
+            }
+        }
+
+        fn forget(&self, _uri: &str) {}
+
+        fn forget_all(&self) {}
+
+        fn byte_size(&self) -> usize {
+            0
+        }
+    }
+
+    /// A photo with its file, opened in the viewer with Space, with a
+    /// screen reader attached, and the viewer's album: `older` before it.
+    /// The photo decodes as `decode` says, from the first frame on; one that
+    /// fails does so once the viewer is open, as Space opens only a picture
+    /// the message list could show.
+    fn viewer_on_album(older: crate::model::MediaItem, decode: Decode) -> OnAttachment {
+        let photo = sample_files(&app()).0;
+        let uri = crate::util::image_uri(&photo);
+        let mut media = media("image/jpeg", 120_000, Some(800), Some(600));
+        media.path = Some(photo);
+        let content = Content::Image {
+            motion: None,
+            caption: Some("On the moon".into()),
+            media,
+        };
+        let state = std::sync::Arc::new(std::sync::Mutex::new(match decode {
+            Decode::Failed => Decode::Held,
+            decode => decode,
+        }));
+        let loader = OnePicture {
+            uri,
+            decode: std::sync::Arc::clone(&state),
+        };
+        let mut on = app_on_attachment_with(content, |ctx| {
+            ctx.add_image_loader(std::sync::Arc::new(loader));
+        });
+        on.ctx.enable_accesskit();
+        on.space();
+        assert!(on.app.image_preview.is_some(), "Space opened the viewer");
+        *state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = decode;
+        let fixture = on.app.conversations[&on.chat]
+            .message("key-fixture")
+            .unwrap()
+            .clone();
+        let mut items = vec![older];
+        items.extend(crate::model::MediaItem::of_message(&fixture));
+        on.events
+            .send(crate::backend::Event::ChatMedia {
+                chat: on.chat.clone(),
+                around: Some("key-fixture".into()),
+                items,
+            })
+            .unwrap();
+        render(&mut on.app, &on.ctx);
+        on
+    }
+
+    /// An album item before the fixture, sent by us or by the contact.
+    fn older_item(on_chat: &str, video: bool, from_me: bool) -> crate::model::MediaItem {
+        crate::model::MediaItem {
+            id: "older".into(),
+            card: None,
+            timestamp: 1_700_000_000,
+            video,
+            path: None,
+            thumbnail: None,
+            about: crate::model::MediaAbout {
+                from_me,
+                sender: if from_me { ME.into() } else { on_chat.into() },
+                sender_name: None,
+                caption: None,
+            },
+        }
+    }
+
+    /// One frame's tree: the label of what has focus, and every node's
+    /// label and role.
+    fn viewer_tree(on: &mut OnAttachment) -> (String, Vec<(String, egui::accesskit::Role)>) {
+        let mut output = on.ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 780.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                let ctx = ui.ctx().clone();
+                on.app.background_frame(&ctx);
+                on.app.frame_ui(ui);
+            },
+        );
+        output.textures_delta.clear();
+        let tree = output.platform_output.accesskit_update.unwrap();
+        let label = |node: &egui::accesskit::Node| node.label().unwrap_or_default().to_owned();
+        let focused = tree
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == tree.focus)
+            .map(|(_, node)| label(node))
+            .unwrap_or_default();
+        let nodes = tree
+            .nodes
+            .iter()
+            .map(|(_, node)| (label(node), node.role()))
+            .collect();
+        (focused, nodes)
+    }
+
+    /// The viewer names its picture as the arrows say each item: "Photo 2
+    /// of 2", who sent it, the day, the time and its caption, and the strip
+    /// names each tile with its place in the album. The arrows say the item
+    /// they step to, and at an end of the album, that end item again.
+    #[test]
+    fn the_viewer_names_and_says_the_item_the_arrows_reach() {
+        let mut on = viewer_on_album(older_item("", true, true), Decode::Ready);
+        let picture = fixture_picture_name(&on);
+        let (_, nodes) = viewer_tree(&mut on);
+        assert_viewer_names(&picture, &nodes);
+        let older = format!("Video 1 of 2, You, {}", viewer_when(&on, 1_700_000_000));
+        for step in ["to the older item", "at the start of the album"] {
+            on.app.announcer = Default::default();
+            press_key(
+                &mut on.app,
+                &on.ctx,
+                egui::Key::ArrowLeft,
+                egui::Modifiers::NONE,
+            );
+            assert_eq!(on.app.image_preview.as_ref().unwrap().message(), "older");
+            assert!(
+                spoke(&on.app, &older),
+                "{step}: {older}\n{:?}",
+                on.app.announcer.spoken()
+            );
+        }
+        on.app.announcer = Default::default();
+        press_key(
+            &mut on.app,
+            &on.ctx,
+            egui::Key::ArrowRight,
+            egui::Modifiers::NONE,
+        );
+        assert!(
+            spoke(&on.app, &picture),
+            "{picture}\n{:?}",
+            on.app.announcer.spoken()
+        );
+    }
+
+    /// A clip's frame, the control that plays it, carries the item's name
+    /// before what it does, as a photo's picture carries it: "Video 1 of 2",
+    /// who sent it, the day and the time, then "Play or pause the video".
+    #[test]
+    fn the_viewer_names_its_video_control_after_the_item() {
+        let mut older = older_item("", true, true);
+        older.path = Some(std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/video/sample.mp4"
+        )));
+        let mut on = viewer_on_album(older, Decode::Ready);
+        // Nothing in the viewer may make a sound.
+        on.app.video.silence();
+        press_key(
+            &mut on.app,
+            &on.ctx,
+            egui::Key::ArrowLeft,
+            egui::Modifiers::NONE,
+        );
+        assert_eq!(on.app.image_preview.as_ref().unwrap().message(), "older");
+        let frame = crate::ui::image_preview::video_id();
+        on.ctx.memory_mut(|memory| memory.request_focus(frame));
+        render(&mut on.app, &on.ctx);
+        let older = format!("Video 1 of 2, You, {}", viewer_when(&on, 1_700_000_000));
+        assert_eq!(
+            viewer_tree(&mut on).0,
+            format!("{older}, Play or pause the video")
+        );
+        assert!(on.app.video.message().is_none(), "nothing plays");
+    }
+
+    /// The picture has its name before it is decoded, and when it cannot
+    /// be: a screen reader hears the item at once, not silence until the
+    /// decoder is done. The strip's tiles never wait for a decoder.
+    #[test]
+    fn the_viewer_names_its_item_before_the_picture_is_decoded() {
+        for decode in [Decode::Held, Decode::Failed] {
+            let mut on = viewer_on_album(older_item("", true, true), decode);
+            let picture = fixture_picture_name(&on);
+            let uri =
+                crate::util::image_uri(on.app.image_preview.as_ref().unwrap().path().unwrap());
+            // Frame after frame, not only on the first.
+            for _ in 0..3 {
+                let (_, nodes) = viewer_tree(&mut on);
+                assert!(
+                    !matches!(
+                        on.ctx.try_load_texture(
+                            &uri,
+                            egui::TextureOptions::default(),
+                            egui::SizeHint::default(),
+                        ),
+                        Ok(egui::load::TexturePoll::Ready { .. })
+                    ),
+                    "{decode:?}: the picture is not there to draw"
+                );
+                assert_viewer_names(&picture, &nodes);
+            }
+        }
+    }
+
+    /// "Photo 2 of 2", the sender, day and time, and the caption: the
+    /// fixture's name in the viewer.
+    fn fixture_picture_name(on: &OnAttachment) -> String {
+        let fixture = on.app.conversations[&on.chat]
+            .message("key-fixture")
+            .unwrap();
+        let contact = on.app.display_name_or(&on.chat, None);
+        format!(
+            "Photo 2 of 2, {contact}, {}, On the moon",
+            viewer_when(on, fixture.timestamp)
+        )
+    }
+
+    /// The day and the time an item was sent, as the viewer says them.
+    fn viewer_when(on: &OnAttachment, timestamp: i64) -> String {
+        format!(
+            "{}, {}",
+            crate::util::day_label(on.app.locale, timestamp),
+            crate::util::clock(timestamp)
+        )
+    }
+
+    /// The picture is named `picture`, and the strip's tiles their places.
+    fn assert_viewer_names(picture: &str, nodes: &[(String, egui::accesskit::Role)]) {
+        assert!(
+            nodes.contains(&(picture.to_owned(), egui::accesskit::Role::Image)),
+            "{picture}\n{nodes:?}"
+        );
+        for tile in ["Video 1 of 2", "Photo 2 of 2"] {
+            assert!(
+                nodes.contains(&(tile.to_owned(), egui::accesskit::Role::Button)),
+                "{tile}\n{nodes:?}"
+            );
+        }
+    }
+
+    /// The viewer's Download keeps focus while the file comes and says why
+    /// it failed, for a photo and for a clip. A photo's button gives focus to
+    /// the picture once it is there; a clip's frame keeps it and offers to
+    /// play. Before, the photo's button vanished under focus and a failure
+    /// was only painted.
+    #[test]
+    fn the_viewers_download_keeps_focus_and_says_why_it_failed() {
+        let chat = app().open_chat.clone().unwrap();
+        for video in [false, true] {
+            let mut on = viewer_on_album(older_item(&chat, video, false), Decode::Ready);
+            // Nothing in the viewer may make a sound.
+            on.app.video.silence();
+            press_key(
+                &mut on.app,
+                &on.ctx,
+                egui::Key::ArrowLeft,
+                egui::Modifiers::NONE,
+            );
+            assert_eq!(on.app.image_preview.as_ref().unwrap().message(), "older");
+            let button = if video {
+                crate::ui::image_preview::video_id()
+            } else {
+                egui::Id::new("viewer-pending-download")
+            };
+            on.ctx.memory_mut(|memory| memory.request_focus(button));
+            render(&mut on.app, &on.ctx);
+            assert_eq!(viewer_tree(&mut on).0, "Download", "video: {video}");
+            let download = |on: &mut OnAttachment| {
+                on.space();
+                assert_eq!(
+                    on.app.download_heard,
+                    Some((on.chat.clone(), "older".into(), None)),
+                    "video: {video}: asked for from the keys"
+                );
+                assert_eq!(
+                    on.ctx.memory(|memory| memory.focused()),
+                    Some(button),
+                    "video: {video}: the button keeps focus while it downloads"
+                );
+                assert_eq!(viewer_tree(on).0, "Download, downloading", "video: {video}");
+            };
+            download(&mut on);
+            on.app.announcer = Default::default();
+            let result = |on: &mut OnAttachment, result| {
+                on.events
+                    .send(crate::backend::Event::Media {
+                        card: None,
+                        chat: on.chat.clone(),
+                        message: "older".into(),
+                        result,
+                    })
+                    .unwrap();
+                render(&mut on.app, &on.ctx);
+            };
+            result(&mut on, Err("Fixture failure".into()));
+            assert!(
+                spoke(&on.app, "Fixture failure"),
+                "video: {video}: {:?}",
+                on.app.announcer.spoken()
+            );
+            assert_eq!(
+                viewer_tree(&mut on).0,
+                "Download, Fixture failure",
+                "video: {video}"
+            );
+            download(&mut on);
+            // The photo's file decodes only when the test says so, so the
+            // frames between its arrival and its picture are seen on any
+            // machine, however fast or slow.
+            let decode = std::sync::Arc::new(std::sync::Mutex::new(Decode::Held));
+            let file = if video {
+                std::path::PathBuf::from(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/fixtures/video/sample.mp4"
+                ))
+            } else {
+                let fresh = on.app.dirs.media_cache_dir().join("fresh-download.jpg");
+                std::fs::copy(sample_files(&on.app).0, &fresh).unwrap();
+                on.ctx.add_image_loader(std::sync::Arc::new(OnePicture {
+                    uri: crate::util::image_uri(&fresh),
+                    decode: std::sync::Arc::clone(&decode),
+                }));
+                fresh
+            };
+            on.events
+                .send(crate::backend::Event::Media {
+                    card: None,
+                    chat: on.chat.clone(),
+                    message: "older".into(),
+                    result: Ok(file),
+                })
+                .unwrap();
+            let focused_id = |on: &OnAttachment| on.ctx.memory(|memory| memory.focused());
+            if video {
+                let played = viewer_tree(&mut on).0;
+                assert!(
+                    played.starts_with("Video 1 of 2, ")
+                        && played.ends_with(", Play or pause the video"),
+                    "{played}"
+                );
+                assert_eq!(focused_id(&on), Some(button), "the frame keeps focus");
+            } else {
+                // While the file decodes, focus waits where the button was,
+                // named as the picture, and never falls to Close.
+                for frame in 0..3 {
+                    let focused = viewer_tree(&mut on).0;
+                    assert!(
+                        focused.starts_with("Photo 1 of 2"),
+                        "frame {frame}: focus stays on the item, not {focused:?}"
+                    );
+                    assert_eq!(focused_id(&on), Some(button), "frame {frame}");
+                }
+                // Decoded, the picture takes that focus.
+                *decode
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Decode::Ready;
+                let focused = viewer_tree(&mut on).0;
+                assert!(
+                    focused.starts_with("Photo 1 of 2"),
+                    "focus on the picture, not {focused:?}"
+                );
+                assert!(
+                    focused_id(&on).is_some_and(|id| id != button),
+                    "the picture itself has focus"
+                );
+            }
+            assert!(on.app.video.message().is_none(), "nothing plays");
+        }
+    }
+
+    /// A download button that had focus as the viewer closed hands nothing
+    /// on to a viewer opened later, perhaps with the pointer.
+    #[test]
+    fn closing_the_viewer_forgets_that_its_download_had_focus() {
+        let chat = app().open_chat.clone().unwrap();
+        let mut on = viewer_on_album(older_item(&chat, false, false), Decode::Ready);
+        press_key(
+            &mut on.app,
+            &on.ctx,
+            egui::Key::ArrowLeft,
+            egui::Modifiers::NONE,
+        );
+        on.ctx.memory_mut(|memory| {
+            memory.request_focus(egui::Id::new("viewer-pending-download"));
+        });
+        render(&mut on.app, &on.ctx);
+        let noted = |on: &OnAttachment| {
+            on.ctx
+                .data(|data| data.get_temp::<String>(egui::Id::new("viewer-download-focus")))
+        };
+        assert_eq!(noted(&on).as_deref(), Some("older"));
+        // Closed with focus still on the button, as when its chat is locked
+        // or removed: Escape would take focus off it first.
+        on.app.actions.push(crate::model::Action::CloseImagePreview);
+        render(&mut on.app, &on.ctx);
+        assert!(on.app.image_preview.is_none());
+        assert_eq!(noted(&on), None);
     }
 
     /// History that comes without the replied message says it is not there,

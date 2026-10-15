@@ -390,6 +390,7 @@ mod tests {
             video: false,
             path: None,
             thumbnail: None,
+            about: Default::default(),
         }
     }
 

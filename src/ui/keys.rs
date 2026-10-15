@@ -737,7 +737,20 @@ fn message_keys(app: &mut App, ctx: &egui::Context, chat: &str, id: &str) -> Vec
         );
         app.announcer.say(crate::announcer::Category::Status, text);
     }
-    if let Some(muted) = mute_said {
+    say_clip_change(app, mute_said, speed_said, said);
+    actions
+}
+
+/// Says what a clip's key changed, the same in the message list and in the
+/// viewer: the sound, the new speed, or the time a jump reached and the
+/// clip's length.
+fn say_clip_change(
+    app: &mut App,
+    muted: Option<bool>,
+    speed: Option<f32>,
+    reached: Option<(std::time::Duration, std::time::Duration)>,
+) {
+    if let Some(muted) = muted {
         let text = if muted {
             crate::i18n::gettext(app.locale, "Muted")
         } else {
@@ -745,12 +758,12 @@ fn message_keys(app: &mut App, ctx: &egui::Context, chat: &str, id: &str) -> Vec
         };
         app.announcer.say(crate::announcer::Category::Status, text);
     }
-    if let Some(speed) = speed_said {
+    if let Some(speed) = speed {
         let text = crate::i18n::gettext(app.locale, "Speed {}");
         let text = text.replace("{}", &crate::audio::speed_label(speed));
         app.announcer.say(crate::announcer::Category::Status, text);
     }
-    if let Some((reached, total)) = said {
+    if let Some((reached, total)) = reached {
         let text = crate::a11y::fill(
             &crate::i18n::gettext(app.locale, "{time} of {duration}"),
             &[
@@ -760,7 +773,6 @@ fn message_keys(app: &mut App, ctx: &egui::Context, chat: &str, id: &str) -> Vec
         );
         app.announcer.say(crate::announcer::Category::Status, text);
     }
-    actions
 }
 
 /// Where a jump of `seconds` (negative for back) from `position` lands in a
@@ -1154,9 +1166,10 @@ fn editor_keys(app: &mut App, ctx: &egui::Context) {
 }
 
 /// Handles a playing clip's keys while the viewer shows it: Space plays or
-/// pauses, M mutes, S changes the speed, and the arrows jump five seconds, as
-/// they step through the album only while a picture is on the stage. Escape
-/// closes the viewer, which puts a video back in its message.
+/// pauses, unless another control has focus, M mutes, S changes the speed,
+/// and the arrows jump five seconds, as they step through the album only
+/// while a picture is on the stage; each but Space says what it changed.
+/// Escape closes the viewer, which puts a video back in its message.
 fn video_keys(app: &mut App, ctx: &egui::Context) {
     let Some((message, path)) = app
         .video
@@ -1178,14 +1191,27 @@ fn video_keys(app: &mut App, ctx: &egui::Context) {
     let status = app.video.status(&message);
     let jump = |seconds: f32| {
         let status = status.as_ref()?;
-        Some(Action::SeekVideo {
-            message: message.clone(),
-            fraction: seek_target(status.position, status.total, seconds)?.1,
-        })
+        let (reached, fraction) = seek_target(status.position, status.total, seconds)?;
+        Some((
+            Action::SeekVideo {
+                message: message.clone(),
+                fraction,
+            },
+            (reached, status.total),
+        ))
     };
+    // Space on a focused control presses it, as anywhere else, such as
+    // Close or Save as in the header: only the clip's own frame, or no
+    // focus at all, plays or pauses.
+    let space = ctx
+        .memory(|memory| memory.focused())
+        .is_none_or(|focused| focused == super::image_preview::video_id());
+    let muted = app.video.muted();
+    let speed = app.video.speed();
     let mut actions = Vec::new();
+    let (mut mute_said, mut speed_said, mut said) = (None, None, None);
     ctx.input_mut(|input| {
-        if input.consume_key(Modifiers::NONE, Key::Space) {
+        if space && input.consume_key(Modifiers::NONE, Key::Space) {
             actions.push(Action::PlayVideo {
                 message: message.clone(),
                 path: path.clone(),
@@ -1193,18 +1219,25 @@ fn video_keys(app: &mut App, ctx: &egui::Context) {
         }
         if input.consume_key(Modifiers::NONE, Key::M) {
             actions.push(Action::ToggleVideoSound);
+            mute_said = Some(!muted);
         }
         if input.consume_key(Modifiers::NONE, Key::S) {
             actions.push(Action::CycleVideoSpeed);
+            speed_said = Some(crate::audio::next_cycled_speed(speed));
         }
-        if input.consume_key(Modifiers::NONE, Key::ArrowLeft) {
-            actions.extend(jump(-5.0));
-        }
-        if input.consume_key(Modifiers::NONE, Key::ArrowRight) {
-            actions.extend(jump(5.0));
+        for (key, seconds) in [(Key::ArrowLeft, -5.0), (Key::ArrowRight, 5.0)] {
+            if input.consume_key(Modifiers::NONE, key)
+                && let Some((action, reached)) = jump(seconds)
+            {
+                actions.push(action);
+                said = Some(reached);
+            }
         }
     });
     app.actions.extend(actions);
+    // The same words as the message list's keys: the clip's own state is the
+    // feedback for play and pause.
+    say_clip_change(app, mute_said, speed_said, said);
 }
 
 /// Handles keys while a sticker is shown large: Escape closes it, and no
@@ -2501,6 +2534,123 @@ mod tests {
         let (_, spoken) = message_key(&mut app, &chat, "video", Key::M);
         assert_eq!(spoken, "Unmuted");
         app.video.stop();
+    }
+
+    /// In the viewer, a clip's keys say what they changed, in the message
+    /// list's words: M the sound, S the speed, an arrow the time it reached.
+    /// Space plays or pauses with the clip's frame focused, or nothing; a
+    /// focused control, such as Close, takes Space itself and is pressed.
+    #[test]
+    fn the_viewers_clip_keys_speak_and_leave_space_to_a_focused_button() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = App::headless(
+            crate::paths::AppDirs::under(root.path()),
+            crate::settings::Settings::default(),
+        )
+        .0;
+        let ctx = egui::Context::default();
+        app.video.silence();
+        app.video.toggle("clip", std::path::Path::new(SAMPLE_VIDEO));
+        let started = std::time::Instant::now();
+        while app
+            .video
+            .status("clip")
+            .is_none_or(|status| status.total.is_zero())
+        {
+            assert!(started.elapsed() < std::time::Duration::from_secs(10));
+            app.video.saw("clip");
+            app.video.poll(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        app.image_preview = Some(crate::image_preview::PreviewState::new_clip(
+            std::path::PathBuf::from(SAMPLE_VIDEO),
+            "fixture@s.whatsapp.net".into(),
+            "clip".into(),
+        ));
+        let button = egui::Id::new("fixture-header-button");
+        // One frame draws the focused control, the next presses `key` on it.
+        let press = |app: &mut App, key: Key, focus: Option<egui::Id>| {
+            app.announcer = Default::default();
+            app.actions.clear();
+            let mut left = false;
+            for events in [Vec::new(), vec![key_event(key)]] {
+                if let Some(focus) = focus {
+                    ctx.memory_mut(|memory| memory.request_focus(focus));
+                }
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        if let Some(focus) = focus {
+                            ui.interact(
+                                egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(40.0, 40.0)),
+                                focus,
+                                egui::Sense::click(),
+                            );
+                        }
+                        video_keys(app, ui.ctx());
+                        left = ui.input(|input| {
+                            input.events.iter().any(|event| {
+                                matches!(event, egui::Event::Key { key: found, .. } if *found == key)
+                            })
+                        });
+                        app.announcer.show(ui.ctx(), true);
+                    },
+                );
+                output.textures_delta.clear();
+            }
+            (
+                std::mem::take(&mut app.actions),
+                app.announcer.spoken().concat(),
+                left,
+            )
+        };
+        let (actions, spoken, _) = press(&mut app, Key::M, None);
+        assert_eq!(actions, [Action::ToggleVideoSound]);
+        assert_eq!(spoken, "Muted");
+        let (actions, spoken, _) = press(&mut app, Key::S, None);
+        assert_eq!(actions, [Action::CycleVideoSpeed]);
+        assert_eq!(spoken, "Speed 1.5x");
+        let (actions, spoken, _) = press(&mut app, Key::ArrowRight, None);
+        assert!(
+            matches!(actions.as_slice(), [Action::SeekVideo { .. }]),
+            "{actions:?}"
+        );
+        let total = app.video.status("clip").unwrap().total;
+        let reached =
+            crate::util::duration(whole_seconds(total.min(std::time::Duration::from_secs(5))));
+        assert_eq!(
+            spoken,
+            format!(
+                "{reached} of {}",
+                crate::util::duration(whole_seconds(total))
+            )
+        );
+        for focus in [None, Some(crate::ui::image_preview::video_id())] {
+            let (actions, spoken, left) = press(&mut app, Key::Space, focus);
+            assert!(
+                matches!(actions.as_slice(), [Action::PlayVideo { .. }]),
+                "{focus:?}: {actions:?}"
+            );
+            assert!(spoken.is_empty() && !left, "{focus:?}: {spoken}");
+        }
+        let (actions, _, left) = press(&mut app, Key::Space, Some(button));
+        assert!(actions.is_empty(), "{actions:?}");
+        assert!(left, "Space is left for the focused button");
+        app.video.stop();
+    }
+
+    /// One plain press of `key`.
+    fn key_event(key: Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }
     }
 
     /// S cycles a loaded video's speed as its chip does, 1x, 1.5x and 2x,

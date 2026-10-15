@@ -189,6 +189,54 @@ pub fn album_description(locale: Locale, photos: u32, videos: u32, captions: &[S
     parts.join(", ")
 }
 
+/// One item of the media viewer's album, as the viewer names its picture
+/// and says it when the arrows step to it: "Photo 3 of 12", then who sent
+/// it, the day, the time and its caption, each left out when empty. The
+/// position is the message list's own words for an item ("{} {} of {}").
+pub struct ViewerItem<'a> {
+    pub video: bool,
+    /// From 1.
+    pub position: usize,
+    pub total: usize,
+    /// Display name, or the translated "You".
+    pub sender: &'a str,
+    /// `crate::util::day_label(..)`.
+    pub day: &'a str,
+    /// `crate::util::clock(..)`.
+    pub time: &'a str,
+    /// Plain text, as for [`content_description`].
+    pub caption: &'a str,
+}
+
+/// [`ViewerItem`] as one line.
+pub fn viewer_item_label(locale: Locale, item: &ViewerItem<'_>) -> String {
+    // One literal per branch, so both reach the catalogs.
+    let kind = if item.video {
+        gettext(locale, "Video")
+    } else {
+        gettext(locale, "Photo")
+    };
+    let at = fill(
+        &gettext(locale, "{kind} {position} of {total}"),
+        &[
+            ("kind", &kind),
+            ("position", &item.position.to_string()),
+            ("total", &item.total.to_string()),
+        ],
+    );
+    [
+        at,
+        spoken(without_push_marker(item.sender)),
+        item.day.to_owned(),
+        item.time.to_owned(),
+        spoken(item.caption),
+    ]
+    .into_iter()
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
+    .join(", ")
+}
+
 /// What a reader can act on inside a message from the keyboard, in reading
 /// order. In the focused message list, Left and Right move between them and
 /// Space acts on the current one, as clicking it does.
@@ -561,6 +609,16 @@ pub fn media_state(locale: Locale, media: &crate::model::Media, auto: bool) -> O
         return None;
     }
     match &media.state {
+        MediaState::Idle if !auto => Some(gettext(locale, "not downloaded").into_owned()),
+        state => download_state(locale, state),
+    }
+}
+
+/// A download that is running or failed, in the words [`media_state`] uses:
+/// "downloading", or why it failed. `None` for one that has not started.
+pub fn download_state(locale: Locale, state: &crate::model::MediaState) -> Option<String> {
+    use crate::model::MediaState;
+    match state {
         MediaState::Downloading => Some(gettext(locale, "downloading").into_owned()),
         MediaState::Failed(error) => {
             let error = error.trim();
@@ -570,7 +628,6 @@ pub fn media_state(locale: Locale, media: &crate::model::Media, auto: bool) -> O
                 error.to_owned()
             })
         }
-        MediaState::Idle if !auto => Some(gettext(locale, "not downloaded").into_owned()),
         MediaState::Idle => None,
     }
 }

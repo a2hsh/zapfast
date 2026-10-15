@@ -2,7 +2,8 @@
 //! reader attached: the dialogs, the media viewer, the sticker view, the
 //! picture cropper and the emoji and reaction pickers. Opened, an overlay
 //! takes focus in the first pass that shows it, on its first control (the
-//! cropper's on "Keep this crop") unless it put focus on one of its own, so
+//! cropper's on "Keep this crop", the viewer's on a clip's frame) unless it
+//! put focus on one of its own, so
 //! the reader never lands on the window in between, nor on the menu item
 //! that opened it on the way. Closed, a dialog, the viewer, the sticker view
 //! or the cropper gives focus back to where it was when it opened, such as
@@ -53,12 +54,17 @@ impl Overlay {
     }
 
     /// The control focus enters on, when it is not the first one: the
-    /// cropper's "Keep this crop", so Enter keeps the crop as it always has.
+    /// cropper's "Keep this crop", so Enter keeps the crop as it always has,
+    /// and the viewer's clip, so Space plays it as it always has.
     fn entry(&self, ctx: &egui::Context) -> Option<Id> {
         match self {
             Self::Editor => {
                 ctx.data(|data| data.get_temp::<Id>(super::image_editor::keep_note_id()))
             }
+            // A clip on the stage: its frame, where Space plays and pauses,
+            // rather than Close, where Space would close the viewer. Not
+            // drawn for a picture, which enters on Close as before.
+            Self::Viewer => Some(super::image_preview::video_id()),
             _ => None,
         }
     }

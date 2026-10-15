@@ -29,6 +29,12 @@ pub(crate) fn modal_id() -> egui::Id {
     egui::Id::new("image-preview")
 }
 
+/// The clip's frame on the stage: a click on it, or Space while it has
+/// focus, plays or pauses.
+pub(crate) fn video_id() -> egui::Id {
+    egui::Id::new("viewer-video")
+}
+
 pub fn show(app: &mut App, ctx: &egui::Context) {
     // The album carries every thumbnail of the chat, so it is moved out for
     // the frame and put back at the end instead of being copied: a copy per
@@ -38,8 +44,11 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     let Some(mut preview) = app.image_preview.take() else {
         // Nothing on screen: the strip centres on the current item again the
         // next time the viewer opens, whatever it was left on.
+        // Nor does a download button that had focus hand it on later, to a
+        // viewer opened again, perhaps with the pointer.
         ctx.data_mut(|data| {
-            data.remove::<(String, String, Option<usize>)>(egui::Id::new("viewer-strip-centred"))
+            data.remove::<(String, String, Option<usize>)>(egui::Id::new("viewer-strip-centred"));
+            data.remove::<String>(download_focus_id());
         });
         return;
     };
@@ -55,6 +64,9 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     // clip, so a clip is never handed to the image decoder.
     let clip = preview.shows_video(&album);
     let strip = album.len() > 1;
+    // The picture's name for a screen reader, the words the arrows say for
+    // it: "Photo 3 of 12", who sent it, when, and its caption.
+    let name = position.and_then(|index| app.viewer_item_label(&chat, &album, index));
     let mut actions: Vec<Action> = Vec::new();
 
     let mut backdrop_clicked = false;
@@ -129,6 +141,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     stage,
                     &chat,
                     &message,
+                    name.as_deref(),
                     &mut actions,
                 )
             } else {
@@ -141,6 +154,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     clip,
                     &chat,
                     &message,
+                    name.as_deref(),
                     stage,
                     &mut actions,
                 )
@@ -171,6 +185,20 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         });
     if response.should_close() || backdrop_clicked {
         actions.push(Action::CloseImagePreview);
+    }
+    // A download asked for from the keys or with a screen reader is spoken
+    // if it fails, as one Space or Enter asks for in the message list.
+    if super::overlay::followed(ctx)
+        && let Some(message) = actions.iter().find_map(|action| match action {
+            Action::Download {
+                message,
+                card: None,
+                ..
+            } => Some(message.clone()),
+            _ => None,
+        })
+    {
+        app.download_heard = Some((chat.clone(), message, None));
     }
     app.image_preview = Some(preview);
     app.viewer_media = album;
@@ -540,6 +568,7 @@ fn still(
     video: bool,
     chat: &str,
     message: &str,
+    name: Option<&str>,
     stage: Rect,
     actions: &mut Vec<Action>,
 ) -> Option<Rect> {
@@ -592,6 +621,21 @@ fn still(
                         |ui| {
                             let image_response =
                                 ui.add(image.fit_to_exact_size(size).sense(egui::Sense::click()));
+                            if let Some(name) = name {
+                                image_response.widget_info(|| {
+                                    egui::WidgetInfo::labeled(
+                                        egui::WidgetType::Image,
+                                        ui.is_enabled(),
+                                        name,
+                                    )
+                                });
+                            }
+                            // The download the reader was on brought this
+                            // picture: focus moves on to it rather than to
+                            // the window.
+                            if take_download_focus(ui.ctx(), message) {
+                                image_response.request_focus();
+                            }
                             // The same three actions the header offers, on the
                             // picture itself: copy it, save it, or hand it to
                             // another app.
@@ -695,9 +739,11 @@ fn still(
         }
         Ok(egui::load::TexturePoll::Pending { .. }) => {
             theme::paint_spinner(ui, stage, 28.0, palette.accent);
+            picture_place(ui, stage, message, name);
             None
         }
         Err(_) => {
+            picture_place(ui, stage, message, name);
             let path = path.to_owned();
             ui.allocate_ui_with_layout(
                 canvas,
@@ -718,6 +764,36 @@ fn still(
             None
         }
     }
+}
+
+/// The picture's place while it is not drawn, still decoding or unable to
+/// be: neither painted nor clicked, it carries the picture's name, so a
+/// screen reader hears the item at once rather than nothing until the
+/// decoder is done. When the download that brought the file had focus, the
+/// place keeps it where the button was, until the picture can take it,
+/// rather than letting it fall to the window and on to Close.
+fn picture_place(ui: &egui::Ui, stage: Rect, message: &str, name: Option<&str>) {
+    let focused = has_download_focus(ui.ctx(), message);
+    if name.is_none() && !focused {
+        return;
+    }
+    let (id, sense) = if focused {
+        (download_button_id(), Sense::FOCUSABLE)
+    } else {
+        (egui::Id::new("viewer-picture-place"), Sense::hover())
+    };
+    let response = ui.interact(
+        Rect::from_center_size(stage.center(), Vec2::splat(56.0)),
+        id,
+        sense,
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Image,
+            ui.is_enabled(),
+            name.unwrap_or_default(),
+        )
+    });
 }
 
 /// An item whose attachment has not been downloaded: its own thumbnail, the
@@ -751,17 +827,31 @@ fn pending(
             palette.secondary,
         );
     }
+    let button = Rect::from_center_size(
+        pos2(stage.center().x, disc.bottom() + 34.0),
+        vec2(160.0, 32.0),
+    );
+    let id = download_button_id();
+    // The button's name ends with the download's state, as a message's
+    // label does: "Download, downloading", or why it failed.
+    let state_said = crate::a11y::download_state(app.locale, state);
+    let label = std::iter::once(crate::i18n::gettext(app.locale, "Download").into_owned())
+        .chain(state_said)
+        .collect::<Vec<_>>()
+        .join(", ");
     // A download that is running says so, and one that failed shows the
     // worker's own message, the way the chat bubble does: a button that
     // looks dead is what the review asked to avoid.
     if matches!(state, crate::model::MediaState::Downloading) {
         theme::paint_spinner(ui, disc, 28.0, palette.text);
+        // Where the button was, a focusable place that is neither drawn nor
+        // clicked, so focus on the button stays there while it downloads,
+        // and the pointer meets the field as before.
+        let response = ui.interact(button, id, Sense::FOCUSABLE);
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, false, &label));
+        note_download_focus(ui.ctx(), &response, message);
         return;
     }
-    let button = Rect::from_center_size(
-        pos2(stage.center().x, disc.bottom() + 34.0),
-        vec2(160.0, 32.0),
-    );
     if let crate::model::MediaState::Failed(error) = state {
         ui.painter().text(
             pos2(stage.center().x, disc.bottom() + 12.0),
@@ -772,11 +862,7 @@ fn pending(
         );
     }
     let response = ui
-        .interact(
-            button,
-            egui::Id::new("viewer-pending-download"),
-            Sense::click(),
-        )
+        .interact(button, id, Sense::click())
         .on_hover_cursor(egui::CursorIcon::PointingHand);
     ui.painter().rect_filled(button, 6.0, palette.surface_hover);
     ui.painter().text(
@@ -787,13 +873,10 @@ fn pending(
         palette.text,
     );
     response.widget_info(|| {
-        egui::WidgetInfo::labeled(
-            egui::WidgetType::Button,
-            ui.is_enabled(),
-            crate::i18n::gettext(app.locale, "Download").as_ref(),
-        )
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &label)
     });
     theme::reveal_focus(&response);
+    note_download_focus(ui.ctx(), &response, message);
     if response.clicked() {
         actions.push(Action::Download {
             // Asked for in the viewer.
@@ -803,6 +886,44 @@ fn pending(
             message: message.to_owned(),
         });
     }
+}
+
+/// The not-yet-downloaded picture's Download button, and the place that
+/// keeps its focus while the download runs and the file decodes.
+fn download_button_id() -> egui::Id {
+    egui::Id::new("viewer-pending-download")
+}
+
+/// Where focus goes once a picture's download lands: the download button
+/// that had it is gone, so `still` hands focus to the picture.
+fn download_focus_id() -> egui::Id {
+    egui::Id::new("viewer-download-focus")
+}
+
+/// Notes whether the download button of `message` has focus.
+fn note_download_focus(ctx: &egui::Context, response: &egui::Response, message: &str) {
+    // Read first: the context is locked inside `data_mut`.
+    let focused = response.has_focus();
+    ctx.data_mut(|data| {
+        if focused {
+            data.insert_temp(download_focus_id(), message.to_owned());
+        } else {
+            data.remove::<String>(download_focus_id());
+        }
+    });
+}
+
+/// Whether `message`'s download button has focus, as last noted.
+fn has_download_focus(ctx: &egui::Context, message: &str) -> bool {
+    ctx.data(|data| data.get_temp::<String>(download_focus_id()))
+        .is_some_and(|focused| focused == message)
+}
+
+/// Whether `message`'s download button had focus when its file landed. Any
+/// picture drawn ends the note: one noted for another item is stale.
+fn take_download_focus(ctx: &egui::Context, message: &str) -> bool {
+    ctx.data_mut(|data| data.remove_temp::<String>(download_focus_id()))
+        .is_some_and(|focused| focused == message)
 }
 
 /// A video plays in place, through the same player the chat bubble uses, so it
@@ -816,6 +937,7 @@ fn video(
     stage: Rect,
     chat: &str,
     message: &str,
+    name: Option<&str>,
     actions: &mut Vec<Action>,
 ) -> Option<Rect> {
     let palette = app.palette;
@@ -858,7 +980,7 @@ fn video(
     // Clicking the frame plays or pauses, as in the bubble. A clip that is not
     // here yet is offered for download instead.
     let response = ui
-        .interact(media, egui::Id::new("viewer-video"), Sense::click())
+        .interact(media, video_id(), Sense::click())
         .on_hover_cursor(egui::CursorIcon::PointingHand);
     let downloading = path.is_none()
         && matches!(
@@ -869,13 +991,28 @@ fn video(
         (None, Some(crate::model::MediaState::Failed(error))) => Some(error.as_str()),
         _ => None,
     };
+    // A clip not here yet ends its name with the download's state, as the
+    // picture's button does; the frame keeps focus through the download.
     let label = if path.is_some() {
-        crate::i18n::gettext(app.locale, "Play or pause the video")
+        // The clip's name first, as the picture's: its place in the album,
+        // who sent it, when, and its caption. Then what the frame does.
+        name.into_iter()
+            .map(str::to_owned)
+            .chain([crate::i18n::gettext(app.locale, "Play or pause the video").into_owned()])
+            .collect::<Vec<_>>()
+            .join(", ")
     } else {
-        crate::i18n::gettext(app.locale, "Download")
+        std::iter::once(crate::i18n::gettext(app.locale, "Download").into_owned())
+            .chain(
+                app.viewer_media_state
+                    .get(message)
+                    .and_then(|state| crate::a11y::download_state(app.locale, state)),
+            )
+            .collect::<Vec<_>>()
+            .join(", ")
     };
     response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label.as_ref())
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &label)
     });
     theme::reveal_focus(&response);
     if response.clicked() && !downloading {
@@ -1030,7 +1167,15 @@ fn strip_bar(
                     } else {
                         crate::i18n::gettext(app.locale, "Photo")
                     };
-                    let label = format!("{} {}", kind, index + 1);
+                    // "Photo 3 of 12", as the arrows say the item.
+                    let label = crate::a11y::fill(
+                        &crate::i18n::gettext(app.locale, "{kind} {position} of {total}"),
+                        &[
+                            ("kind", &kind),
+                            ("position", &(index + 1).to_string()),
+                            ("total", &album.len().to_string()),
+                        ],
+                    );
                     response.widget_info(|| {
                         egui::WidgetInfo::selected(
                             egui::WidgetType::Button,
@@ -1093,6 +1238,7 @@ mod tile_tests {
             video: false,
             path: Some(PathBuf::from("/photos/a.jpg")),
             thumbnail: Some(vec![1, 2, 3]),
+            about: Default::default(),
         };
         assert_eq!(tile_of(&stored), Tile::Stored);
         let file_only = MediaItem {

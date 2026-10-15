@@ -1920,7 +1920,7 @@ impl Archive {
         // The query walks the newest first, so the page is turned back round:
         // the strip and the stepping both read oldest to newest.
         let mut list = self.gallery_query(
-            "SELECT id, timestamp, content, thumbnail FROM messages
+            "SELECT id, timestamp, content, thumbnail, from_me, sender, sender_name FROM messages
              WHERE chat = ?1 AND json_valid(content)
              AND json_extract(content, '$.kind') IN ('image', 'video', 'interactive')
              ORDER BY timestamp DESC, rowid DESC",
@@ -1961,7 +1961,7 @@ impl Archive {
         let ahead = limit / 2;
         let behind = limit - ahead;
         let mut list = self.gallery_query(
-            "SELECT id, timestamp, content, thumbnail FROM messages
+            "SELECT id, timestamp, content, thumbnail, from_me, sender, sender_name FROM messages
              WHERE chat = ?1 AND json_valid(content)
              AND json_extract(content, '$.kind') IN ('image', 'video', 'interactive')
              AND (timestamp < ?2 OR (timestamp = ?2 AND rowid <= ?3))
@@ -1972,7 +1972,7 @@ impl Archive {
         )?;
         list.reverse();
         let mut newer = self.gallery_query(
-            "SELECT id, timestamp, content, thumbnail FROM messages
+            "SELECT id, timestamp, content, thumbnail, from_me, sender, sender_name FROM messages
              WHERE chat = ?1 AND json_valid(content)
              AND json_extract(content, '$.kind') IN ('image', 'video', 'interactive')
              AND (timestamp > ?2 OR (timestamp = ?2 AND rowid > ?3))
@@ -2008,14 +2008,20 @@ impl Archive {
             let timestamp: i64 = row.get(1)?;
             let raw: String = row.get(2)?;
             let thumbnail: Option<Vec<u8>> = row.get(3)?;
-            Ok((id, timestamp, raw, thumbnail))
+            let about = crate::model::MediaAbout {
+                from_me: row.get(4)?,
+                sender: row.get(5)?,
+                sender_name: row.get(6)?,
+                caption: None,
+            };
+            Ok((id, timestamp, raw, thumbnail, about))
         })?;
         let mut list = Vec::new();
         for row in rows {
             if list.len() >= limit {
                 break;
             }
-            let (id, timestamp, raw, thumbnail) = row?;
+            let (id, timestamp, raw, thumbnail, about) = row?;
             let content: Content = serde_json::from_str(&raw).unwrap_or(Content::Unsupported {
                 what: "unreadable".into(),
             });
@@ -2026,6 +2032,14 @@ impl Archive {
                 thumbnail.as_deref(),
                 Path::is_file,
             );
+            // Who sent it, for the viewer to say; the caption came with the
+            // content.
+            for item in &mut items {
+                item.about = crate::model::MediaAbout {
+                    caption: item.about.caption.take(),
+                    ..about.clone()
+                };
+            }
             // A carousel's cards stay in their own order once the page is
             // turned back round.
             if newest_first {
@@ -5459,6 +5473,51 @@ mod media_path_tests {
             ],
             "a page keeps a message's card pictures together, in the card's order"
         );
+    }
+
+    /// Each album item carries who sent it and its caption, which the viewer
+    /// says for it, from both album queries.
+    #[test]
+    fn album_items_say_who_sent_them_and_their_caption() {
+        let archive = Archive::in_memory().expect("opens");
+        archive.ensure_chat("a@s.whatsapp.net", "A").expect("chat");
+        let mut theirs = picture("theirs");
+        theirs.sender = "b@s.whatsapp.net".into();
+        theirs.sender_name = Some("Bea".into());
+        if let Content::Image { caption, .. } = &mut theirs.content {
+            *caption = Some("On the moon".into());
+        }
+        let mut ours = picture("ours");
+        ours.timestamp = 2;
+        ours.from_me = true;
+        for row in [&theirs, &ours] {
+            archive.insert_message(row, None).expect("inserted");
+        }
+        let expected = [
+            crate::model::MediaAbout {
+                from_me: false,
+                sender: "b@s.whatsapp.net".into(),
+                sender_name: Some("Bea".into()),
+                caption: Some("On the moon".into()),
+            },
+            crate::model::MediaAbout {
+                from_me: true,
+                sender: "a@s.whatsapp.net".into(),
+                sender_name: None,
+                caption: None,
+            },
+        ];
+        for album in [
+            archive.gallery_media("a@s.whatsapp.net", GALLERY_PAGE),
+            archive.gallery_around("a@s.whatsapp.net", "theirs", GALLERY_PAGE),
+        ] {
+            let about: Vec<_> = album
+                .expect("album")
+                .into_iter()
+                .map(|item| item.about)
+                .collect();
+            assert_eq!(about, expected);
+        }
     }
 
     #[test]

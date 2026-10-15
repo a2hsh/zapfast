@@ -381,8 +381,11 @@ waits for the download to finish; videos over the
 Double-click one, or use the button at the end of its
 controls, to play it in the full-window viewer:
 Space plays and pauses, the arrows jump five seconds, M mutes, S changes the
-speed, and Escape closes the viewer and stops the video. The built-in player
-supports H.264 video in MP4 files; other formats open in your system player.
+speed, and Escape closes the viewer and stops the video. The arrows, M and S
+say what they changed. Opened from the keyboard, the viewer puts focus on the
+video; Space on a focused button, such as Close, presses that button
+instead. The built-in player supports H.264 video in MP4 files; other
+formats open in your system player.
 
 Click a downloaded JPEG, PNG, or WebP photo to open it in the full-window
 viewer, with zoom (wheel, Ctrl+wheel, or a pinch, and a double-click between
@@ -390,8 +393,12 @@ fitting the window and the original size) and **Copy image**. **Open in the
 viewer** in a photo's or a video's menu does the same. The chat's photos,
 videos and interactive-card images run along the bottom: click one, press the
 Left and Right arrow keys, or hover over the picture and click the previous and
-next arrows at its sides to move between them. The header replies, reacts,
-forwards, saves or downloads, and shows the message in the chat. A click on the
+next arrows at its sides to move between them. With a screen reader, the
+picture and the arrows name each item: its place in the album ("Photo 3 of
+12"), who sent it, when, and its caption. A download started there from the
+keyboard keeps focus on its button and says why it failed. The header replies,
+reacts, forwards, saves or downloads, and shows the message in the chat. A
+click on the
 empty space around the picture, or Escape, closes the viewer. It also closes
 when its chat is removed, becomes locked outside the unlocked folder, or when
 you close the locked folder. **Save as…** in a downloaded attachment's
