@@ -59,12 +59,12 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 # ZapFast #405), and the typed send, edit, picture and poll APIs (#1614, #1626,
 # #1630, #1640). Protobuf structs are non-exhaustive since #1676, so they are
 # built from `Default` and assigned field by field. Device-store
-# compatibility retains the legacy created_at column. The revision is on
-# upstream's main and comes from the crmne/whatsapp-rust fork (branch
-# `zapfast`); move to crates.io at the first release that carries it. `voip` is
+# compatibility retains the legacy created_at column. All carried fixes have
+# merged upstream, including video pacing, retransmission and loss recovery
+# (#1726, #1727, #1728). Move to crates.io once released. `voip` is
 # the call stack: signaling, the sans-IO media engine with MLOW and libopus
 # codecs, and the native UDP relay transport.
-whatsapp-rust = { git = "https://github.com/crmne/whatsapp-rust", rev = "70ddc5f1b32297da52233d0a69c11943555ba0d2", default-features = false, features = ["sqlite-storage", "tokio-transport", "tokio-runtime", "ureq-client", "tokio-native", "voip"] }
+whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "5e72baf000aa4fb65ed89d1c955a54029a7f29a6", default-features = false, features = ["sqlite-storage", "tokio-transport", "tokio-runtime", "ureq-client", "tokio-native", "voip"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "fs", "net", "io-util"] }
 # Queue between the call's audio streams and the engine.
 async-channel = "2.5"
@@ -113,8 +113,6 @@ gethostname = "1"
 # included through egui_extras.
 resvg = { version = "0.45", default-features = false }
 
-# Desktop notifications through D-Bus on Linux and system frameworks elsewhere.
-notify-rust = { version = "4", default-features = false, features = ["z"] }
 openh264 = "0.9"
 # The encoder option a call's camera uses to change its bitrate mid-stream,
 # which openh264 does not wrap. Already included through openh264.
@@ -142,44 +140,46 @@ libwebp-sys2 = { version = "0.2", features = ["1_2"] }
 # Shared foundation of Carmine's egui apps (github.com/crmne/fastframe). Every
 # crate comes from the same revision.
 # Bundled gettext catalogs: lookups and system language detection.
-fastframe-i18n = { git = "https://github.com/crmne/fastframe", tag = "v0.6.0" }
+fastframe-i18n = { git = "https://github.com/crmne/fastframe", rev = "1f3d7d78a66c1f4bbe9226f317e3b299e14ffab5" }
 # The icons! table, a loader that survives reduce_texture_memory, and the Lucide
 # icons shared with Spotifast.
-fastframe-icons = { git = "https://github.com/crmne/fastframe", tag = "v0.6.0" }
+fastframe-icons = { git = "https://github.com/crmne/fastframe", rev = "1f3d7d78a66c1f4bbe9226f317e3b299e14ffab5" }
 # The platform's interface font (Inter where there is none), and installed
 # fonts for other scripts.
-fastframe-fonts = { git = "https://github.com/crmne/fastframe", tag = "v0.6.0" }
+fastframe-fonts = { git = "https://github.com/crmne/fastframe", rev = "1f3d7d78a66c1f4bbe9226f317e3b299e14ffab5" }
 # Colour emoji in the platform's own style, with the bundled Noto behind
 # them, drawn off the interface thread.
-fastframe-emoji = { git = "https://github.com/crmne/fastframe", tag = "v0.6.0" }
+fastframe-emoji = { git = "https://github.com/crmne/fastframe", rev = "1f3d7d78a66c1f4bbe9226f317e3b299e14ffab5" }
 # Follows the desktop's hinting and glyph coverage, live through the portal.
-fastframe-text = { git = "https://github.com/crmne/fastframe", tag = "v0.6.0", features = ["watch"] }
+fastframe-text = { git = "https://github.com/crmne/fastframe", rev = "1f3d7d78a66c1f4bbe9226f317e3b299e14ffab5", features = ["watch"] }
 # Palette files, the shared presets, and following Omarchy's theme live.
-fastframe-theme = { git = "https://github.com/crmne/fastframe", tag = "v0.6.0" }
+fastframe-theme = { git = "https://github.com/crmne/fastframe", rev = "1f3d7d78a66c1f4bbe9226f317e3b299e14ffab5" }
 # Logs to stderr and a per-run file, and records panics without their payload.
-fastframe-log = { git = "https://github.com/crmne/fastframe", tag = "v0.6.0" }
+fastframe-log = { git = "https://github.com/crmne/fastframe", rev = "1f3d7d78a66c1f4bbe9226f317e3b299e14ffab5" }
 # The tray item: StatusNotifier on Linux, tray-icon on Windows and macOS.
-fastframe-tray = { git = "https://github.com/crmne/fastframe", tag = "v0.6.0" }
+fastframe-tray = { git = "https://github.com/crmne/fastframe", rev = "1f3d7d78a66c1f4bbe9226f317e3b299e14ffab5" }
 # Keeps ZapFast running without a window, remembers its geometry, recovers it
 # off screen, and brings it forward on niri.
-fastframe-shell = { git = "https://github.com/crmne/fastframe", tag = "v0.6.0" }
+fastframe-shell = { git = "https://github.com/crmne/fastframe", rev = "1f3d7d78a66c1f4bbe9226f317e3b299e14ffab5" }
 # Window chrome: centres the macOS traffic lights on ZapFast's own header and
 # lets its headers move the window.
-fastframe-titlebar = { git = "https://github.com/crmne/fastframe", tag = "v0.6.0" }
+fastframe-titlebar = { git = "https://github.com/crmne/fastframe", rev = "1f3d7d78a66c1f4bbe9226f317e3b299e14ffab5" }
 # One running copy per user: the lock, and the channel a second launch uses.
-fastframe-instance = { git = "https://github.com/crmne/fastframe", tag = "v0.6.0" }
+fastframe-instance = { git = "https://github.com/crmne/fastframe", rev = "1f3d7d78a66c1f4bbe9226f317e3b299e14ffab5" }
 # The wheel step, and on Linux touchpad scale, glide and axis lock.
-fastframe-scroll = { git = "https://github.com/crmne/fastframe", tag = "v0.6.0" }
+fastframe-scroll = { git = "https://github.com/crmne/fastframe", rev = "1f3d7d78a66c1f4bbe9226f317e3b299e14ffab5" }
 # The desktop entry name (Flatpak-aware), the GNOME check, and GNOME's clock
 # format through the desktop portal.
-fastframe-desktop = { git = "https://github.com/crmne/fastframe", tag = "v0.6.0" }
+fastframe-desktop = { git = "https://github.com/crmne/fastframe", rev = "1f3d7d78a66c1f4bbe9226f317e3b299e14ffab5" }
+# One native notification API for delivery, permissions, clicks and withdrawal.
+fastframe-notifications = { git = "https://github.com/crmne/fastframe", rev = "1f3d7d78a66c1f4bbe9226f317e3b299e14ffab5" }
 # Sleep and wake as the system reports them, so the link reconnects after a
 # wake (Linux and Windows).
-fastframe-power = { git = "https://github.com/crmne/fastframe", tag = "v0.6.0" }
+fastframe-power = { git = "https://github.com/crmne/fastframe", rev = "1f3d7d78a66c1f4bbe9226f317e3b299e14ffab5" }
 # Saves that are never half written: settings and the chosen wallpaper.
-fastframe-file = { git = "https://github.com/crmne/fastframe", tag = "v0.6.0" }
+fastframe-file = { git = "https://github.com/crmne/fastframe", rev = "1f3d7d78a66c1f4bbe9226f317e3b299e14ffab5" }
 # Self-update from GitHub releases with signed checksums, a helper and rollback.
-fastframe-update = { git = "https://github.com/crmne/fastframe", tag = "v0.6.0", features = ["reqwest"] }
+fastframe-update = { git = "https://github.com/crmne/fastframe", rev = "1f3d7d78a66c1f4bbe9226f317e3b299e14ffab5", features = ["reqwest"] }
 
 [patch.crates-io]
 # crmne/egui apps-0.36, shared with Spotifast, RekordFlash and TonePush: egui
@@ -223,7 +223,7 @@ winit = { git = "https://github.com/crmne/winit", rev = "ed7caa9023f10b397f5b6ec
 zbus-secret-service-keyring-store = { version = "1.0.1", features = ["rt-tokio-crypto-rust"] }
 # Pauses MPRIS media players while recording or playing voice messages, and
 # emits the Unity Launcher API signal launchers show as a taskbar badge.
-# Already in the tree through notify-rust and fastframe-tray.
+# Already in the tree through fastframe-notifications and fastframe-tray.
 zbus = { version = "5.19", default-features = false, features = ["blocking-api", "tokio"] }
 # Reads the time locale's clock format.
 libc = "0.2"
@@ -253,17 +253,13 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 raw-window-handle = "0.6"
 # Reads the locale's clock format.
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSDateFormatter", "NSFormatter", "NSLocale", "NSString"] }
-# Notifications through UNUserNotificationCenter: notify-rust's macOS backend
-# cannot stop waiting for a click, so released ones would pile up.
-mac-usernotifications = "0.3.1"
 # The camera for video calls, through AVFoundation.
 nokhwa = { version = "0.10.11", default-features = false, features = ["input-avfoundation"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-native-keyring-store = { version = "1.1", default-features = false }
-winrt-notification = { package = "tauri-winrt-notification", version = "0.7.3" }
-# Registry and locale calls.
-windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Globalization", "Win32_System_Registry"] }
+# Locale calls.
+windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Globalization"] }
 # Accesses the native window handle for the taskbar overlay and the Messages
 # theme's Mica backdrop.
 raw-window-handle = "0.6"
@@ -312,4 +308,4 @@ opt-level = 2
 [build-dependencies]
 # Compiles the PO catalogs to Rust, leaving out unfinished entries. Ordinary
 # builds do not need gettext tools.
-fastframe-i18n = { git = "https://github.com/crmne/fastframe", tag = "v0.6.0", features = ["build"] }
+fastframe-i18n = { git = "https://github.com/crmne/fastframe", rev = "1f3d7d78a66c1f4bbe9226f317e3b299e14ffab5", features = ["build"] }

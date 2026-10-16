@@ -730,12 +730,16 @@ chat**, and the button beside it (`Ctrl+B`), which hides the list: the chats'
 avatars then fill the rail between its top and bottom buttons. Unread chats
 show their badge, hovering names a chat, clicking opens it, and `Ctrl+B` or
 the button under **Starred** brings the full list back.
+In a short window, scroll the rail to reach its lower buttons. Tab and
+Shift+Tab bring the focused button into view, too.
 
 ## Notifications and the tray
 
-Closing the window keeps ZapFast linked in the tray. Click the tray icon or
-launch the app again to reopen it. To quit, use **Quit** in the tray menu, or
-**Quit** in the Dock icon's menu on macOS, or on Linux **Quit ZapFast** in the
+Closing the window keeps ZapFast linked in the tray. On macOS, click the menu
+bar icon to open its menu, then choose **Show or hide ZapFast** to reopen the
+window. On Linux and Windows, click the tray icon to reopen it. Launching the
+app again reopens the window on every platform. To quit, use **Quit** in the
+tray menu, or **Quit** in the Dock icon's menu on macOS, or on Linux **Quit ZapFast** in the
 launcher's right-click menu (KDE Plasma's task manager and application menu,
 GNOME's Dash). On every platform, `zapfast quit` in a terminal or a script quits
 the running copy the same way, and does nothing when none runs. A copy from
@@ -749,9 +753,10 @@ its regular taskbar icon size for overlays to appear. The count
 does not count toasts remaining in Windows notification history. On macOS, the
 Dock icon shows the number of unread chats in a red badge. On Linux and
 Windows, notifications show the chat picture. On Linux, Windows, and macOS, a
-click on a notification opens the chat at the message it announced. On Linux
-and macOS this holds for the 32 most recent notifications (older ones only
-bring ZapFast forward), and reading a chat removes its notifications. macOS
+click on a notification opens the chat at the message it announced. This holds for the 32 most recent tracked notifications on all three platforms;
+older notifications remain in system history without a message click listener.
+Reading a chat removes its tracked notifications, including Windows toasts.
+Fastframe provides the same delivery and cancellation interface on each platform. macOS
 asks once for permission to show notifications. On Linux, a notification that arrives while the
 window is open behind others also highlights ZapFast in the taskbar until you
 switch to it. Muted chats do not send notifications, and
@@ -771,3 +776,24 @@ shortcuts.
 ZapFast announces confirmations, errors, connection changes and history loading
 through the screen reader without moving focus. While the app is locked, only
 connection and history changes are announced.
+
+Each message, or album, is exposed as one item that reads its sender, text,
+time and delivery status, then any quote, forward, edit and reactions; the
+first message of a day starts with the day and the first unread one with
+Unread.
+
+The messages form one list, named for the chat, such as "Messages with Ada" or
+"Messages in Rust Berlin", and each message, or album, reports its position in
+it. The list is a single Tab stop: Alt+2 (Control+2 on macOS) also moves there.
+In the list, Up and Down move one item, Home and End go to the oldest loaded
+and the newest message, and PgUp and PgDn move about a screen; Home on the
+oldest loaded message loads older history. The current message stays put when
+new messages arrive, and follows when ZapFast itself takes you to a message:
+the next voice message playing on, a quoted message, or a search result. After
+keyboard navigation it is outlined like any other focused control.
+
+In the chat view, Tab moves through the message input and its buttons, phone
+numbers in messages, chat search, the chat info panel, the message list, the
+rail, the chat list's header, search and the chat filters, then returns to the
+input. Shift+Tab goes back; hidden controls are skipped. Single messages,
+reactions and chat rows are not stops; Alt+Up/Down switches conversations.

@@ -193,7 +193,11 @@ async fn fetch_attachment(
         .map_err(|error| error.to_string())?;
     let (temporary, file) = temporary_attachment_file(path)?;
     let result = client
-        .download_to_writer(downloadable, LimitedWriter::new(file, limit))
+        .download_to_writer(
+            downloadable,
+            LimitedWriter::new(file, limit),
+            Default::default(),
+        )
         .await;
     match result {
         Ok(writer) => {

@@ -11,12 +11,13 @@ protocol. These notes are for coding agents and new contributors.
   message content to a third party.
 - Do not copy dependency source into this repository. For a dependency fix,
   use a fork under `github.com/crmne/` pinned to a commit and contribute the
-  fix upstream; egui, winit, whatsapp-rust and rodio already come from such
+  fix upstream; egui, winit and rodio already come from such
   forks. Only the maintainer creates those forks; in a contributor's pull
   request, send the fix upstream and ask for it to be carried. Use the fork
-  until a release includes the fix. Never point a dependency at any other
-  fork or source: `.github/scripts/check-dependency-sources.py` fails CI on
-  one.
+  until a release includes the fix. The maintainer has explicitly approved
+  pinned commits from `github.com/oxidezap/whatsapp-rust` once our carried
+  fixes have merged upstream. Never point a dependency at any other fork
+  or source: `.github/scripts/check-dependency-sources.py` fails CI on one.
 - Screenshots, captures, comparison pages and recordings made for a review
   go in the pull request, never the repository:
   `.github/scripts/check-review-evidence.py` fails CI on any file under
@@ -427,6 +428,8 @@ protocol. These notes are for coding agents and new contributors.
   fastframe-tray (ksni on Linux, tray-icon on Windows and macOS; on macOS
   made with the first window and pumped by `fastframe_tray::idle` while none
   exists), and `src/macos.rs` hands its menu events to `fastframe_tray::claim_menu_event` first.
+  Clicking the macOS menu-bar icon opens its menu; **Show or hide ZapFast**
+  toggles the window, and clicking the Dock icon shows it.
   Closing keeps ZapFast running only while `Tray::is_shown`: on Linux the
   item exists before a panel shows it (a start at login beats the panel, and
   GNOME's tray watcher) and registers once one appears. A hidden start with

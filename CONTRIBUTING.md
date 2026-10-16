@@ -54,7 +54,10 @@ release status stated. Reopen the issue if it persists after updating.
    crates.io or from repositories under `github.com/crmne/`; never vendor
    dependency source or point a dependency at another fork. To fix a
    dependency, send the fix upstream and ask the maintainer to carry it in a
-   crmne fork until a release includes it. CI fails on any other source.
+   crmne fork until a release includes it. The maintainer has explicitly
+   approved pinned commits from the official `github.com/oxidezap/whatsapp-rust`
+   repository once our carried fixes have merged upstream. CI fails on any
+   other source.
 6. **Private data.** The archive is personal data. Never log message contents,
    phone numbers, keys, or QR payloads.
 
