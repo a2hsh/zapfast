@@ -701,7 +701,11 @@ chat's matches, newest first. Its calendar narrows them to one day.
 
 Click the chat header, or choose **Info** in its menu, to open the info panel
 beside the chat. It shows the picture, the number or the members, and the
-chat's actions. When WhatsApp lets you edit a group's info, rename it with the
+chat's actions. From the keyboard a group's members are one list, the Tab stop
+after **Media, links and docs**: Up and Down, Home, End, PgUp and PgDn walk
+every member, scrolled out of view or not, the screen reader says where each
+one is in the list ("3 of 40"), and Enter or Space opens a member's own panel,
+as a click does. When WhatsApp lets you edit a group's info, rename it with the
 pencil beside its name and click its photo to change it. Clicking a
 `chat.whatsapp.com` invite link shows the group and joins it without leaving
 ZapFast.

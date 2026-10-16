@@ -554,6 +554,9 @@ pub struct App {
     pub(crate) info_members: Option<(ChatId, Vec<(String, String)>)>,
     /// The panel control that takes the keyboard on the next frame.
     pub(crate) info_focus: Option<InfoFocus>,
+    /// The current row of each of the panel's lists, as `ui::info::InfoList`
+    /// numbers them, by the key of the row: a member's id.
+    pub(crate) info_cursor: [Option<String>; 4],
     /// Whether the locked-chats folder is open.
     pub locked_folder: bool,
     /// The verifier authenticated for this window session, never the code.
@@ -1539,6 +1542,7 @@ impl App {
             info_media_failed: false,
             info_members: None,
             info_focus: None,
+            info_cursor: Default::default(),
             chat_search: String::new(),
             chat_search_hits: Vec::new(),
             chat_search_truncated: false,
@@ -5557,6 +5561,7 @@ impl App {
             // when this chat cannot be asked for yet.
             self.reset_info_media();
             self.info_members = None;
+            self.info_cursor = Default::default();
             self.info = Some(InfoPanel {
                 chat,
                 view: InfoView::Overview,
@@ -5587,6 +5592,7 @@ impl App {
         self.reset_info_media();
         self.info_members = None;
         self.info_focus = None;
+        self.info_cursor = Default::default();
         self.contact_edit = None;
         self.group_name_edit = None;
     }

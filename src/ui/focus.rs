@@ -45,8 +45,9 @@ pub enum Stop {
     ChatSearchDay,
     ChatSearchResults,
     /// The info panel's close or back button, then its buttons and tabs
-    /// in reading order. Its members, pictures, documents and links are
-    /// pointer and accessibility targets, like chat rows.
+    /// in reading order. A group's members are one list, a stop whose
+    /// arrows walk them; its pictures, documents and links are pointer and
+    /// accessibility targets, like chat rows.
     InfoClose,
     InfoControl(u8),
     /// The open chat's message list: one stop, the arrows walk its messages.

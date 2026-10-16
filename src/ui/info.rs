@@ -31,6 +31,8 @@ const NAME_CHECK_STOP: u8 = 2;
 const ACTION_STOP: u8 = 3;
 pub const MEDIA_ROW_STOP: u8 = 10;
 const TAB_STOP: u8 = 20;
+/// A group's members, after the media row.
+const MEMBERS_STOP: u8 = 24;
 const LEAVE_STOP: u8 = 30;
 const RETRY_STOP: u8 = 31;
 
@@ -689,7 +691,10 @@ fn actions(app: &mut App, ui: &mut egui::Ui, shown: &Shown, mine: bool, editable
 }
 
 /// The group's members, each opening their own panel. They are sorted once
-/// per change of the chat list or the contacts, not every frame.
+/// per change of the chat list or the contacts, not every frame. The list
+/// is one Tab stop whose arrows walk the members, as the chat list's do:
+/// only the rows near the view are laid out, so the keys bring the current
+/// one into view.
 fn members(app: &mut App, ui: &mut egui::Ui, id: &str, window: f32, photo: f32) {
     let palette = app.palette;
     if app.info_members.as_ref().is_none_or(|(chat, _)| chat != id) {
@@ -716,64 +721,319 @@ fn members(app: &mut App, ui: &mut egui::Ui, id: &str, window: f32, photo: f32) 
         .floor()
         .clamp(2.0, 8.0);
     let mut open = None;
+    // The list's own rect, as the scroll area below takes it.
+    let height = (members.len() as f32 * row_height).min(row_height * rows);
+    let rect = Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), height));
+    let label = crate::i18n::gettext(app.locale, "Members").into_owned();
+    let pass = ListPass::begin(
+        ui,
+        InfoList::Members,
+        rect,
+        label,
+        members.len(),
+        row_height,
+    );
+    let keys: Vec<String> = members.iter().map(|(member, _)| member.clone()).collect();
+    let current = cursor_index(app, InfoList::Members, &keys);
+    let mut active = None;
+    let mut current_rect = None;
     // `show_rows` reads the spacing from outside its closure.
     ui.spacing_mut().item_spacing.y = 0.0;
-    egui::ScrollArea::vertical()
+    let scroll = egui::ScrollArea::vertical()
         .id_salt(("members", id))
         .max_height(row_height * rows)
-        .auto_shrink([false, true])
-        .show_rows(ui, row_height, members.len(), |ui, range| {
-            for (member, name) in &members[range] {
-                let (rect, response) = ui.allocate_exact_size(
-                    egui::vec2(ui.available_width(), row_height),
-                    egui::Sense::click(),
-                );
-                // Named by the member whose info it opens.
-                widgets::name_button(&response, crate::a11y::without_push_marker(name));
-                if ui.is_rect_visible(rect) {
-                    if response.hovered() {
-                        ui.painter().rect_filled(rect, 6.0, palette.surface_hover);
-                    }
-                    let picture = app.avatar(member);
-                    let avatar = egui::Rect::from_center_size(
-                        egui::pos2(rect.left() + 16.0, rect.center().y),
-                        egui::Vec2::splat(24.0),
-                    );
-                    widgets::paint_avatar(
-                        ui,
-                        &palette,
-                        avatar,
-                        name.trim_start_matches('~'),
-                        member,
-                        picture.as_deref(),
-                    );
-                    let line = widgets::line(
-                        ui,
-                        name,
-                        theme::regular(13.0),
-                        palette.text,
-                        rect.width() - 40.0,
-                        1,
-                    );
-                    line.paint(
-                        ui,
-                        egui::pos2(rect.left() + 34.0, rect.center().y - line.size().y / 2.0),
-                        palette.text,
-                    );
-                }
-                if response
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .clicked()
-                {
-                    open = Some(member.clone());
-                }
+        .auto_shrink([false, true]);
+    let scroll = pass.scroll(ui.ctx(), scroll, current, row_height, 0.0);
+    let output = scroll.show_rows(ui, row_height, members.len(), |ui, range| {
+        let first = range.start;
+        for (offset, (member, name)) in members[range].iter().enumerate() {
+            let index = first + offset;
+            // Clicks only, never focus: the keyboard reaches the members
+            // through the list's one stop and its arrows.
+            let (rect, response) = ui
+                .scope_builder(
+                    super::list_nav::row_builder(ui, ("member", member), pass.id),
+                    |ui| {
+                        ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), row_height),
+                            Sense::CLICK,
+                        )
+                    },
+                )
+                .inner;
+            // Named by the member whose info it opens.
+            let spoken = crate::a11y::without_push_marker(name);
+            widgets::name_button(&response, spoken);
+            super::list_nav::mark_row(
+                ui.ctx(),
+                response.id,
+                spoken.to_owned(),
+                index,
+                members.len(),
+                rect,
+                false,
+            );
+            if Some(index) == current {
+                active = Some(pass.current(ui, &response, 6.0));
+                current_rect = Some(rect);
             }
-        });
-    app.info_members = Some((id.to_owned(), members));
-    if let Some(member) = open
-        && Some(member.as_str()) != app.me.as_deref()
+            if ui.is_rect_visible(rect) {
+                if response.hovered() {
+                    ui.painter().rect_filled(rect, 6.0, palette.surface_hover);
+                }
+                let picture = app.avatar(member);
+                let avatar = egui::Rect::from_center_size(
+                    egui::pos2(rect.left() + 16.0, rect.center().y),
+                    egui::Vec2::splat(24.0),
+                );
+                widgets::paint_avatar(
+                    ui,
+                    &palette,
+                    avatar,
+                    name.trim_start_matches('~'),
+                    member,
+                    picture.as_deref(),
+                );
+                let line = widgets::line(
+                    ui,
+                    name,
+                    theme::regular(13.0),
+                    palette.text,
+                    rect.width() - 40.0,
+                    1,
+                );
+                line.paint(
+                    ui,
+                    egui::pos2(rect.left() + 34.0, rect.center().y - line.size().y / 2.0),
+                    palette.text,
+                );
+            }
+            if response
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
+                open = Some(member.clone());
+            }
+        }
+    });
+    pass.remember(ui.ctx(), &output);
+    // The overview scrolls too: the current member comes into its view as
+    // well, asked for outside the list's own scroll area, which took its
+    // own request.
+    if pass.reveal
+        && let Some(rect) = current_rect
     {
-        app.actions.push(Action::OpenInfo(member));
+        ui.scroll_to_rect_animation(rect, None, egui::style::ScrollAnimation::none());
+    }
+    pass.finish(ui.ctx(), active);
+    app.info_members = Some((id.to_owned(), members));
+    if let Some(member) = open {
+        open_member(app, &member);
+    }
+}
+
+/// Opens a member's own panel, as clicking their row does. Our own row opens
+/// nothing.
+fn open_member(app: &mut App, member: &str) {
+    if Some(member) != app.me.as_deref() {
+        app.actions.push(Action::OpenInfo(member.to_owned()));
+    }
+}
+
+/// The panel's lists. Each is one Tab stop, a ListBox whose arrows walk its
+/// rows and whose current row is its active descendant, as the chat list's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InfoList {
+    /// A group's members, in the overview.
+    Members,
+}
+
+impl InfoList {
+    const EVERY: [InfoList; 1] = [InfoList::Members];
+
+    /// Where the list's current row is kept in `App::info_cursor`.
+    fn slot(self) -> usize {
+        self as usize
+    }
+
+    fn stop(self) -> Stop {
+        match self {
+            InfoList::Members => Stop::InfoControl(MEMBERS_STOP),
+        }
+    }
+}
+
+/// The focusable list widget of `list`.
+pub fn list_id(list: InfoList) -> egui::Id {
+    egui::Id::new(("info-list", list as u8))
+}
+
+/// The list of the panel that has focus, if one has.
+fn focused_list(ctx: &egui::Context) -> Option<InfoList> {
+    InfoList::EVERY
+        .into_iter()
+        .find(|list| ctx.memory(|memory| memory.has_focus(list_id(*list))))
+}
+
+/// The rows `list` shows, each by the key its current row is kept under.
+fn row_keys(app: &App, list: InfoList) -> Vec<String> {
+    let shown = app.info.as_ref().map(|info| info.chat.as_str());
+    match list {
+        InfoList::Members => app
+            .info_members
+            .as_ref()
+            .filter(|(chat, _)| Some(chat.as_str()) == shown)
+            .map(|(_, members)| members.iter().map(|(member, _)| member.clone()).collect())
+            .unwrap_or_default(),
+    }
+}
+
+/// Where `list`'s current row is among its rows `keys`: the one the keys
+/// reached while it is listed, else the first.
+fn cursor_index(app: &App, list: InfoList, keys: &[String]) -> Option<usize> {
+    app.info_cursor[list.slot()]
+        .as_ref()
+        .and_then(|wanted| keys.iter().position(|key| key == wanted))
+        .or_else(|| (!keys.is_empty()).then_some(0))
+}
+
+/// Notes that the keys moved the current row of `list` in this frame: its
+/// passes bring the row into view.
+fn note_moved(ctx: &egui::Context, list: egui::Id) {
+    let frame = ctx.cumulative_frame_nr();
+    ctx.data_mut(|data| data.insert_temp(list.with("moved"), frame));
+}
+
+/// About a screen of the list `list`'s rows, as PgUp and PgDn move.
+fn page_rows(ctx: &egui::Context, list: egui::Id) -> usize {
+    ctx.data(|data| data.get_temp::<usize>(list.with("page")))
+        .unwrap_or(8)
+}
+
+/// Takes this frame's keys for the panel's focused list: the arrows, Home,
+/// End and the page keys move its current row, and Enter or Space acts on
+/// it as a click does.
+pub fn list_keys(app: &mut App, ctx: &egui::Context) {
+    let Some(list) = focused_list(ctx).filter(|_| app.info_visible()) else {
+        return;
+    };
+    let id = list_id(list);
+    let keys = row_keys(app, list);
+    let current = cursor_index(app, list, &keys);
+    if let Some(step) = super::list_nav::take_step(ctx, || page_rows(ctx, id)) {
+        if let Some(index) = super::list_nav::step(current, keys.len(), step) {
+            app.info_cursor[list.slot()] = Some(keys[index].clone());
+        }
+        note_moved(ctx, id);
+        return;
+    }
+    let activate = ctx.input_mut(|input| {
+        super::keys::take_plain(input, egui::Key::Enter)
+            | super::keys::take_plain(input, egui::Key::Space)
+    });
+    let Some(index) = current.filter(|_| activate) else {
+        return;
+    };
+    // Acting from the keyboard is keyboard navigation, as Tab is: the focus
+    // it moves, such as into a member's panel, is shown.
+    ctx.data_mut(|data| data.insert_temp(theme::keyboard_focus_id(), true));
+    let key = keys[index].clone();
+    app.info_cursor[list.slot()] = Some(key.clone());
+    match list {
+        InfoList::Members => open_member(app, &key),
+    }
+}
+
+/// One of the panel's lists in the pass that draws it.
+struct ListPass {
+    id: egui::Id,
+    focused: bool,
+    /// Whether the current row is to be brought into view: the list was
+    /// reached by keyboard, or its keys moved the row, in this pass.
+    reveal: bool,
+}
+
+impl ListPass {
+    /// Creates the list's container over `rect`, before its rows, so their
+    /// nodes can hang from its node. It senses no pointer input, so pointer
+    /// users see the list exactly as before. `pitch` is a row's height, for
+    /// the page keys.
+    fn begin(
+        ui: &mut egui::Ui,
+        list: InfoList,
+        rect: Rect,
+        label: String,
+        len: usize,
+        pitch: f32,
+    ) -> Self {
+        let id = list_id(list);
+        let response =
+            super::list_nav::container(ui, id, rect, || label, len).tab_stop(list.stop());
+        // About a screen of rows, as PgUp and PgDn move.
+        let page = (rect.height() / pitch).floor().max(1.0) as usize;
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(id.with("page"), page));
+        let keyboard = ui.ctx().data(|data| {
+            data.get_temp::<bool>(theme::keyboard_focus_id())
+                .unwrap_or(false)
+        });
+        let moved = ui.ctx().data(|data| data.get_temp::<u64>(id.with("moved")))
+            == Some(ui.ctx().cumulative_frame_nr());
+        let focused = response.has_focus();
+        Self {
+            id,
+            focused,
+            reveal: focused && ((response.gained_focus() && keyboard) || moved),
+        }
+    }
+
+    /// `scroll`, moved to show row `row` when the current row is to be
+    /// brought into view: a row the scroll area does not lay out has no
+    /// node to name, nor a place for the focus ring. `height` and `spacing`
+    /// are the rows' as `show_rows` lays them out.
+    fn scroll(
+        &self,
+        ctx: &egui::Context,
+        scroll: egui::ScrollArea,
+        row: Option<usize>,
+        height: f32,
+        spacing: f32,
+    ) -> egui::ScrollArea {
+        let Some(row) = row.filter(|_| self.reveal) else {
+            return scroll;
+        };
+        let Some((offset, viewport)) =
+            ctx.data(|data| data.get_temp::<(f32, f32)>(self.id.with("scroll")))
+        else {
+            return scroll;
+        };
+        scroll.vertical_scroll_offset(super::chats::row_scroll_offset(
+            offset, viewport, row, height, spacing,
+        ))
+    }
+
+    /// Keeps where the scroll area stood and how tall it was, for
+    /// [`ListPass::scroll`] in the next frame.
+    fn remember<R>(&self, ctx: &egui::Context, output: &egui::scroll_area::ScrollAreaOutput<R>) {
+        let at = (output.state.offset.y, output.inner_rect.height());
+        ctx.data_mut(|data| data.insert_temp(self.id.with("scroll"), at));
+    }
+
+    /// The current row, `response`, drawn in this pass: it carries the
+    /// list's focus ring, drawn only after keyboard navigation, and its node
+    /// is the list's active descendant.
+    fn current(&self, ui: &egui::Ui, response: &egui::Response, radius: f32) -> egui::Id {
+        if self.focused {
+            theme::focus_outline(ui, self.id, response.rect, radius);
+            if self.reveal {
+                response.scroll_to_me_animation(None, egui::style::ScrollAnimation::none());
+            }
+        }
+        response.id
+    }
+
+    fn finish(self, ctx: &egui::Context, active: Option<egui::Id>) {
+        super::list_nav::set_active(ctx, self.id, active);
     }
 }
 

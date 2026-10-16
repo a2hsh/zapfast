@@ -14344,6 +14344,95 @@ mod tests {
         }
     }
 
+    /// The sample group's info panel, its members joined by `extra` people
+    /// known by their number, laid out.
+    fn group_info_with_members(extra: usize) -> (App, egui::Context) {
+        let mut app = app();
+        apply_flags(&mut app, Some("group-info"));
+        let group = app.open_chat.clone().expect("the group is open");
+        let chat = app
+            .chats
+            .iter_mut()
+            .find(|chat| chat.id == group)
+            .expect("the group is listed");
+        for index in 0..extra {
+            chat.participants
+                .push(format!("4915550{index:04}@s.whatsapp.net"));
+        }
+        app.info_members = None;
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        (app, ctx)
+    }
+
+    /// A group's members are one list after the media row: one Tab stop,
+    /// named and counted, whose arrows walk every member, those scrolled
+    /// out of the panel's view included, and Enter opens the member's own
+    /// panel, as a click does.
+    #[test]
+    fn the_info_panels_members_are_one_list() {
+        use crate::ui::focus::Stop;
+        use crate::ui::info::{InfoList, MEDIA_ROW_STOP, list_id};
+        let (mut app, ctx) = group_info_with_members(40);
+        let group = app.open_chat.clone().unwrap();
+        let members = app.participant_list(app.chat(&group).unwrap());
+        assert!(members.len() > 40, "{}", members.len());
+        let list = list_id(InfoList::Members);
+        let media_row = stop_id(&ctx, Stop::InfoControl(MEDIA_ROW_STOP));
+        ctx.memory_mut(|memory| memory.request_focus(media_row));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        assert_eq!(focused(&ctx), Some(list), "the stop after the media row");
+        let tree = tree_after(&mut app, &ctx, None);
+        let (node_of_list, active) = list_nodes(&tree, list);
+        assert_eq!(node_of_list.role(), egui::accesskit::Role::ListBox);
+        assert_eq!(node_of_list.label(), Some("Members"));
+        assert_eq!(node_of_list.size_of_set(), Some(members.len()));
+        assert_eq!(tree.focus, list.accesskit_id());
+        let active = active.expect("the first member is current");
+        assert_eq!(active.role(), egui::accesskit::Role::ListBoxOption);
+        assert_eq!(active.position_in_set(), Some(0));
+        let last = members.len() - 1;
+        for (key, expected) in [
+            (egui::Key::ArrowDown, 1),
+            (egui::Key::ArrowDown, 2),
+            (egui::Key::End, last),
+            (egui::Key::ArrowUp, last - 1),
+            (egui::Key::Home, 0),
+            (egui::Key::PageDown, 0),
+        ] {
+            let tree = tree_after(&mut app, &ctx, Some(key));
+            let active = list_nodes(&tree, list)
+                .1
+                .expect("the current member is drawn");
+            if key == egui::Key::PageDown {
+                assert!(
+                    active.position_in_set().is_some_and(|at| at > 1),
+                    "a page down: {:?}",
+                    active.position_in_set()
+                );
+                continue;
+            }
+            assert_eq!(active.position_in_set(), Some(expected), "{key:?}");
+            assert_eq!(active.size_of_set(), Some(members.len()));
+            assert_eq!(
+                active.label(),
+                Some(crate::a11y::without_push_marker(&members[expected].1)),
+                "{key:?}"
+            );
+            assert_eq!(focused(&ctx), Some(list), "{key:?}");
+        }
+        press_key(&mut app, &ctx, egui::Key::Home, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(
+            app.info.as_ref().map(|info| info.chat.clone()),
+            Some(members[1].0.clone()),
+            "Enter opens the member's panel"
+        );
+    }
+
     /// The timer line says what WhatsApp says: a duration for a chat with one,
     /// "Off" for a chat the phone turned it off for, and nothing at all for a
     /// chat nobody has mentioned a timer for, which includes a frame where the
