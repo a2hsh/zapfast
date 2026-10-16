@@ -27568,6 +27568,108 @@ mod call_surface_tests {
         assert_eq!(find(&tree, "Camera").toggled(), Some(Toggled::True));
     }
 
+    /// N21: everyone on a group call is a list item of one list, named and
+    /// with their state, though the grid paints them; a ringing group call's
+    /// faces read who they are. A locked group names nobody.
+    #[test]
+    fn a_group_call_lists_everyone_on_it_to_a_screen_reader() {
+        fn people(page: &str) -> Vec<String> {
+            let mut app = app();
+            apply_flags(&mut app, Some(page));
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            app.attach(&ctx);
+            let tree = settle_with(&mut app, &ctx, Vec::new());
+            people_in(&tree)
+        }
+        fn people_in(tree: &egui::accesskit::TreeUpdate) -> Vec<String> {
+            let node = |id: egui::accesskit::NodeId| {
+                tree.nodes
+                    .iter()
+                    .find(|(found, _)| *found == id)
+                    .map(|(_, node)| node.clone())
+                    .expect("in the tree")
+            };
+            let Some((_, list)) = tree.nodes.iter().find(|(_, node)| {
+                node.role() == egui::accesskit::Role::List
+                    && node.label() == Some("People on the call")
+            }) else {
+                return Vec::new();
+            };
+            let items: Vec<_> = list
+                .children()
+                .iter()
+                .map(|id| node(*id))
+                .filter(|item| item.role() == egui::accesskit::Role::ListItem)
+                .collect();
+            // Counted from 0, as AccessKit wants: a screen reader says
+            // "1 of 6" for the first.
+            for (index, item) in items.iter().enumerate() {
+                assert_eq!(item.position_in_set(), Some(index), "{:?}", item.label());
+                assert_eq!(item.size_of_set(), Some(items.len()));
+            }
+            items
+                .iter()
+                .map(|item| item.label().unwrap_or_default().to_owned())
+                .collect()
+        }
+        assert_eq!(
+            people("call-group-active"),
+            [
+                "Jonas",
+                "Mira",
+                "Tom",
+                "Ada Lovelace",
+                "You",
+                "Grace Hopper, invited"
+            ]
+        );
+        assert_eq!(
+            people("call-group-video"),
+            [
+                "Jonas, camera on",
+                "Mira, camera on",
+                "Tom",
+                "Ada Lovelace, camera on",
+                "You, camera on",
+                "Grace Hopper, invited"
+            ]
+        );
+        assert!(people("call-group-muted").contains(&"You, muted".to_owned()));
+
+        let mut ringing = app();
+        apply_flags(&mut ringing, Some("call-group"));
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        ringing.attach(&ctx);
+        let tree = settle_with(&mut ringing, &ctx, Vec::new());
+        assert!(
+            tree.nodes
+                .iter()
+                .any(|(_, node)| node.value()
+                    == Some("On the call: Jonas, Mira, Tom and Ada Lovelace")),
+            "the ringing faces read who is on the call"
+        );
+
+        let mut locked = app();
+        apply_flags(&mut locked, Some("call-group-active"));
+        let group = locked.call.as_ref().unwrap().chat.clone();
+        for chat in locked.chats.iter_mut().filter(|chat| chat.id == group) {
+            chat.locked = true;
+        }
+        locked.settings.set_chat_lock_code(Some("test-code"));
+        locked.call_surface_hidden = false;
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        locked.attach(&ctx);
+        let tree = settle_with(&mut locked, &ctx, Vec::new());
+        let named = people_in(&tree);
+        assert!(
+            named.iter().all(|name| name == "You"),
+            "a locked group names nobody: {named:?}"
+        );
+    }
+
     /// A key typed for the message field just as a call comes up does not
     /// answer or refuse it: focus still lands on Accept, but Enter and Space
     /// there wait a moment after the screen takes focus, and a key held down

@@ -880,6 +880,16 @@ camera going off or on, a device that went away, or their audio not
 getting through. On a video call the name and the call's length over the
 other side's picture are read as one label.
 
+On a group call the tiles are one list, People on the call, whose items
+read each person's name and state: "Grace, invited", "Mira, camera on",
+"You, muted", and how many more a full grid counts on its last tile. A
+group call that rings reads its faces as "On the call: Jonas, Mira and 3
+more". While the call screen is open, who joins or leaves is said once the
+roster settles, one person by name ("Mira joined the call", "Tom left the
+call") and a burst as a count ("3 people joined the call"); a locked
+group's call names nobody. A call link says "Waiting to be let in" while
+the call decides, then "You are in the call".
+
 The message input is named after the open chat, "Type a message to Ada" or
 "Type a message to group Rust Berlin", so opening a chat from the keyboard
 says whose chat it is. While a reply is pending, the input's description says what it

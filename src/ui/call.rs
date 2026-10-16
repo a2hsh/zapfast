@@ -751,8 +751,16 @@ pub(crate) fn lost_device_text(locale: Locale, lost: &crate::calls::LostDevice) 
 /// than its length, which counts on. Nothing while the call rings, which is
 /// announced as it starts.
 pub(crate) fn spoken_status(locale: Locale, call: &CallUpdate) -> Option<String> {
+    // A call link's "Connecting…" waits for the call to let us in.
+    let link = call.group.as_ref().is_some_and(|group| group.link);
     match call.phase {
         CallPhase::Incoming => None,
+        CallPhase::Placing | CallPhase::Connecting if link => {
+            Some(gettext(locale, "Waiting to be let in").into_owned())
+        }
+        CallPhase::Accepted | CallPhase::Active if link => {
+            Some(gettext(locale, "You are in the call").into_owned())
+        }
         CallPhase::Active => Some(gettext(locale, "Connected").into_owned()),
         _ => Some(status(locale, call)),
     }
@@ -1126,7 +1134,7 @@ fn ringing(
         let joined: Vec<&CallPerson> = who.people.iter().filter(|person| person.joined).collect();
         if !joined.is_empty() {
             ui.add_space(16.0);
-            faces(ui, palette, &joined);
+            faces(ui, locale, palette, &joined);
         }
     });
     bottom_row(ui, area, CONTROL + 26.0, |ui| {
@@ -1170,13 +1178,17 @@ const FACE: f32 = 36.0;
 
 /// A row of the pictures of the people on a group call, overlapping as
 /// WhatsApp draws them, and "+N" for those past the first few.
-fn faces(ui: &mut egui::Ui, palette: &Palette, people: &[&CallPerson]) {
+fn faces(ui: &mut egui::Ui, locale: Locale, palette: &Palette, people: &[&CallPerson]) {
     let shown = people.len().min(FACES);
     let extra = people.len() - shown;
     let step = FACE * 0.72;
     let count = shown + usize::from(extra > 0);
     let width = FACE + step * (count.saturating_sub(1)) as f32;
-    let (rect, _) = ui.allocate_exact_size(vec2(width, FACE), egui::Sense::hover());
+    let (rect, response) = ui.allocate_exact_size(vec2(width, FACE), egui::Sense::hover());
+    // The pictures are painted: the row reads who they are, as it shows them.
+    let names: Vec<String> = people.iter().map(|person| person.name.clone()).collect();
+    let label = crate::a11y::call_faces_label(locale, &names, FACES);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
     for (index, person) in people.iter().take(shown).enumerate() {
         let at = Rect::from_min_size(
             egui::pos2(rect.left() + step * index as f32, rect.top()),
@@ -1359,57 +1371,122 @@ fn group_live(
     );
     let rects = tile_grid(tiles.len(), grid, TILE_GAP);
     let you = gettext(locale, "You").into_owned();
-    for (tile, rect) in tiles.into_iter().zip(rects) {
-        match tile {
-            // A member whose camera is on fills their tile with it; anyone
-            // else keeps their photo, so nobody leaves the grid by turning it
-            // off.
-            Tile::Person(person) => match person
-                .video
-                .then(|| app.call_member_frames.get(&person.id).cloned())
-                .flatten()
-            {
-                Some(image) => {
-                    let mut kept = app.call_member_textures.remove(&person.id);
-                    let texture = call_texture(ui, &mut kept, "zapfast-call-member", &image);
-                    if let Some(kept) = kept {
-                        app.call_member_textures.insert(person.id.clone(), kept);
+    let count = tiles.len();
+    let ppp = ui.ctx().pixels_per_point();
+    // The tiles are one list, each a list item read as its name and state,
+    // for the painted pictures and names a screen reader cannot read. Its
+    // scopes change no pixel.
+    ui.scope_builder(
+        egui::UiBuilder::new().id(egui::Id::new(SURFACE).with("people")),
+        |ui| {
+            let list = gettext(locale, "People on the call").into_owned();
+            ui.ctx().accesskit_node_builder(ui.unique_id(), |node| {
+                node.set_role(egui::accesskit::Role::List);
+                node.set_label(list);
+                node.set_size_of_set(count);
+            });
+            for (index, (tile, rect)) in tiles.into_iter().zip(rects).enumerate() {
+                let label = match &tile {
+                    Tile::Person(person) => crate::a11y::call_tile_label(
+                        locale,
+                        &person.name,
+                        !person.joined,
+                        person.video && app.call_member_frames.contains_key(&person.id),
+                        false,
+                    ),
+                    Tile::Me(_) => {
+                        crate::a11y::call_tile_label(locale, &you, false, true, call.muted)
                     }
-                    video_tile(ui, &person.name, texture, image_size(&image), rect);
-                }
-                None => person_tile(ui, locale, palette, person, rect),
-            },
-            // Our own camera takes a tile of its own beside the others rather
-            // than floating over one of them.
-            Tile::Me(image) => {
-                let texture = call_texture(
-                    ui,
-                    &mut app.call_local_texture,
-                    "zapfast-call-local",
-                    &image,
-                );
-                video_tile(ui, &you, texture, image_size(&image), rect);
-                if call.muted {
-                    muted_badge(ui, palette, rect);
-                }
-            }
-            Tile::MyPhoto(me) => {
-                person_tile(ui, locale, palette, me, rect);
-                if call.muted {
-                    muted_badge(ui, palette, rect);
-                }
-            }
-            Tile::More(rest) => {
-                ui.painter()
-                    .rect_filled(rect, CornerRadius::same(14), tile_fill(palette));
-                ui.painter().text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    format!("+{rest}"),
-                    theme::bold(24.0),
-                    palette.secondary,
+                    Tile::MyPhoto(_) => {
+                        crate::a11y::call_tile_label(locale, &you, false, false, call.muted)
+                    }
+                    Tile::More(rest) => crate::a11y::call_more(locale, *rest),
+                };
+                ui.scope_builder(
+                    egui::UiBuilder::new().id(egui::Id::new(SURFACE).with(("tile", index))),
+                    |ui| {
+                        ui.ctx().accesskit_node_builder(ui.unique_id(), |node| {
+                            node.set_role(egui::accesskit::Role::ListItem);
+                            node.set_label(label);
+                            // AccessKit counts from 0; the platforms say
+                            // "1 of 6" for the first.
+                            node.set_position_in_set(index);
+                            node.set_size_of_set(count);
+                            node.set_bounds(egui::accesskit::Rect {
+                                x0: f64::from(rect.min.x * ppp),
+                                y0: f64::from(rect.min.y * ppp),
+                                x1: f64::from(rect.max.x * ppp),
+                                y1: f64::from(rect.max.y * ppp),
+                            });
+                        });
+                        draw_tile(ui, app, call, palette, &you, tile, rect);
+                    },
                 );
             }
+        },
+    );
+}
+
+/// Draws one tile of a group call's grid.
+fn draw_tile(
+    ui: &mut egui::Ui,
+    app: &mut App,
+    call: &CallUpdate,
+    palette: &Palette,
+    you: &str,
+    tile: Tile<'_>,
+    rect: Rect,
+) {
+    let locale = app.locale;
+    match tile {
+        // A member whose camera is on fills their tile with it; anyone
+        // else keeps their photo, so nobody leaves the grid by turning it
+        // off.
+        Tile::Person(person) => match person
+            .video
+            .then(|| app.call_member_frames.get(&person.id).cloned())
+            .flatten()
+        {
+            Some(image) => {
+                let mut kept = app.call_member_textures.remove(&person.id);
+                let texture = call_texture(ui, &mut kept, "zapfast-call-member", &image);
+                if let Some(kept) = kept {
+                    app.call_member_textures.insert(person.id.clone(), kept);
+                }
+                video_tile(ui, &person.name, texture, image_size(&image), rect);
+            }
+            None => person_tile(ui, locale, palette, person, rect),
+        },
+        // Our own camera takes a tile of its own beside the others rather
+        // than floating over one of them.
+        Tile::Me(image) => {
+            let texture = call_texture(
+                ui,
+                &mut app.call_local_texture,
+                "zapfast-call-local",
+                &image,
+            );
+            video_tile(ui, you, texture, image_size(&image), rect);
+            if call.muted {
+                muted_badge(ui, palette, rect);
+            }
+        }
+        Tile::MyPhoto(me) => {
+            person_tile(ui, locale, palette, me, rect);
+            if call.muted {
+                muted_badge(ui, palette, rect);
+            }
+        }
+        Tile::More(rest) => {
+            ui.painter()
+                .rect_filled(rect, CornerRadius::same(14), tile_fill(palette));
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                format!("+{rest}"),
+                theme::bold(24.0),
+                palette.secondary,
+            );
         }
     }
 }

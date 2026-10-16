@@ -296,6 +296,96 @@ pub fn call_heading(locale: Locale, place: TitlePlace<'_>) -> String {
     }
 }
 
+/// Who is on a group call that rings, as its row of faces shows them: the
+/// first `shown` by name, then how many more, "On the call: Jonas, Mira and
+/// 3 more".
+pub fn call_faces_label(locale: Locale, names: &[String], shown: usize) -> String {
+    let mut parts: Vec<String> = names
+        .iter()
+        .take(shown)
+        .map(|name| spoken(without_push_marker(name)))
+        .collect();
+    let more = names.len().saturating_sub(shown);
+    if more > 0 {
+        parts.push(call_more(locale, more));
+    }
+    fill(
+        // Translators: who is on a group call that rings, such as "On the
+        // call: Jonas, Mira and 3 more".
+        &gettext(locale, "On the call: {names}"),
+        &[("names", &spoken_list(locale, &parts).unwrap_or_default())],
+    )
+}
+
+/// How many more people are on a group call than are named or shown.
+pub fn call_more(locale: Locale, count: usize) -> String {
+    let count = u32::try_from(count).unwrap_or(u32::MAX);
+    // Translators: people on a group call past those named, as in "On the
+    // call: Jonas, Mira and 3 more", and the last tile of a full grid.
+    ngettext(locale, "{count} more", "{count} more", count).replace("{count}", &count.to_string())
+}
+
+/// One person's tile on a group call, as a screen reader reads it: their
+/// name, then whether they were only asked to the call, whether their
+/// camera's picture fills the tile, and, on our own, whether we are muted.
+pub fn call_tile_label(
+    locale: Locale,
+    name: &str,
+    invited: bool,
+    camera: bool,
+    muted: bool,
+) -> String {
+    let mut parts = vec![spoken(without_push_marker(name))];
+    if invited {
+        // Translators: said after the name of someone asked to a group call
+        // who has not joined it, as the tile's "Invited" shows.
+        parts.push(gettext(locale, "invited").into_owned());
+    }
+    if camera {
+        // Translators: said after a name on a group call whose camera's
+        // picture fills their tile.
+        parts.push(gettext(locale, "camera on").into_owned());
+    }
+    if muted {
+        // Translators: said after "You" on a group call while our
+        // microphone is muted; a chat whose notifications are off has its
+        // own "muted".
+        parts.push(crate::i18n::pgettext(locale, "microphone", "muted").into_owned());
+    }
+    parts.join(", ")
+}
+
+/// Who joined or left a group call in one burst: one person by name, more
+/// as a count, "3 people joined the call".
+pub fn call_roster_change(locale: Locale, names: &[String], joined: bool) -> Option<String> {
+    let count = u32::try_from(names.len()).unwrap_or(u32::MAX);
+    Some(match (names, joined) {
+        ([], _) => return None,
+        ([name], true) => fill(
+            &gettext(locale, "{name} joined the call"),
+            &[("name", &spoken(without_push_marker(name)))],
+        ),
+        ([name], false) => fill(
+            &gettext(locale, "{name} left the call"),
+            &[("name", &spoken(without_push_marker(name)))],
+        ),
+        (_, true) => ngettext(
+            locale,
+            "{count} person joined the call",
+            "{count} people joined the call",
+            count,
+        )
+        .replace("{count}", &count.to_string()),
+        (_, false) => ngettext(
+            locale,
+            "{count} person left the call",
+            "{count} people left the call",
+            count,
+        )
+        .replace("{count}", &count.to_string()),
+    })
+}
+
 /// Joins the parts a screen reader announces for a message with ", ".
 pub fn message_label(locale: Locale, label: &MessageLabel<'_>) -> String {
     let mut parts: Vec<String> = Vec::new();

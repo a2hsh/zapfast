@@ -35,6 +35,16 @@ pub struct CallPerson {
     pub video: bool,
 }
 
+/// Who joined or left a group call on screen since the last time it was
+/// said, by id and name, held until the roster goes quiet so a burst is said
+/// as one count (`App::flush_call_roster`).
+pub(super) struct RosterHold {
+    generation: u64,
+    joined: Vec<(String, String)>,
+    left: Vec<(String, String)>,
+    settle: crate::announcer::Settle,
+}
+
 /// How long a call may stay placing with no word from its worker before the
 /// screen gives up on it. Placing waits on device checks, the camera (whose
 /// first use on macOS asks permission) and the peer's devices, so this is
@@ -468,6 +478,119 @@ impl App {
         for text in said {
             self.announcer.say(Category::ChatStatus, text);
         }
+        self.hold_roster_change(before.as_ref(), &call);
+    }
+
+    /// Notes who joined or left a group call since `before`, while its screen
+    /// is open, to be said once the roster settles. Nobody of a locked
+    /// chat's call is named, and someone who comes and goes within one burst
+    /// is not said at all.
+    fn hold_roster_change(&mut self, before: Option<&CallUpdate>, call: &CallUpdate) {
+        let joined_ids = |call: &CallUpdate| -> Vec<String> {
+            call.group
+                .iter()
+                .flat_map(|group| group.joined())
+                .map(|person| person.id.clone())
+                .collect()
+        };
+        let Some(before) = before else {
+            return;
+        };
+        if !self.call_surface_open() || self.call_is_private() || call.group.is_none() {
+            return;
+        }
+        // The roster a call link lets us in with is who was there already,
+        // not people joining: "You are in the call" says enough.
+        let admitted = call.group.as_ref().is_some_and(|group| group.link)
+            && !matches!(before.phase, CallPhase::Accepted | CallPhase::Active);
+        if admitted {
+            return;
+        }
+        let (was, now) = (joined_ids(before), joined_ids(call));
+        let came: Vec<String> = now.iter().filter(|id| !was.contains(id)).cloned().collect();
+        let went: Vec<String> = was.iter().filter(|id| !now.contains(id)).cloned().collect();
+        if came.is_empty() && went.is_empty() {
+            return;
+        }
+        let named = |app: &mut Self, ids: Vec<String>| -> Vec<(String, String)> {
+            app.with_call_account(|app| {
+                ids.into_iter()
+                    .map(|id| {
+                        let name = app.display_name(&id);
+                        (id, name)
+                    })
+                    .collect()
+            })
+        };
+        let came = named(self, came);
+        let went = named(self, went);
+        let now = Instant::now();
+        let hold = match self.call_roster.take() {
+            Some(mut hold) if hold.generation == call.generation => {
+                hold.settle.touch(now);
+                hold
+            }
+            _ => RosterHold {
+                generation: call.generation,
+                joined: Vec::new(),
+                left: Vec::new(),
+                settle: crate::announcer::Settle::new(now),
+            },
+        };
+        let mut hold = hold;
+        for person in came {
+            match hold.left.iter().position(|(id, _)| *id == person.0) {
+                Some(index) => {
+                    hold.left.remove(index);
+                }
+                None => hold.joined.push(person),
+            }
+        }
+        for person in went {
+            match hold.joined.iter().position(|(id, _)| *id == person.0) {
+                Some(index) => {
+                    hold.joined.remove(index);
+                }
+                None => hold.left.push(person),
+            }
+        }
+        self.call_roster = Some(hold);
+    }
+
+    /// Says who joined and left the group call on screen, once the roster
+    /// has been quiet a moment (or held long enough), and returns when the
+    /// held change is due. A change for a call no longer on its screen, or
+    /// behind the lock screen, is dropped.
+    pub(super) fn flush_call_roster(&mut self, now: Instant) -> Option<Instant> {
+        let generation = self.call.as_ref().map(|call| call.generation);
+        let hold = self.call_roster.as_ref()?;
+        if Some(hold.generation) != generation
+            || !self.call_surface_open()
+            || self.app_lock.is_locked()
+            || self.call_is_private()
+        {
+            self.call_roster = None;
+            return None;
+        }
+        let due = hold
+            .settle
+            .deadline(crate::announcer::QUIET, crate::announcer::MAX_HOLD);
+        if now < due {
+            return Some(due);
+        }
+        let hold = self.call_roster.take()?;
+        let names = |people: &[(String, String)]| -> Vec<String> {
+            people.iter().map(|(_, name)| name.clone()).collect()
+        };
+        let texts = [
+            crate::a11y::call_roster_change(self.locale, &names(&hold.joined), true),
+            crate::a11y::call_roster_change(self.locale, &names(&hold.left), false),
+        ];
+        for text in texts.into_iter().flatten() {
+            self.announcer
+                .say(crate::announcer::Category::ChatStatus, text);
+        }
+        None
     }
 
     /// Places a call from the chat header or the Calls page: the screen shows
@@ -1616,6 +1739,115 @@ mod tests {
         press(&mut app, egui::Key::M, chord, false);
         assert!(app.actions.is_empty());
         assert_eq!(heard(&mut app), ["Incoming call: Accept or Decline"]);
+    }
+
+    /// A group call's update with `joined` on it, all joined.
+    fn group(generation: u64, joined: &[&str]) -> CallUpdate {
+        let mut update = update(generation, CallPhase::Active);
+        update.group = Some(crate::calls::GroupCall {
+            link: false,
+            caller: None,
+            participants: joined
+                .iter()
+                .map(|id| crate::calls::Participant {
+                    id: (*id).to_owned(),
+                    joined: true,
+                    video: false,
+                })
+                .collect(),
+        });
+        update
+    }
+
+    /// N21: who joins or leaves a group call is said while its screen is
+    /// open, a burst as one count once the roster settles; nothing while the
+    /// screen is put aside, nor for a locked chat's call.
+    #[test]
+    fn members_joining_or_leaving_are_said_once_the_roster_settles() {
+        const MIRA: &str = "491702222222@s.whatsapp.net";
+        const TOM: &str = "491703333333@s.whatsapp.net";
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _) = app(directory.path());
+        app.handle_call_update(group(1, &[MIRA]));
+        heard(&mut app);
+        app.handle_call_update(group(1, &[MIRA, ADA]));
+        assert!(
+            app.flush_call_roster(Instant::now()).is_some(),
+            "held until the roster settles"
+        );
+        assert!(heard(&mut app).is_empty());
+        let later = Instant::now() + crate::announcer::MAX_HOLD;
+        app.flush_call_roster(later);
+        assert_eq!(heard(&mut app), ["Ada joined the call"]);
+        // Two more join and one leaves in one burst.
+        app.handle_call_update(group(1, &[ADA, TOM, "15550002222@s.whatsapp.net"]));
+        app.handle_call_update(group(1, &[ADA, TOM, "15550002222@s.whatsapp.net"]));
+        app.flush_call_roster(Instant::now() + crate::announcer::MAX_HOLD);
+        let said = heard(&mut app);
+        assert_eq!(said.len(), 2, "{said:?}");
+        assert_eq!(said[0], "2 people joined the call");
+        assert!(said[1].ends_with(" left the call"), "{said:?}");
+        // Someone who comes and goes in one burst is not said.
+        app.handle_call_update(group(1, &[ADA, TOM, "15550002222@s.whatsapp.net", MIRA]));
+        app.handle_call_update(group(1, &[ADA, TOM, "15550002222@s.whatsapp.net"]));
+        app.flush_call_roster(Instant::now() + crate::announcer::MAX_HOLD);
+        assert!(heard(&mut app).is_empty());
+        // With the screen put aside, nothing is said.
+        app.call_surface_hidden = true;
+        app.handle_call_update(group(1, &[ADA]));
+        app.flush_call_roster(Instant::now() + crate::announcer::MAX_HOLD);
+        assert!(heard(&mut app).is_empty());
+
+        // A locked chat's call names nobody joining.
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _) = self::app(directory.path());
+        app.chats[0].locked = true;
+        app.settings.set_chat_lock_code(Some("test-code"));
+        app.handle_call_update(group(1, &[MIRA]));
+        app.call_surface_hidden = false;
+        app.handle_call_update(group(1, &[MIRA, TOM]));
+        app.flush_call_roster(Instant::now() + crate::announcer::MAX_HOLD);
+        assert!(
+            heard(&mut app).iter().all(|text| !text.contains("joined")),
+            "nobody named"
+        );
+    }
+
+    /// N21: joining a call link says that it waits to be let in, and then
+    /// that it is in, without the people already on it said to join.
+    #[test]
+    fn a_call_link_says_it_waits_to_be_let_in() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _) = app(directory.path());
+        let ctx = egui::Context::default();
+        app.apply(
+            Action::OpenUrl("https://call.whatsapp.com/voice/AbCdEf1234567890".to_owned()),
+            &ctx,
+        );
+        assert!(
+            heard(&mut app).contains(&"Waiting to be let in".to_owned()),
+            "while the call service decides"
+        );
+        // Let in with two people on the call already: they are not said
+        // to join.
+        let mut joined = app.call.clone().expect("joining");
+        joined.phase = CallPhase::Accepted;
+        if let Some(group) = joined.group.as_mut() {
+            group.participants = ["491702222222@s.whatsapp.net", "491703333333@s.whatsapp.net"]
+                .into_iter()
+                .map(|id| crate::calls::Participant {
+                    id: id.to_owned(),
+                    joined: true,
+                    video: false,
+                })
+                .collect();
+        }
+        app.handle_call_update(joined.clone());
+        assert_eq!(heard(&mut app), ["You are in the call"]);
+        joined.phase = CallPhase::Active;
+        app.handle_call_update(joined);
+        app.flush_call_roster(Instant::now() + crate::announcer::MAX_HOLD);
+        assert!(heard(&mut app).is_empty(), "said once, and nobody joined");
     }
 
     #[test]

@@ -912,6 +912,9 @@ pub struct App {
     /// The mute state Ctrl+Shift+M asked of a call, by the call's
     /// generation: said once the call's own update confirms it.
     pub call_mute_wanted: Option<(u64, bool)>,
+    /// Who joined or left the group call on screen, held to be said as one
+    /// burst.
+    call_roster: Option<calls::RosterHold>,
     /// The incoming call the desktop was told about, so its notification can
     /// be taken back once it is answered or given up.
     call_notified: Option<u64>,
@@ -1697,6 +1700,7 @@ impl App {
             call_refocus: false,
             call_strip_focus: false,
             call_mute_wanted: None,
+            call_roster: None,
             call_notified: None,
             call_rings: None,
             call_tones: Default::default(),
@@ -2538,10 +2542,12 @@ impl App {
             self.announcer
                 .say(crate::announcer::Category::Message, text);
         }
+        let roster_due = self.flush_call_roster(now);
         self.message_hold
             .deadline()
             .into_iter()
             .chain(self.search_deadlines().into_iter().flatten())
+            .chain(roster_due)
             .min()
     }
 
@@ -10434,6 +10440,7 @@ impl App {
         self.announcer.forget_private();
         // Messages waiting to be spoken must not be heard after the unlock.
         self.message_hold.clear();
+        self.call_roster = None;
         self.window_focused = false;
         self.flush_open_draft();
         self.recording = None;
