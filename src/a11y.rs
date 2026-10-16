@@ -492,22 +492,41 @@ pub struct ViewerItem<'a> {
 
 /// [`ViewerItem`] as one line.
 pub fn viewer_item_label(locale: Locale, item: &ViewerItem<'_>) -> String {
-    // One literal per branch, so both reach the catalogs.
-    let kind = if item.video {
-        gettext(locale, "Video")
-    } else {
-        gettext(locale, "Photo")
-    };
     let at = fill(
         &gettext(locale, "{kind} {position} of {total}"),
         &[
-            ("kind", &kind),
+            ("kind", &media_kind(locale, item.video)),
             ("position", &item.position.to_string()),
             ("total", &item.total.to_string()),
         ],
     );
+    media_item_line(at, item)
+}
+
+/// [`ViewerItem`] as a row of a list that gives a screen reader the row's
+/// position itself, as the info panel's media list does: the viewer's line
+/// without its "3 of 12", so the position is not said twice ("Photo, Ada
+/// Lovelace, Yesterday, 18:04, caption"). `position` and `total` are left
+/// out.
+pub fn listed_media_label(locale: Locale, item: &ViewerItem<'_>) -> String {
+    media_item_line(media_kind(locale, item.video).into_owned(), item)
+}
+
+/// "Photo" or "Video".
+fn media_kind(locale: Locale, video: bool) -> std::borrow::Cow<'static, str> {
+    // One literal per branch, so both reach the catalogs.
+    if video {
+        gettext(locale, "Video")
+    } else {
+        gettext(locale, "Photo")
+    }
+}
+
+/// `first`, then who sent `item`, the day, the time and its caption, each
+/// left out when empty.
+fn media_item_line(first: String, item: &ViewerItem<'_>) -> String {
     [
-        at,
+        first,
         spoken(without_push_marker(item.sender)),
         item.day.to_owned(),
         item.time.to_owned(),
@@ -1271,6 +1290,39 @@ mod tests {
         assert_eq!(
             window_title(Locale::German, TitlePlace::Settings, None),
             "Einstellungen - ZapFast"
+        );
+    }
+
+    /// The viewer names its item with its place in the album; a list row,
+    /// whose list gives the position, names the same item without it.
+    #[test]
+    fn a_listed_picture_leaves_its_position_to_the_list() {
+        let item = ViewerItem {
+            video: false,
+            position: 3,
+            total: 40,
+            sender: "~Ada Lovelace",
+            day: "Yesterday",
+            time: "18:04",
+            caption: "At the lake",
+        };
+        assert_eq!(
+            viewer_item_label(Locale::English, &item),
+            "Photo 3 of 40, Ada Lovelace, Yesterday, 18:04, At the lake"
+        );
+        assert_eq!(
+            listed_media_label(Locale::English, &item),
+            "Photo, Ada Lovelace, Yesterday, 18:04, At the lake"
+        );
+        let video = ViewerItem {
+            video: true,
+            sender: "",
+            caption: "",
+            ..item
+        };
+        assert_eq!(
+            listed_media_label(Locale::English, &video),
+            "Video, Yesterday, 18:04"
         );
     }
 

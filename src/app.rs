@@ -555,7 +555,8 @@ pub struct App {
     /// The panel control that takes the keyboard on the next frame.
     pub(crate) info_focus: Option<InfoFocus>,
     /// The current row of each of the panel's lists, as `ui::info::InfoList`
-    /// numbers them, by the key of the row: a member's id.
+    /// numbers them, by the key of the row: a member's id, a message's id,
+    /// or a link's message and address.
     pub(crate) info_cursor: [Option<String>; 4],
     /// Whether the locked-chats folder is open.
     pub locked_folder: bool,
@@ -6008,6 +6009,112 @@ impl App {
         ))
     }
 
+    /// The info panel's name for `message`, item `index` of the `total`
+    /// pictures and videos it lists: "Photo", who sent it, when, and its
+    /// caption, as the viewer names the same item but without its "3 of 40",
+    /// which the list's own position gives a screen reader.
+    pub(crate) fn listed_media_label(
+        &self,
+        message: &crate::model::Message,
+        index: usize,
+        total: usize,
+    ) -> String {
+        let sender = if message.from_me {
+            crate::i18n::gettext(self.locale, "You").into_owned()
+        } else if message.sender.is_empty() {
+            String::new()
+        } else {
+            self.display_name_or(&message.sender, message.sender_name.as_deref())
+        };
+        let mentions: Vec<crate::markup::Mention> = message
+            .mentions
+            .iter()
+            .map(|mention| crate::markup::Mention {
+                user: mention.user.clone(),
+                name: self.mention_name(&mention.id),
+            })
+            .collect();
+        let caption = match &message.content {
+            Content::Image { caption, .. } | Content::Video { caption, .. } => caption
+                .as_deref()
+                .map(|caption| crate::markup::plain(caption, &mentions))
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
+        let label = crate::a11y::listed_media_label(
+            self.locale,
+            &crate::a11y::ViewerItem {
+                video: matches!(message.content, Content::Video { .. }),
+                position: index + 1,
+                total,
+                sender: &sender,
+                day: &crate::util::day_label(self.locale, message.timestamp),
+                time: &crate::util::clock(message.timestamp),
+                caption: &caption,
+            },
+        );
+        // A download asked for from the row, under way or failed, which the
+        // cell does not draw: "downloading", or why it failed.
+        match message
+            .content
+            .media()
+            .and_then(|media| crate::a11y::media_state(self.locale, media, true))
+        {
+            Some(state) => format!("{label}, {state}"),
+            None => label,
+        }
+    }
+
+    /// Opens a picture or video the info panel lists, as
+    /// `Action::OpenListedMedia` says.
+    fn open_listed_media(&mut self, chat: ChatId, message: String, ctx: &egui::Context) {
+        let Some(row) = self
+            .info_media
+            .as_ref()
+            .filter(|listing| listing.chat == chat)
+            .and_then(|listing| listing.media.iter().find(|row| row.id == message))
+        else {
+            return;
+        };
+        let Some(media) = row.content.media() else {
+            return;
+        };
+        let viewable = row.content.gallery_kind().is_some();
+        let downloading = matches!(media.state, MediaState::Downloading);
+        let path = media.path.clone().filter(|path| path.is_file());
+        match path {
+            // Only what the album holds: a GIF's file is a clip the viewer
+            // leaves out, as in the chat.
+            Some(path) if viewable && crate::image_preview::can_view(&path) => {
+                self.open_viewer(PreviewState::new(Some(path), chat, message), ctx);
+            }
+            Some(path) => self.actions.push(Action::OpenFile(path)),
+            // The viewer shows the item for what it is, with its Download
+            // button, as it does for an album item not downloaded yet.
+            None if viewable => self.open_viewer(PreviewState::new(None, chat, message), ctx),
+            None if !downloading => {
+                // The listing's own copy says it is on its way, so another
+                // Enter does not ask again: the loaded transcript, which
+                // `Action::Download` marks, may not hold the message.
+                if let Some(media) = self
+                    .info_media
+                    .as_mut()
+                    .and_then(|listing| listing.media.iter_mut().find(|row| row.id == message))
+                    .and_then(|row| row.content.media_mut())
+                {
+                    media.state = MediaState::Downloading;
+                }
+                self.actions.push(Action::Download {
+                    manual: true,
+                    card: None,
+                    chat,
+                    message,
+                });
+            }
+            None => {}
+        }
+    }
+
     /// Says the viewer's item, as the arrows or the strip moved to it, or as
     /// the arrows found the end of the album.
     fn say_viewer_item(&mut self) {
@@ -6040,8 +6147,11 @@ impl App {
         result: Result<PathBuf, String>,
     ) {
         // The info panel's listing keeps its own copy of the message, so a
-        // picture without a preview stops being blank once its file is there.
-        if let Ok(path) = &result
+        // picture without a preview stops being blank once its file is there,
+        // and a download that failed can be asked for again from its row.
+        // The panel belongs to the window: another account's download, of a
+        // chat and message it shares with the one on screen, is not its.
+        if !self.events_hidden
             && let Some(listing) = self
                 .info_media
                 .as_mut()
@@ -6053,8 +6163,13 @@ impl App {
                 .find(|row| row.id == id)
             && let Some(media) = row.content.media_at_mut(card)
         {
-            media.path = Some(path.clone());
-            media.state = MediaState::Idle;
+            match &result {
+                Ok(path) => {
+                    media.path = Some(path.clone());
+                    media.state = MediaState::Idle;
+                }
+                Err(error) => media.state = MediaState::Failed(download_notice(error.clone())),
+            }
         }
         // The album can hold a message the transcript has not paged in, so its
         // item, and the viewer's own download state, are updated from here,
@@ -8013,6 +8128,9 @@ impl App {
                 }
                 // Its tile keeps focus: the item it shows now is said.
                 self.say_viewer_item();
+            }
+            Action::OpenListedMedia { chat, message } => {
+                self.open_listed_media(chat, message, ctx);
             }
             Action::ViewerStep(step) => {
                 let Some(preview) = self.image_preview.as_ref() else {
@@ -22563,6 +22681,167 @@ mod tests {
             app.info.as_ref().map(|info| info.view),
             Some(InfoView::Overview)
         );
+    }
+
+    /// A picture or video the panel lists opens in the viewer from the keys:
+    /// one downloaded on its file, one not downloaded yet on its Download
+    /// button. A GIF, which the viewer does not show, is downloaded, once
+    /// while it downloads and again after a failure, and once downloaded
+    /// opens in the system's player.
+    #[test]
+    fn a_listed_picture_opens_in_the_viewer_downloaded_or_not() {
+        use crate::model::{InfoPanel, InfoView, Media, MediaState};
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("photo.jpg");
+        std::fs::write(&file, b"jpeg").unwrap();
+        let mut app = app();
+        let (backend, mut commands) = Backend::recording();
+        app.backend = backend;
+        let ctx = egui::Context::default();
+        let chat = "1@s.whatsapp.net";
+        let attachment = |mime: &str, path: Option<PathBuf>| Media {
+            mime: mime.into(),
+            size: 1,
+            width: None,
+            height: None,
+            album: None,
+            path,
+            state: MediaState::Idle,
+        };
+        let mut photo = message(chat, "photo", 3);
+        photo.content = Content::Image {
+            caption: None,
+            media: attachment("image/jpeg", Some(file.clone())),
+            motion: None,
+        };
+        let mut pending = message(chat, "pending", 2);
+        pending.content = Content::Image {
+            caption: None,
+            media: attachment("image/jpeg", None),
+            motion: None,
+        };
+        let mut gif = message(chat, "gif", 1);
+        gif.content = Content::Video {
+            caption: None,
+            media: attachment("video/mp4", None),
+            seconds: None,
+            gif: true,
+            note: false,
+        };
+        // A GIF downloaded already: its file is a clip, named as one.
+        let clip = dir.path().join("gif.mp4");
+        std::fs::write(&clip, b"mp4").unwrap();
+        let mut saved = message(chat, "saved-gif", 0);
+        saved.content = Content::Video {
+            caption: None,
+            media: attachment("video/mp4", Some(clip.clone())),
+            seconds: None,
+            gif: true,
+            note: false,
+        };
+        app.info = Some(InfoPanel {
+            chat: chat.into(),
+            view: InfoView::Media(crate::model::MediaTab::Media),
+        });
+        app.info_media = Some(crate::model::ChatMedia {
+            chat: chat.into(),
+            media: vec![photo, pending, gif, saved],
+            ..Default::default()
+        });
+        let open = |app: &mut App, id: &str| {
+            app.apply(
+                Action::OpenListedMedia {
+                    chat: chat.into(),
+                    message: id.into(),
+                },
+                &ctx,
+            );
+        };
+        open(&mut app, "photo");
+        let preview = app.image_preview.take().expect("the viewer opens");
+        assert_eq!(preview.message(), "photo");
+        assert_eq!(preview.path(), Some(file.as_path()));
+        open(&mut app, "pending");
+        let preview = app.image_preview.take().expect("the viewer opens");
+        assert_eq!(preview.message(), "pending");
+        assert_eq!(preview.path(), None, "on its Download button");
+        while commands.try_recv().is_ok() {}
+        open(&mut app, "gif");
+        app.apply_actions(&ctx);
+        assert!(app.image_preview.is_none(), "a GIF is not the viewer's");
+        let downloads = |commands: &mut tokio::sync::mpsc::UnboundedReceiver<Command>| {
+            std::iter::from_fn(|| commands.try_recv().ok())
+                .filter(
+                    |command| matches!(command, Command::Download { message, .. } if message == "gif"),
+                )
+                .count()
+        };
+        assert_eq!(downloads(&mut commands), 1, "the GIF is downloaded");
+        // Asked again while it downloads, outside the loaded transcript:
+        // once is enough. A failure lets it be asked for again.
+        open(&mut app, "gif");
+        app.apply_actions(&ctx);
+        assert_eq!(downloads(&mut commands), 0, "not asked twice");
+        app.handle_media(chat, "gif", None, Err("no network".into()));
+        open(&mut app, "gif");
+        app.apply_actions(&ctx);
+        assert_eq!(downloads(&mut commands), 1, "asked again after it failed");
+        // One downloaded opens in the system's player, not the viewer. Its
+        // action is not applied: that would start the player.
+        app.actions.clear();
+        open(&mut app, "saved-gif");
+        assert!(app.image_preview.is_none(), "a GIF is not the viewer's");
+        assert_eq!(app.actions, [Action::OpenFile(clip)]);
+    }
+
+    /// A listed download that failed is read on its row with why, as the
+    /// message itself says it; one under way says so too. Another account's
+    /// download of a chat and message the one on screen shares leaves the
+    /// panel's row as it was.
+    #[test]
+    fn a_listed_download_is_read_on_its_row_and_kept_to_its_account() {
+        use crate::model::{Media, MediaState};
+        let mut app = app();
+        let chat = "1@s.whatsapp.net";
+        let mut photo = message(chat, "photo", 3);
+        photo.content = Content::Image {
+            caption: None,
+            media: Media {
+                mime: "image/jpeg".into(),
+                size: 1,
+                width: None,
+                height: None,
+                album: None,
+                path: None,
+                state: MediaState::Idle,
+            },
+            motion: None,
+        };
+        app.info_media = Some(crate::model::ChatMedia {
+            chat: chat.into(),
+            media: vec![photo],
+            ..Default::default()
+        });
+        let row = |app: &App| app.info_media.as_ref().unwrap().media[0].clone();
+        let label = |app: &App| app.listed_media_label(&row(app), 0, 1);
+        let plain = label(&app);
+        app.handle_media(chat, "photo", None, Err("no network".into()));
+        assert_eq!(label(&app), format!("{plain}, no network"));
+        app.events_hidden = true;
+        app.handle_media(chat, "photo", None, Ok(PathBuf::from("other.jpg")));
+        app.events_hidden = false;
+        let media = row(&app).content.media().cloned().unwrap();
+        assert_eq!(media.path, None, "another account's file is not this row's");
+        assert_eq!(media.state, MediaState::Failed("no network".into()));
+        app.handle_media(chat, "photo", None, Ok(PathBuf::from("photo.jpg")));
+        assert_eq!(
+            row(&app)
+                .content
+                .media()
+                .and_then(|media| media.path.clone()),
+            Some(PathBuf::from("photo.jpg"))
+        );
+        assert_eq!(label(&app), plain, "downloaded, nothing more to say");
     }
 
     #[test]

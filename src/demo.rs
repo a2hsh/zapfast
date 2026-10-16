@@ -14433,6 +14433,272 @@ mod tests {
         );
     }
 
+    /// The media view's pictures and videos are one list after its tabs, in
+    /// reading order, each named as the viewer names it but without its
+    /// position, which the list gives ("Photo", who sent it, when); Enter
+    /// opens the current one in the viewer, and Escape there comes back to
+    /// the list. Its documents and links are lists too: Enter goes to a
+    /// document's message and opens a link, as a click does.
+    #[test]
+    fn the_media_documents_and_links_walk_from_the_keys() {
+        use crate::model::{InfoView, MediaTab};
+        use crate::ui::focus::Stop;
+        use crate::ui::info::{InfoList, TAB_STOP, list_id};
+        let mut app = app();
+        apply_flags(&mut app, Some("info-media"));
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let listing = app.info_media.clone().expect("the sample is listed");
+        let total = listing.media.len();
+        assert!(total >= 3, "{total}");
+        let media = list_id(InfoList::Media);
+        let links_tab = stop_id(&ctx, Stop::InfoControl(TAB_STOP + 2));
+        ctx.memory_mut(|memory| memory.request_focus(links_tab));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        assert_eq!(focused(&ctx), Some(media), "the stop after the tabs");
+        let tree = tree_after(&mut app, &ctx, None);
+        let (node_of_list, active) = list_nodes(&tree, media);
+        assert_eq!(node_of_list.role(), egui::accesskit::Role::ListBox);
+        assert_eq!(node_of_list.label(), Some("Media"));
+        assert_eq!(node_of_list.size_of_set(), Some(total));
+        let named = |node: &egui::accesskit::Node, index: usize| {
+            let kind = if matches!(listing.media[index].content, Content::Video { .. }) {
+                "Video"
+            } else {
+                "Photo"
+            };
+            // The list gives the position: the row's name does not say it
+            // again, as the viewer's "Photo 3 of 40" would.
+            let start = format!("{kind}, ");
+            let label = node.label().unwrap_or_default();
+            assert!(label.starts_with(&start), "{label:?} for {start:?}");
+            let position = format!(" {} of {total}", index + 1);
+            assert!(!label.contains(&position), "no position in {label:?}");
+            assert_eq!(node.role(), egui::accesskit::Role::ListBoxOption);
+            assert_eq!(node.position_in_set(), Some(index));
+            assert_eq!(node.size_of_set(), Some(total));
+        };
+        named(&active.expect("the newest is current"), 0);
+        for (key, expected) in [
+            (egui::Key::ArrowDown, 1),
+            (egui::Key::End, total - 1),
+            (egui::Key::ArrowUp, total - 2),
+            (egui::Key::Home, 0),
+            (egui::Key::ArrowDown, 1),
+        ] {
+            let tree = tree_after(&mut app, &ctx, Some(key));
+            named(
+                &list_nodes(&tree, media)
+                    .1
+                    .expect("the current item is drawn"),
+                expected,
+            );
+            assert_eq!(focused(&ctx), Some(media), "{key:?}");
+        }
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        let preview = app.image_preview.as_ref().expect("Enter opens the viewer");
+        assert_eq!(preview.message(), listing.media[1].id);
+        assert_eq!(preview.chat(), listing.chat);
+        assert!(app.info.is_some(), "the panel stays under the viewer");
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(app.image_preview.is_none());
+        assert_eq!(focused(&ctx), Some(media), "Escape comes back to the list");
+        // The documents: the next tab's list, read without the dots.
+        let docs_tab = stop_id(&ctx, Stop::InfoControl(TAB_STOP + 1));
+        ctx.memory_mut(|memory| memory.request_focus(docs_tab));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(
+            app.info.as_ref().map(|info| info.view),
+            Some(InfoView::Media(MediaTab::Docs))
+        );
+        // Past the Links tab.
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        let docs = list_id(InfoList::Docs);
+        assert_eq!(focused(&ctx), Some(docs));
+        let tree = tree_after(&mut app, &ctx, None);
+        let (node_of_list, active) = list_nodes(&tree, docs);
+        assert_eq!(node_of_list.label(), Some("Docs"));
+        assert_eq!(node_of_list.size_of_set(), Some(listing.docs.len()));
+        let document = &listing.docs[0];
+        let Content::Document { file_name, .. } = &document.content else {
+            panic!("a document");
+        };
+        let label = active
+            .expect("the newest document")
+            .label()
+            .map(str::to_owned);
+        let label = label.unwrap_or_default();
+        assert!(label.starts_with(&format!("{file_name}, ")), "{label:?}");
+        assert!(!label.contains('·'), "{label:?}");
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(
+            app.message_cursor.get(&document.chat),
+            Some(&document.id),
+            "Enter goes to the document's message"
+        );
+        // The links: Enter opens the current one.
+        let links_tab = stop_id(&ctx, Stop::InfoControl(TAB_STOP + 2));
+        ctx.memory_mut(|memory| memory.request_focus(links_tab));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        let links = list_id(InfoList::Links);
+        assert_eq!(focused(&ctx), Some(links));
+        let tree = tree_after(&mut app, &ctx, None);
+        let (node_of_list, active) = list_nodes(&tree, links);
+        assert_eq!(node_of_list.label(), Some("Links"));
+        assert_eq!(active.expect("the newest link").position_in_set(), Some(0));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 780.0),
+                )),
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| {
+                let ctx = ui.ctx().clone();
+                app.background_frame(&ctx);
+                app.frame_ui(ui);
+            },
+        );
+        output.textures_delta.clear();
+        let opened: Vec<String> = output
+            .platform_output
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                egui::OutputCommand::OpenUrl(open) => Some(open.url.clone()),
+                _ => None,
+            })
+            .collect();
+        let host = crate::ui::info::domain(&listing.links[0].url);
+        assert!(
+            opened.len() == 1 && opened[0].contains(&host),
+            "{opened:?} for {host}"
+        );
+    }
+
+    /// PgDn in the media grid moves about a screen of it: the rows a screen
+    /// shows, each of its columns, in the list's reading order, not as many
+    /// items as there are rows.
+    #[test]
+    fn page_down_in_the_media_grid_moves_a_screen_of_it() {
+        use crate::ui::focus::Stop;
+        use crate::ui::info::{InfoList, TAB_STOP, list_id};
+        let mut app = app();
+        apply_flags(&mut app, Some("info-media"));
+        let listing = app.info_media.as_mut().expect("the sample is listed");
+        let sample = listing.media[0].clone();
+        listing.media = (0..120)
+            .map(|index| {
+                let mut item = sample.clone();
+                item.id = format!("media-{index}");
+                item.timestamp -= index;
+                item
+            })
+            .collect();
+        let len = listing.media.len();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let links_tab = stop_id(&ctx, Stop::InfoControl(TAB_STOP + 2));
+        ctx.memory_mut(|memory| memory.request_focus(links_tab));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        let media = list_id(InfoList::Media);
+        assert_eq!(focused(&ctx), Some(media));
+        // The grid as drawn: its height, its columns and its rows' pitch.
+        let tree = tree_after(&mut app, &ctx, None);
+        let (list, _) = list_nodes(&tree, media);
+        let tops: Vec<f64> = tree
+            .nodes
+            .iter()
+            .filter(|(_, node)| {
+                node.role() == egui::accesskit::Role::ListBoxOption
+                    && node.size_of_set() == Some(len)
+            })
+            .filter_map(|(_, node)| Some((node.position_in_set()?, node.bounds()?.y0)))
+            .collect::<std::collections::BTreeMap<_, _>>()
+            .into_values()
+            .collect();
+        let columns = tops.iter().filter(|top| **top == tops[0]).count();
+        let pitch = tops[columns] - tops[0];
+        let height = list.bounds().expect("the list is placed").height();
+        let rows = (height / pitch).floor() as usize;
+        assert!(columns > 1 && rows > 1, "{columns} columns, {rows} rows");
+        let tree = tree_after(&mut app, &ctx, Some(egui::Key::PageDown));
+        let reached = list_nodes(&tree, media)
+            .1
+            .and_then(|active| active.position_in_set());
+        assert_eq!(reached, Some((rows * columns).min(len - 1)));
+    }
+
+    /// A call link in the Links list reads as a call link, as in the message
+    /// list, never as its address with the call's token; Enter joins its call
+    /// with the microphone muted, as from the message list.
+    #[test]
+    fn a_call_link_in_the_links_list_reads_as_one_and_joins_muted() {
+        use crate::ui::focus::Stop;
+        use crate::ui::info::{InfoList, TAB_STOP, list_id};
+        let mut app = app();
+        apply_flags(&mut app, Some("info-media"));
+        let url = "https://call.whatsapp.com/voice/AbCdEf1234567890";
+        let listing = app.info_media.as_mut().expect("the sample is listed");
+        let newest = listing.links.first().map_or(0, |link| link.timestamp + 1);
+        listing.links.insert(
+            0,
+            crate::model::ChatLink {
+                message: "call-link".to_owned(),
+                timestamp: newest,
+                url: url.to_owned(),
+                title: None,
+            },
+        );
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        app.backend.record_demo_commands();
+        render(&mut app, &ctx);
+        let links_tab = stop_id(&ctx, Stop::InfoControl(TAB_STOP + 2));
+        ctx.memory_mut(|memory| memory.request_focus(links_tab));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        let links = list_id(InfoList::Links);
+        assert_eq!(focused(&ctx), Some(links));
+        let tree = tree_after(&mut app, &ctx, None);
+        let label = list_nodes(&tree, links)
+            .1
+            .expect("the call link is current")
+            .label()
+            .map(str::to_owned)
+            .unwrap_or_default();
+        assert!(label.starts_with("Call link, voice call, "), "{label:?}");
+        assert!(!label.contains("AbCdEf"), "no token in {label:?}");
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert!(
+            app.backend
+                .take_demo_commands()
+                .iter()
+                .any(|command| matches!(
+                    command,
+                    crate::backend::Command::JoinCallLink { muted: true, .. }
+                )),
+            "Enter joins the call, muted"
+        );
+    }
+
     /// The timer line says what WhatsApp says: a duration for a chat with one,
     /// "Off" for a chat the phone turned it off for, and nothing at all for a
     /// chat nobody has mentioned a timer for, which includes a frame where the

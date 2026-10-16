@@ -30,7 +30,9 @@ const PENCIL_STOP: u8 = 1;
 const NAME_CHECK_STOP: u8 = 2;
 const ACTION_STOP: u8 = 3;
 pub const MEDIA_ROW_STOP: u8 = 10;
-const TAB_STOP: u8 = 20;
+pub const TAB_STOP: u8 = 20;
+/// The open tab's list in the media view, after its tabs.
+const LIST_STOP: u8 = 23;
 /// A group's members, after the media row.
 const MEMBERS_STOP: u8 = 24;
 const LEAVE_STOP: u8 = 30;
@@ -846,10 +848,22 @@ fn open_member(app: &mut App, member: &str) {
 pub enum InfoList {
     /// A group's members, in the overview.
     Members,
+    /// The media view's pictures and videos, in reading order: the grid's
+    /// rows from the top, each from the left, which is newest first.
+    Media,
+    /// The media view's documents, newest first.
+    Docs,
+    /// The media view's links, newest first.
+    Links,
 }
 
 impl InfoList {
-    const EVERY: [InfoList; 1] = [InfoList::Members];
+    const EVERY: [InfoList; 4] = [
+        InfoList::Members,
+        InfoList::Media,
+        InfoList::Docs,
+        InfoList::Links,
+    ];
 
     /// Where the list's current row is kept in `App::info_cursor`.
     fn slot(self) -> usize {
@@ -859,8 +873,22 @@ impl InfoList {
     fn stop(self) -> Stop {
         match self {
             InfoList::Members => Stop::InfoControl(MEMBERS_STOP),
+            InfoList::Media | InfoList::Docs | InfoList::Links => Stop::InfoControl(LIST_STOP),
         }
     }
+}
+
+/// The key a link's row is kept under: a message can hold several links.
+fn link_key(link: &crate::model::ChatLink) -> String {
+    format!("{}\n{}", link.message, link.url)
+}
+
+/// The listing of the chat the panel shows, once it is in.
+fn shown_listing(app: &App) -> Option<&ChatMedia> {
+    let shown = app.info.as_ref()?;
+    app.info_media
+        .as_ref()
+        .filter(|listing| listing.chat == shown.chat)
 }
 
 /// The focusable list widget of `list`.
@@ -884,6 +912,19 @@ fn row_keys(app: &App, list: InfoList) -> Vec<String> {
             .as_ref()
             .filter(|(chat, _)| Some(chat.as_str()) == shown)
             .map(|(_, members)| members.iter().map(|(member, _)| member.clone()).collect())
+            .unwrap_or_default(),
+        InfoList::Media | InfoList::Docs => shown_listing(app)
+            .map(|listing| {
+                let rows = if list == InfoList::Media {
+                    &listing.media
+                } else {
+                    &listing.docs
+                };
+                rows.iter().map(|row| row.id.clone()).collect()
+            })
+            .unwrap_or_default(),
+        InfoList::Links => shown_listing(app)
+            .map(|listing| listing.links.iter().map(link_key).collect())
             .unwrap_or_default(),
     }
 }
@@ -912,7 +953,8 @@ fn page_rows(ctx: &egui::Context, list: egui::Id) -> usize {
 
 /// Takes this frame's keys for the panel's focused list: the arrows, Home,
 /// End and the page keys move its current row, and Enter or Space acts on
-/// it as a click does.
+/// it: a member opens their panel and a document goes to its message, as a
+/// click does, a link opens, and a picture or video opens in the viewer.
 pub fn list_keys(app: &mut App, ctx: &egui::Context) {
     let Some(list) = focused_list(ctx).filter(|_| app.info_visible()) else {
         return;
@@ -935,12 +977,43 @@ pub fn list_keys(app: &mut App, ctx: &egui::Context) {
         return;
     };
     // Acting from the keyboard is keyboard navigation, as Tab is: the focus
-    // it moves, such as into a member's panel, is shown.
+    // it moves, into the viewer or a member's panel, is shown.
     ctx.data_mut(|data| data.insert_temp(theme::keyboard_focus_id(), true));
     let key = keys[index].clone();
     app.info_cursor[list.slot()] = Some(key.clone());
+    let docked = ctx.data(|data| data.get_temp::<bool>(docked_id()));
+    let Some(listing) = shown_listing(app) else {
+        if list == InfoList::Members {
+            open_member(app, &key);
+        }
+        return;
+    };
     match list {
         InfoList::Members => open_member(app, &key),
+        // The viewer rather than the message: it reads the item and steps
+        // through the chat's album, where "Show in the chat" goes on to the
+        // message. A click still goes to the message, as upstream.
+        InfoList::Media => {
+            let message = &listing.media[index];
+            let open = Action::OpenListedMedia {
+                chat: message.chat.clone(),
+                message: message.id.clone(),
+            };
+            app.actions.push(open);
+        }
+        InfoList::Docs => {
+            let message = listing.docs[index].clone();
+            go_to(app, &message, docked == Some(false));
+            // A reader goes on to the message, the open chat's current
+            // message now, as from the Starred list.
+            if crate::a11y::screen_reader_active(ctx, egui::accesskit_root_id()) {
+                app.actions.push(Action::FocusMessages);
+            }
+        }
+        InfoList::Links => {
+            let url = listing.links[index].url.clone();
+            app.actions.push(Action::OpenUrl(url));
+        }
     }
 }
 
@@ -1223,6 +1296,21 @@ fn media_view(app: &mut App, ui: &mut egui::Ui, chat: &str, tab: MediaTab, overl
                 MediaTab::Docs => docs_list(app, ui, media, overlay),
                 MediaTab::Links => links_list(app, ui, media),
             }
+            if cut {
+                // The note above the list, which the list's node does not
+                // hold, describes it.
+                let note = crate::i18n::gettext(app.locale, "Only the newest items are listed.");
+                let list = list_id(match tab {
+                    MediaTab::Media => InfoList::Media,
+                    MediaTab::Docs => InfoList::Docs,
+                    MediaTab::Links => InfoList::Links,
+                });
+                ui.ctx().accesskit_node_builder(list, |node| {
+                    if node.role() == egui::accesskit::Role::ListBox {
+                        node.set_description(note.into_owned());
+                    }
+                });
+            }
         }
         None if app.info_media_failed => {
             ui.add_space(24.0);
@@ -1243,7 +1331,8 @@ fn media_view(app: &mut App, ui: &mut egui::Ui, chat: &str, tab: MediaTab, overl
 
 /// The chat's pictures and videos, newest first, in square cells as wide as
 /// the panel allows. Only the rows on screen are laid out, so only their
-/// thumbnails are decoded.
+/// thumbnails are decoded. To the keyboard the grid is one list, in reading
+/// order, named as the viewer names its items.
 fn media_grid(
     app: &mut App,
     ui: &mut egui::Ui,
@@ -1274,35 +1363,72 @@ fn media_grid(
     let cell = (width - (columns - 1) as f32 * GAP) / columns as f32;
     let rows = listing.media.len().div_ceil(columns);
     ui.add_space(6.0);
+    let len = listing.media.len();
+    let label = tab_label(app, MediaTab::Media);
+    let rect = ui.available_rect_before_wrap();
+    let pass = ListPass::begin(ui, InfoList::Media, rect, label, len, cell + GAP);
+    // The list is in reading order, so about a screen of it, as PgUp and
+    // PgDn move, is a screen of the grid's rows times its columns.
+    let page = pass.id.with("page");
+    ui.ctx().data_mut(|data| {
+        let rows = data.get_temp::<usize>(page).unwrap_or(1);
+        data.insert_temp(page, rows * columns);
+    });
+    let keys: Vec<String> = listing.media.iter().map(|row| row.id.clone()).collect();
+    let current = cursor_index(app, InfoList::Media, &keys);
+    let mut active = None;
     // `show_rows` reads the spacing from outside its closure.
     ui.spacing_mut().item_spacing = vec2(GAP, GAP);
-    egui::ScrollArea::vertical()
+    let scroll = egui::ScrollArea::vertical()
         .id_salt(("info-media-grid", listing.chat.as_str()))
-        .auto_shrink([false, false])
-        .show_rows(ui, cell + GAP, rows, |ui, range| {
-            for row in range {
-                ui.horizontal(|ui| {
-                    ui.add_space(MARGIN);
-                    for column in 0..columns {
-                        let index = row * columns + column;
-                        let Some(message) = listing.media.get(index) else {
-                            break;
-                        };
-                        let (rect, response) =
-                            ui.allocate_exact_size(Vec2::splat(cell), Sense::click());
-                        media_cell(
-                            app,
-                            ui,
-                            rect,
-                            response,
-                            message,
-                            uris.get(index).map(String::as_str),
-                            overlay,
-                        );
+        .auto_shrink([false, false]);
+    let current_row = current.map(|index| index / columns);
+    let scroll = pass.scroll(ui.ctx(), scroll, current_row, cell + GAP, GAP);
+    let output = scroll.show_rows(ui, cell + GAP, rows, |ui, range| {
+        for row in range {
+            ui.horizontal(|ui| {
+                ui.add_space(MARGIN);
+                for column in 0..columns {
+                    let index = row * columns + column;
+                    let Some(message) = listing.media.get(index) else {
+                        break;
+                    };
+                    // Clicks only, never focus: the keyboard reaches the
+                    // cells through the list's one stop and its arrows.
+                    let (rect, response) = ui
+                        .scope_builder(
+                            super::list_nav::row_builder(ui, ("media", &message.id), pass.id),
+                            |ui| ui.allocate_exact_size(Vec2::splat(cell), Sense::CLICK),
+                        )
+                        .inner;
+                    let id = response.id;
+                    if Some(index) == current {
+                        active = Some(pass.current(ui, &response, 6.0));
                     }
-                });
-            }
-        });
+                    media_cell(
+                        app,
+                        ui,
+                        rect,
+                        response,
+                        message,
+                        uris.get(index).map(String::as_str),
+                        overlay,
+                    );
+                    super::list_nav::mark_row(
+                        ui.ctx(),
+                        id,
+                        app.listed_media_label(message, index, len),
+                        index,
+                        len,
+                        rect,
+                        false,
+                    );
+                }
+            });
+        }
+    });
+    pass.remember(ui.ctx(), &output);
+    pass.finish(ui.ctx(), active);
 }
 
 /// One square picture or video: its preview cropped to the square, with a
@@ -1439,36 +1565,65 @@ fn docs_list(app: &mut App, ui: &mut egui::Ui, listing: &ChatMedia, overlay: boo
         );
         return;
     }
+    let len = listing.docs.len();
+    let label = tab_label(app, MediaTab::Docs);
+    let rect = ui.available_rect_before_wrap();
+    let pass = ListPass::begin(ui, InfoList::Docs, rect, label, len, ROW_HEIGHT);
+    let keys: Vec<String> = listing.docs.iter().map(|row| row.id.clone()).collect();
+    let current = cursor_index(app, InfoList::Docs, &keys);
+    let mut active = None;
     // `show_rows` reads the spacing from outside its closure.
     ui.spacing_mut().item_spacing.y = 0.0;
-    egui::ScrollArea::vertical()
+    let scroll = egui::ScrollArea::vertical()
         .id_salt(("info-docs", listing.chat.as_str()))
-        .auto_shrink([false, false])
-        .show_rows(ui, ROW_HEIGHT, listing.docs.len(), |ui, range| {
-            for message in &listing.docs[range] {
-                let Content::Document {
-                    media,
-                    file_name,
-                    pages,
-                    ..
-                } = &message.content
-                else {
-                    continue;
-                };
-                let mut detail = Vec::new();
-                if let Some(pages) = pages {
-                    detail.push(
-                        crate::i18n::ngettext(app.locale, "{} page", "{} pages", *pages)
-                            .replace("{}", &pages.to_string()),
-                    );
-                }
-                detail.push(crate::util::bytes(media.size));
-                detail.push(crate::util::chat_stamp(app.locale, message.timestamp));
-                if item_row(app, ui, Icon::FileText, file_name, &detail.join(" · ")).clicked() {
-                    go_to(app, message, overlay);
-                }
+        .auto_shrink([false, false]);
+    let scroll = pass.scroll(ui.ctx(), scroll, current, ROW_HEIGHT, 0.0);
+    let output = scroll.show_rows(ui, ROW_HEIGHT, len, |ui, range| {
+        let first = range.start;
+        for (offset, message) in listing.docs[range].iter().enumerate() {
+            let index = first + offset;
+            let Content::Document {
+                media,
+                file_name,
+                pages,
+                ..
+            } = &message.content
+            else {
+                continue;
+            };
+            let mut detail = Vec::new();
+            if let Some(pages) = pages {
+                detail.push(
+                    crate::i18n::ngettext(app.locale, "{} page", "{} pages", *pages)
+                        .replace("{}", &pages.to_string()),
+                );
             }
-        });
+            detail.push(crate::util::bytes(media.size));
+            detail.push(crate::util::chat_stamp(app.locale, message.timestamp));
+            let row = ListRow {
+                pass: &pass,
+                salt: ("doc", message.id.as_str()),
+                index,
+                len,
+                current: Some(index) == current,
+                spoken: None,
+            };
+            let response = item_row(
+                app,
+                ui,
+                Icon::FileText,
+                file_name,
+                &detail,
+                row,
+                &mut active,
+            );
+            if response.clicked() {
+                go_to(app, message, overlay);
+            }
+        }
+    });
+    pass.remember(ui.ctx(), &output);
+    pass.finish(ui.ctx(), active);
 }
 
 /// The web links written in the chat, newest first: the preview's title or
@@ -1485,41 +1640,129 @@ fn links_list(app: &mut App, ui: &mut egui::Ui, listing: &ChatMedia) {
         );
         return;
     }
+    let len = listing.links.len();
+    let label = tab_label(app, MediaTab::Links);
+    let rect = ui.available_rect_before_wrap();
+    let pass = ListPass::begin(ui, InfoList::Links, rect, label, len, ROW_HEIGHT);
+    let keys: Vec<String> = listing.links.iter().map(link_key).collect();
+    let current = cursor_index(app, InfoList::Links, &keys);
+    let mut active = None;
     // `show_rows` reads the spacing from outside its closure.
     ui.spacing_mut().item_spacing.y = 0.0;
-    egui::ScrollArea::vertical()
+    let scroll = egui::ScrollArea::vertical()
         .id_salt(("info-links", listing.chat.as_str()))
-        .auto_shrink([false, false])
-        .show_rows(ui, ROW_HEIGHT, listing.links.len(), |ui, range| {
-            for link in &listing.links[range] {
-                let title = link.title.as_deref().unwrap_or(&link.url);
-                let detail = format!(
-                    "{} · {}",
-                    domain(&link.url),
-                    crate::util::chat_stamp(app.locale, link.timestamp)
-                );
-                if item_row(app, ui, Icon::ExternalLink, title, &detail).clicked() {
-                    app.actions.push(Action::OpenUrl(link.url.clone()));
-                }
+        .auto_shrink([false, false]);
+    let scroll = pass.scroll(ui.ctx(), scroll, current, ROW_HEIGHT, 0.0);
+    let output = scroll.show_rows(ui, ROW_HEIGHT, len, |ui, range| {
+        let first = range.start;
+        for (offset, link) in listing.links[range].iter().enumerate() {
+            let index = first + offset;
+            let title = link.title.as_deref().unwrap_or(&link.url);
+            let stamp = crate::util::chat_stamp(app.locale, link.timestamp);
+            // A call link joins a call here, as in the message list: it says
+            // so, rather than its address with the call's token.
+            let spoken = crate::safety::call_link(&link.url).map(|(_, video)| {
+                let kind = if video {
+                    // Translators: a call link in the info panel's Links
+                    // list, read in place of its address.
+                    crate::i18n::gettext(app.locale, "Call link, video call")
+                } else {
+                    // Translators: a call link in the info panel's Links
+                    // list, read in place of its address.
+                    crate::i18n::gettext(app.locale, "Call link, voice call")
+                };
+                std::iter::once(kind.into_owned())
+                    .chain(link.title.clone())
+                    .chain(std::iter::once(stamp.clone()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            });
+            let detail = [domain(&link.url), stamp];
+            let key = link_key(link);
+            let row = ListRow {
+                pass: &pass,
+                salt: ("link", key.as_str()),
+                index,
+                len,
+                current: Some(index) == current,
+                spoken,
+            };
+            let response = item_row(
+                app,
+                ui,
+                Icon::ExternalLink,
+                title,
+                &detail,
+                row,
+                &mut active,
+            );
+            if response.clicked() {
+                app.actions.push(Action::OpenUrl(link.url.clone()));
             }
-        });
+        }
+    });
+    pass.remember(ui.ctx(), &output);
+    pass.finish(ui.ctx(), active);
 }
 
-/// One document or link row: an icon in a tile, a title, and a detail line.
-/// A pointer and accessibility target, like a chat row, not a Tab stop.
+/// Where a document or link row sits in its list, and the list's pass.
+struct ListRow<'a> {
+    pass: &'a ListPass,
+    /// What the row's ids come from: its kind and its key.
+    salt: (&'static str, &'a str),
+    index: usize,
+    len: usize,
+    /// Whether it is the list's current row.
+    current: bool,
+    /// What a screen reader hears in place of the title and the detail
+    /// line, when they would not say what the row is.
+    spoken: Option<String>,
+}
+
+/// One document or link row: an icon in a tile, a title, and a detail line
+/// of `detail`'s parts. To the keyboard it is an item of its list, `row`,
+/// which it names `active` when it is the current one; to the pointer a
+/// target, as before.
 fn item_row(
     app: &mut App,
     ui: &mut egui::Ui,
     icon: Icon,
     title: &str,
-    detail: &str,
+    detail: &[String],
+    row: ListRow<'_>,
+    active: &mut Option<egui::Id>,
 ) -> egui::Response {
     let palette = app.palette;
-    let (rect, response) =
-        ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("{title}, {detail}"))
+    // Clicks only, never focus: the keyboard reaches the rows through the
+    // list's one stop and its arrows.
+    let (rect, response) = ui
+        .scope_builder(
+            super::list_nav::row_builder(ui, row.salt, row.pass.id),
+            |ui| ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::CLICK),
+        )
+        .inner;
+    let detail_line = detail.join(" · ");
+    // Read with commas between the parts the line separates with dots.
+    let spoken = row.spoken.clone().unwrap_or_else(|| {
+        std::iter::once(title)
+            .chain(detail.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(", ")
     });
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &spoken));
+    super::list_nav::mark_row(
+        ui.ctx(),
+        response.id,
+        spoken.clone(),
+        row.index,
+        row.len,
+        rect,
+        false,
+    );
+    if row.current {
+        *active = Some(row.pass.current(ui, &response, 0.0));
+    }
+    let detail = detail_line.as_str();
     if ui.is_rect_visible(rect) {
         if response.hovered() {
             ui.painter().rect_filled(rect, 0.0, palette.surface_hover);

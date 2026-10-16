@@ -2474,6 +2474,14 @@ pub enum Action {
         /// Which of an interactive message's pictures, as `MediaItem::card`.
         card: Option<usize>,
     },
+    /// Opens a picture or video the info panel lists in the viewer, over its
+    /// chat's album, as Enter or Space on it does. One not downloaded yet
+    /// opens on its Download button, and one the viewer cannot show, such
+    /// as a GIF, goes to the system's viewer, or is downloaded first.
+    OpenListedMedia {
+        chat: ChatId,
+        message: String,
+    },
     /// Moves the viewer to the next (`1`) or previous (`-1`) item of the album:
     /// the Right and Left arrow keys, and the arrows over the picture.
     ViewerStep(i8),
