@@ -126,6 +126,9 @@ pub struct Account {
     /// The new-call list's current person for its keys: whether the row is
     /// among the frequently contacted, and the person.
     pub new_call_cursor: Option<(bool, ChatId)>,
+    /// The Starred list's current message for its keys: its chat and id.
+    /// One the list no longer shows hands over to the first.
+    pub starred_cursor: Option<(ChatId, String)>,
 }
 
 impl Account {
@@ -224,6 +227,7 @@ impl Account {
             calls_search: String::new(),
             call_cursor: None,
             new_call_cursor: None,
+            starred_cursor: None,
             new_call_search: String::new(),
         }
     }

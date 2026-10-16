@@ -587,6 +587,33 @@ pub fn search_hit_label(sender: &str, line: &str, time: &str) -> String {
     parts.join(", ")
 }
 
+/// What a screen reader reads for one starred message: the chat it is in,
+/// who wrote it, its words and when, then when it was starred, joined with
+/// ", ".
+pub fn starred_label(
+    locale: Locale,
+    chat: &str,
+    sender: &str,
+    words: &str,
+    time: &str,
+    starred: &str,
+) -> String {
+    let mut parts = vec![
+        spoken(without_push_marker(chat)),
+        spoken(without_push_marker(sender)),
+        spoken(words),
+        time.to_owned(),
+        fill(
+            // Translators: when a message was starred, as the Starred list
+            // shows it ("Yesterday", "12:30").
+            &gettext(locale, "starred {moment}"),
+            &[("moment", starred)],
+        ),
+    ];
+    parts.retain(|part| !part.is_empty());
+    parts.join(", ")
+}
+
 /// The in-chat search field's name: "Search messages with Ahmed", the line
 /// the empty search pane shows, for one-to-one chats and groups alike. The
 /// field's own hint, "Search", is all a chat without a name gets.

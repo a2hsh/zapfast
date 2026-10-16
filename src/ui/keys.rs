@@ -201,6 +201,19 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
             actions.extend(chat_list_keys(app, ctx, chat));
         }
     }
+    // The focused Starred list, in the chat list's place: the same keys
+    // move its current message, Enter opens it and Shift+F10 its menu.
+    if app.show_starred
+        && app.dialog.is_none()
+        && !app.show_update
+        && app.picker.is_none()
+        && app.reaction_target.is_none()
+        && app.recording.is_none()
+        && !menu_open
+        && ctx.memory(|memory| memory.has_focus(crate::ui::chats::starred_list_id()))
+    {
+        actions.extend(crate::ui::chats::starred_keys(app, ctx));
+    }
     // The Calls page's focused call history or new-call list: the same keys
     // move its current row, Enter and Shift+F10 act on it.
     if app.page == Page::Calls
@@ -296,6 +309,15 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
             actions.push(Action::CancelSelection);
         } else if app.show_starred {
             actions.push(Action::ToggleStarred);
+            // From the list, back to the rail's Starred that opened it: the
+            // list is gone once it closes.
+            if escape_keeps_focus(ctx)
+                && focus_before_escape(ctx) == Some(crate::ui::chats::starred_list_id())
+            {
+                let starred =
+                    crate::ui::rail::destination_id(crate::ui::rail::Destination::Starred);
+                ctx.memory_mut(|memory| memory.request_focus(starred));
+            }
         } else if app.chat_search_visible() && app.chat_search_calendar {
             // The day filter first, then the pane it hangs from.
             app.chat_search_calendar = false;

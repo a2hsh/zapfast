@@ -974,9 +974,108 @@ pub(crate) fn list_row_id(chat: &str, id: &str) -> egui::Id {
 
 /// The starred messages, in the place the chat list usually takes. Newest
 /// star first, each row naming the chat, the moment, and the message.
-fn starred_list(app: &mut App, ui: &mut egui::Ui) {
+/// The Starred list's focusable list: one Tab stop in the chat list's
+/// place (`Stop::ChatList`), whose arrows walk the starred messages.
+pub fn starred_list_id() -> egui::Id {
+    egui::Id::new("starred-list")
+}
+
+/// The starred messages the list shows, in its order: a locked chat's stay
+/// out.
+pub(crate) fn starred_shown(app: &App) -> Vec<&crate::archive::Starred> {
+    app.starred
+        .iter()
+        .filter(|entry| {
+            !app.chat(&entry.message.chat)
+                .is_some_and(|chat| chat.locked)
+        })
+        .collect()
+}
+
+/// Where the Starred list's current message is among `shown`, as chat and
+/// id: the cursor's while it is shown, else the first.
+fn starred_index(app: &App, shown: &[(String, String)]) -> Option<usize> {
+    app.starred_cursor
+        .as_ref()
+        .and_then(|cursor| shown.iter().position(|row| row == cursor))
+        .or_else(|| (!shown.is_empty()).then_some(0))
+}
+
+/// Where the Starred list's keys ask for a row's menu: the row, and the
+/// frame they asked in.
+fn starred_menu_request_id() -> egui::Id {
+    starred_list_id().with("menu-request")
+}
+
+/// Takes this frame's keys for the focused Starred list: the arrows, Home,
+/// End and the page keys move its current message; Enter opens it in its
+/// chat as a click does, and with a screen reader goes on to it in the
+/// message list; Shift+F10 opens its menu. Returns the actions they ask for.
+pub fn starred_keys(app: &mut App, ctx: &egui::Context) -> Vec<Action> {
+    let shown: Vec<(String, String)> = starred_shown(app)
+        .into_iter()
+        .map(|entry| (entry.message.chat.clone(), entry.message.id.clone()))
+        .collect();
+    let current = starred_index(app, &shown);
+    let page = || {
+        ctx.data(|data| data.get_temp::<usize>(starred_list_id().with("page")))
+            .unwrap_or(4)
+    };
+    if let Some(step) = super::list_nav::take_step(ctx, page) {
+        if let Some(index) = super::list_nav::step(current, shown.len(), step) {
+            app.starred_cursor = Some(shown[index].clone());
+            let frame = ctx.cumulative_frame_nr();
+            ctx.data_mut(|data| data.insert_temp(starred_list_id().with("moved"), frame));
+        }
+        return Vec::new();
+    }
+    let (enter, menu) = ctx.input_mut(|input| {
+        (
+            super::keys::take_plain(input, Key::Enter),
+            super::keys::take_exact(input, egui::Modifiers::SHIFT, Key::F10),
+        )
+    });
+    if !enter && !menu {
+        return Vec::new();
+    }
+    let Some((chat, message)) = current.map(|index| shown[index].clone()) else {
+        return Vec::new();
+    };
+    // Acting from the keyboard is keyboard navigation, as Tab is.
+    ctx.data_mut(|data| data.insert_temp(theme::keyboard_focus_id(), true));
+    if menu {
+        let frame = ctx.cumulative_frame_nr();
+        let row = list_row_id(&chat, &message);
+        ctx.data_mut(|data| {
+            data.insert_temp(starred_menu_request_id(), (row, frame));
+            // A row scrolled out of view comes back into it for its menu.
+            data.insert_temp(starred_list_id().with("moved"), frame);
+        });
+        return Vec::new();
+    }
+    let mut actions = vec![Action::OpenMessage { chat, message }];
+    // A reader goes on to the message, the open chat's current message now,
+    // rather than to the message field the chat opens with.
+    if crate::a11y::screen_reader_active(ctx, egui::accesskit_root_id()) {
+        actions.push(Action::FocusMessages);
+    }
+    actions
+}
+
+fn starred_list(app: &mut App, ui: &mut egui::Ui, focus: bool) {
     let palette = app.palette;
+    // One list, a Tab stop in the chat list's place. It senses no pointer
+    // input, so pointer users see the list as before.
+    let id = starred_list_id();
+    if focus {
+        ui.memory_mut(|memory| memory.request_focus(id));
+    }
+    let label = crate::i18n::gettext(app.locale, "Starred messages");
     if app.starred.is_empty() {
+        // Still the list, with no items, so a reader in it keeps focus: on
+        // Alt+1, or after Unstar on the last one.
+        let rect = ui.available_rect_before_wrap();
+        super::list_nav::container(ui, id, rect, || label.into_owned(), 0).tab_stop(Stop::ChatList);
         widgets::empty_state(
             ui,
             &palette,
@@ -990,36 +1089,86 @@ fn starred_list(app: &mut App, ui: &mut egui::Ui) {
         );
         return;
     }
+    let shown: Vec<crate::archive::Starred> = starred_shown(app).into_iter().cloned().collect();
+    let keys: Vec<(String, String)> = shown
+        .iter()
+        .map(|entry| (entry.message.chat.clone(), entry.message.id.clone()))
+        .collect();
+    let len = shown.len();
+    let cursor = starred_index(app, &keys);
+    let rect = ui.available_rect_before_wrap();
+    let list = super::list_nav::container(ui, id, rect, || label.into_owned(), len)
+        .tab_stop(Stop::ChatList);
+    if len == 0 {
+        // Every starred message is in a locked chat, which the list keeps
+        // out. The panel stays blank, as it was drawn; a screen reader hears
+        // that there are none, as the empty list says, and nothing about
+        // the locked ones.
+        let none = crate::i18n::gettext(app.locale, "No starred messages").into_owned();
+        ui.ctx()
+            .accesskit_node_builder(id, |node| node.set_description(none));
+    }
+    let focused = list.has_focus();
+    let keyboard = ui.ctx().data(|data| {
+        data.get_temp::<bool>(theme::keyboard_focus_id())
+            .unwrap_or(false)
+    });
+    let moved = ui.ctx().data(|data| data.get_temp::<u64>(id.with("moved")))
+        == Some(ui.ctx().cumulative_frame_nr());
+    let reveal = focused && ((list.gained_focus() && keyboard) || moved);
+    // About a screen of rows, as PgUp and PgDn move.
+    let page = (rect.height() / 90.0).floor().max(1.0) as usize;
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(id.with("page"), page));
+    let mut active = None;
     // Rows read the list from the app while they hand their actions back, so
     // the actions are collected here and applied once the list is drawn.
     let mut actions = Vec::new();
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            for entry in &app.starred {
-                if app
-                    .chat(&entry.message.chat)
-                    .is_some_and(|chat| chat.locked)
-                {
-                    continue;
+            for (index, entry) in shown.iter().enumerate() {
+                let response = ui
+                    .scope_builder(
+                        egui::UiBuilder::new()
+                            .id_salt(("starred", &entry.message.chat, &entry.message.id))
+                            .accessibility_parent(id),
+                        |ui| {
+                            starred_row(
+                                app,
+                                ui,
+                                &palette,
+                                &entry.message,
+                                entry.starred_at,
+                                conversation::Marks { starred: true },
+                                (index, len),
+                                &mut actions,
+                            )
+                        },
+                    )
+                    .inner;
+                if cursor == Some(index) {
+                    if focused {
+                        theme::focus_outline(ui, id, response.rect, f32::from(theme::RADIUS_SMALL));
+                        if reveal {
+                            response
+                                .scroll_to_me_animation(None, egui::style::ScrollAnimation::none());
+                        }
+                    }
+                    active = Some(response.id);
                 }
-                starred_row(
-                    app,
-                    ui,
-                    &palette,
-                    &entry.message,
-                    entry.starred_at,
-                    conversation::Marks { starred: true },
-                    &mut actions,
-                );
             }
         });
+    super::list_nav::set_active(ui.ctx(), id, active);
     app.actions.append(&mut actions);
 }
 
 /// One starred message: where it is, when it was starred, and the message's own
 /// words inside a bubble drawn from its side and fill. Clicking opens its chat
-/// at the message; right-clicking the bubble opens the chat's own menu.
+/// at the message; right-clicking the bubble opens the chat's own menu, as
+/// Shift+F10 does from the list's keys. The row is the list's item `slot`:
+/// its position and the list's size.
+#[allow(clippy::too_many_arguments)]
 fn starred_row(
     app: &App,
     ui: &mut egui::Ui,
@@ -1027,8 +1176,9 @@ fn starred_row(
     message: &Message,
     marked_at: i64,
     marks: conversation::Marks,
+    slot: (usize, usize),
     actions: &mut Vec<Action>,
-) {
+) -> egui::Response {
     let width = ui.available_width();
     let clock = widgets::line(
         ui,
@@ -1056,23 +1206,39 @@ fn starred_row(
     let row_id = list_row_id(&message.chat, &message.id);
     let (rect, _) =
         ui.allocate_exact_size(vec2(width, 26.0 + bubble_height + 10.0), Sense::hover());
-    let response = ui.interact(rect, row_id, Sense::click());
-    theme::reveal_focus(&response);
+    // Clicks only, never focus: the keyboard reaches rows through the list's
+    // one Tab stop and its arrows.
+    let response = ui.interact(rect, row_id, Sense::CLICK);
     // The chat's own title, as the chat list writes it: a group without a
     // subject is named after its members, never "Unknown".
     let name = app.chat_title_of(&message.chat);
-    let label = format!("{name}, {words}");
+    let when = crate::util::moment_stamp(app.locale, marked_at);
+    // Read as a message is, who wrote it, its words and when, after the chat
+    // it is in, then when it was starred.
+    let sender = if message.from_me {
+        crate::i18n::gettext(app.locale, "You").into_owned()
+    } else {
+        app.display_name_or(&message.sender, message.sender_name.as_deref())
+    };
+    let label = crate::a11y::starred_label(
+        app.locale,
+        &name,
+        &sender,
+        &words,
+        &crate::util::chat_stamp(app.locale, message.timestamp),
+        &when,
+    );
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &label)
     });
+    super::list_nav::mark_row(ui.ctx(), response.id, label, slot.0, slot.1, rect, false);
     if !ui.is_rect_visible(rect) {
-        return;
+        return response;
     }
     if response.hovered() {
         ui.painter()
             .rect_filled(rect, 6.0, palette.surface_hover.gamma_multiply(0.5));
     }
-    let when = crate::util::moment_stamp(app.locale, marked_at);
     let name_line = widgets::line(
         ui,
         &name,
@@ -1151,12 +1317,38 @@ fn starred_row(
                 .is_none_or(|layer| layer == response.layer_id)
         });
     #[cfg(any(test, feature = "demo"))]
-    let force_menu = app
+    let demo_menu = app
         .open_list_menu
         .as_ref()
         .is_some_and(|(chat, id)| chat == &message.chat && id == &message.id);
     #[cfg(not(any(test, feature = "demo")))]
-    let force_menu = false;
+    let demo_menu = false;
+    // Asked for by the list's Shift+F10: focus goes into the menu and comes
+    // back to the list as it closes. A row out of view is scrolled back first,
+    // so the request waits a frame or two for it to be drawn, and ends here.
+    let frame = ui.ctx().cumulative_frame_nr();
+    let key_asked = ui
+        .ctx()
+        .data(|data| data.get_temp::<(egui::Id, u64)>(starred_menu_request_id()))
+        .is_some_and(|(row, at)| row == response.id && frame <= at + 2);
+    if key_asked {
+        ui.ctx()
+            .data_mut(|data| data.remove::<(egui::Id, u64)>(starred_menu_request_id()));
+    }
+    let force_menu = demo_menu || key_asked;
+    let popup_id = egui::Popup::default_response_id(&response);
+    let key_menu = super::list_nav::KeyMenu::begin(ui.ctx(), popup_id, key_asked, false)
+        .menu(crate::i18n::gettext(app.locale, "Message"));
+    // Opened from the keys, the menu stays at its bubble for as long as it is
+    // open: the pointer gave it no place to go to.
+    let at_bubble_id = popup_id.with("at-bubble");
+    let at_bubble = force_menu
+        || (key_menu.was_open()
+            && !right_clicked
+            && ui
+                .ctx()
+                .data(|data| data.get_temp::<bool>(at_bubble_id))
+                .unwrap_or(false));
     let open = if right_clicked || force_menu {
         Some(egui::SetOpenCommand::Bool(true))
     } else if response.clicked() {
@@ -1176,27 +1368,41 @@ fn starred_row(
             message,
         ))
         .frame(widgets::menu_frame(palette));
-    let popup = if force_menu {
+    let popup = if at_bubble {
         popup.at_position(bubble.left_top() + vec2(12.0, 8.0))
     } else {
         popup.at_pointer_fixed()
     };
-    popup.show(|ui| {
+    let menu = popup.show(|ui| {
         let chat = app
             .chat(&message.chat)
             .cloned()
             .unwrap_or_else(|| Chat::new(message.chat.clone(), name.clone()));
         conversation::list_menu(app, ui, &chat, message, marks, actions);
     });
-    if response
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .clicked()
-    {
+    let first = conversation::menu_first_item(ui.ctx(), &message.chat, &message.id);
+    let open = key_menu.finish(
+        ui.ctx(),
+        menu.as_ref().map(|menu| menu.response.layer_id),
+        false,
+        first,
+        starred_list_id(),
+    );
+    ui.ctx().data_mut(|data| {
+        if open && at_bubble {
+            data.insert_temp(at_bubble_id, true);
+        } else {
+            data.remove::<bool>(at_bubble_id);
+        }
+    });
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if response.clicked() {
         actions.push(Action::OpenMessage {
             chat: message.chat.clone(),
             message: message.id.clone(),
         });
     }
+    response
 }
 
 fn list(app: &mut App, ui: &mut egui::Ui) {
@@ -1220,7 +1426,7 @@ fn list(app: &mut App, ui: &mut egui::Ui) {
         return;
     }
     if app.show_starred {
-        starred_list(app, ui);
+        starred_list(app, ui, focus);
         return;
     }
     if !app.search.trim().is_empty() {

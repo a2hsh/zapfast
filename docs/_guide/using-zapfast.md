@@ -121,6 +121,14 @@ document, or voice message shows the same label the chat list uses. Clicking a
 row opens the chat at that message, and right-clicking it offers the chat's own
 menu, including **Unstar**. Messages from locked chats stay out of the list.
 Click **Chats** in the rail, or press Escape, to go back to the chats.
+From the keyboard the list is one list in the chat list's place, which Tab
+and Alt+1 (Control+1 on macOS) reach, and the screen reader says how many
+messages it holds as it opens. Each row reads as a message: the chat, who
+wrote it, its words and when, then when it was starred. Up, Down, Home, End,
+PgUp and PgDn move through it; Enter opens the message in its chat, and with
+a screen reader moves to it in the message list; Shift+F10 opens the row's
+menu. Escape in the list goes back to the chats with focus on **Starred** in
+the rail.
 
 ## Pinned messages
 
@@ -849,7 +857,8 @@ The chats form one list too, named Chats, or Archived chats, Locked chats
 or Search results for what it shows; the open chat is its selected item.
 The list is a single Tab stop: Alt+1 (Control+1 on macOS) also moves there,
 and to the chats' avatars in the rail while the list is hidden. From the
-Calls tab, Settings or Starred it goes back to the chats first. In a narrow
+Calls tab or Settings it goes back to the chats first; with Starred open it
+moves into the Starred list in the same place. In a narrow
 window, where an open chat takes the list's place, Alt+1 goes back to the
 list as Back does; where the chat info panel leaves no room for the list
 beside the chat, it closes the panel. In the list, Up and Down move one chat

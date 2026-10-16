@@ -7473,20 +7473,47 @@ mod tests {
         assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
     }
 
-    /// Starred messages stand in the chat list's place: Alt+1 brings the
-    /// chats back, as the rail's Chats does, and moves into their list.
+    /// The Starred list stands in the chat list's place: Alt+1 moves into
+    /// it, as into the chat list, and Starred stays open.
     #[test]
-    fn alt_1_from_the_starred_messages_focuses_the_chat_list() {
+    fn alt_1_on_the_starred_messages_focuses_their_list() {
         let mut app = app();
         let ctx = egui::Context::default();
         app.attach(&ctx);
         app.show_starred = true;
         render(&mut app, &ctx);
         press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
-        assert!(!app.show_starred);
+        assert!(app.show_starred);
         assert_eq!(
             ctx.memory(|memory| memory.focused()),
-            Some(crate::ui::chats::chats_list_id())
+            Some(crate::ui::chats::starred_list_id())
+        );
+    }
+
+    /// The Starred list takes Alt+1 even when the chat filter beneath it
+    /// leaves no chat: Alt+1 is not refused with "No chats".
+    #[test]
+    fn alt_1_reaches_the_starred_list_with_no_chat_in_the_filter() {
+        let mut app = app();
+        apply_flags(&mut app, Some("starred"));
+        app.account_mut().chat_filter = crate::model::ChatFilter::Favorites;
+        for chat in &mut app.chats {
+            chat.favorite = false;
+        }
+        assert!(app.current_list_chat().is_none(), "no chat in the filter");
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        assert!(app.show_starred);
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::chats::starred_list_id())
+        );
+        assert!(
+            !app.announcer.spoken().contains(&"No chats"),
+            "{:?}",
+            app.announcer.spoken()
         );
     }
 
@@ -8093,6 +8120,202 @@ mod tests {
         assert_eq!(app.message_cursor.get(&channel), Some(&newest));
     }
 
+    /// The Starred list is one list in the chat list's place, reached with
+    /// Alt+1, whose rows read as messages: the chat, who wrote it, its words
+    /// and when, then when it was starred. The arrows walk it, Shift+F10
+    /// opens a row's menu and Escape there comes back to the list; Enter
+    /// opens the message in its chat and takes a reader to it. Escape leaves
+    /// Starred for the rail's Starred.
+    #[test]
+    fn starred_messages_are_one_list_read_like_messages() {
+        let mut app = app();
+        apply_flags(&mut app, Some("starred"));
+        // A second starred message, in another chat.
+        let other = app.conversations[SAMPLES[2].id]
+            .messages
+            .last()
+            .cloned()
+            .expect("a sample message");
+        app.starred.push(crate::archive::Starred {
+            message: other,
+            starred_at: crate::util::now() - 60,
+        });
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        assert!(app.show_starred);
+        let list = crate::ui::chats::starred_list_id();
+        let shown: Vec<Message> = crate::ui::chats::starred_shown(&app)
+            .into_iter()
+            .map(|entry| entry.message.clone())
+            .collect();
+        assert!(shown.len() >= 2, "{}", shown.len());
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        let tree = tree_after(&mut app, &ctx, None);
+        let (node_of_list, active) = list_nodes(&tree, list);
+        assert_eq!(node_of_list.role(), egui::accesskit::Role::ListBox);
+        assert_eq!(node_of_list.label(), Some("Starred messages"));
+        assert_eq!(node_of_list.size_of_set(), Some(shown.len()));
+        let active = active.expect("the first is current");
+        assert_eq!(active.role(), egui::accesskit::Role::ListBoxOption);
+        assert_eq!(active.position_in_set(), Some(0));
+        let first = &shown[0];
+        let label = active.label().unwrap_or_default().to_owned();
+        let title = app.chat_title_of(&first.chat);
+        let sender = if first.from_me {
+            "You".to_owned()
+        } else {
+            app.display_name_or(&first.sender, first.sender_name.as_deref())
+        };
+        assert!(
+            label.starts_with(&format!("{title}, {sender}, ")),
+            "{label}"
+        );
+        assert!(label.contains(", starred "), "{label}");
+        let tree = tree_after(&mut app, &ctx, Some(egui::Key::ArrowDown));
+        let active = list_nodes(&tree, list).1.expect("the second is current");
+        assert_eq!(active.position_in_set(), Some(1));
+        let second = shown[1].clone();
+        // Its menu, from the keys, and back.
+        press_key(&mut app, &ctx, egui::Key::F10, egui::Modifiers::SHIFT);
+        let row = crate::ui::chats::list_row_id(&second.chat, &second.id);
+        let popup =
+            egui::Popup::default_response_id(&ctx.read_response(row).expect("the row is drawn"));
+        assert!(egui::Popup::is_id_open(&ctx, popup), "the row's menu");
+        assert_eq!(focused_layer(&ctx).map(|layer| layer.id), Some(popup));
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(!egui::Popup::is_id_open(&ctx, popup));
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        assert!(app.show_starred, "Escape closed the menu only");
+        // Enter, with a screen reader: the message in its chat.
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        render(&mut app, &ctx);
+        assert_eq!(app.open_chat.as_ref(), Some(&second.chat));
+        assert_eq!(app.message_cursor.get(&second.chat), Some(&second.id));
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::conversation::messages_list_id(&second.chat))
+        );
+        // Back in the list, Escape leaves Starred for the rail's Starred.
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(!app.show_starred);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::rail::destination_id(
+                crate::ui::rail::Destination::Starred
+            ))
+        );
+    }
+
+    /// With nothing starred the list is still drawn, empty: Alt+1 lands on
+    /// it, and a reader in it keeps focus there.
+    #[test]
+    fn an_empty_starred_list_still_takes_focus() {
+        let mut app = app();
+        apply_flags(&mut app, Some("starred"));
+        app.starred.clear();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        assert!(app.show_starred);
+        let list = crate::ui::chats::starred_list_id();
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        let tree = tree_after(&mut app, &ctx, None);
+        let (node_of_list, active) = list_nodes(&tree, list);
+        assert_eq!(node_of_list.label(), Some("Starred messages"));
+        assert_eq!(node_of_list.size_of_set(), Some(0));
+        assert!(active.is_none());
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+    }
+
+    /// Starred messages all in locked chats, which the list keeps out: the
+    /// list says it has none, without a word about the locked ones.
+    #[test]
+    fn a_starred_list_whose_messages_are_all_locked_says_it_has_none() {
+        let mut app = app();
+        apply_flags(&mut app, Some("starred"));
+        assert!(!app.starred.is_empty());
+        let starred: Vec<String> = app
+            .starred
+            .iter()
+            .map(|entry| entry.message.chat.clone())
+            .collect();
+        for chat in &mut app.chats {
+            chat.locked |= starred.contains(&chat.id);
+        }
+        assert!(crate::ui::chats::starred_shown(&app).is_empty());
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let list = crate::ui::chats::starred_list_id();
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        let tree = tree_after(&mut app, &ctx, None);
+        let (node_of_list, active) = list_nodes(&tree, list);
+        assert_eq!(node_of_list.label(), Some("Starred messages"));
+        assert_eq!(node_of_list.size_of_set(), Some(0));
+        assert_eq!(node_of_list.description(), Some("No starred messages"));
+        assert!(active.is_none());
+    }
+
+    /// Shift+F10 on the current row, scrolled out of view with the wheel,
+    /// brings the row back into view and opens its menu.
+    #[test]
+    fn shift_f10_on_a_starred_row_out_of_view_opens_its_menu() {
+        let mut app = app();
+        apply_flags(&mut app, Some("starred"));
+        // Enough starred messages for the list to scroll.
+        let first = app.starred[0].clone();
+        for index in 0..30 {
+            let mut more = first.clone();
+            more.message.id = format!("more-{index}");
+            more.starred_at -= 1 + index;
+            app.starred.push(more);
+        }
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let list = crate::ui::chats::starred_list_id();
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        let current = crate::ui::chats::starred_shown(&app)[0].message.clone();
+        let row = crate::ui::chats::list_row_id(&current.chat, &current.id);
+        let area = ctx.read_response(list).expect("the list").rect;
+        frame_with(
+            &mut app,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(area.center()),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -3000.0),
+                    modifiers: egui::Modifiers::NONE,
+                    phase: egui::TouchPhase::Move,
+                },
+            ],
+        );
+        for _ in 0..10 {
+            frame_with(&mut app, &ctx, Vec::new());
+        }
+        let scrolled = ctx.read_response(row).expect("the row").rect;
+        assert!(
+            scrolled.bottom() < area.top(),
+            "{scrolled:?} above {area:?}"
+        );
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        press_key(&mut app, &ctx, egui::Key::F10, egui::Modifiers::SHIFT);
+        render(&mut app, &ctx);
+        let popup =
+            egui::Popup::default_response_id(&ctx.read_response(row).expect("the row is drawn"));
+        assert!(egui::Popup::is_id_open(&ctx, popup), "the row's menu");
+        assert_eq!(focused_layer(&ctx).map(|layer| layer.id), Some(popup));
+        let shown = ctx.read_response(row).expect("the row").rect;
+        assert!(area.intersects(shown), "the row is back in view");
+    }
     #[test]
     fn arrows_move_the_chat_cursor_without_opening() {
         let mut app = app();

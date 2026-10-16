@@ -834,6 +834,9 @@ pub struct App {
     /// The typing in the chat list's search, until its result count is
     /// spoken.
     search_settle: Option<crate::announcer::Settle>,
+    /// The Starred list just opened: how many it holds is spoken once the
+    /// archive has listed them.
+    starred_count_due: bool,
     /// Whether the archive's message hits for the chat list's search are
     /// still due: the count waits for them.
     search_pending: bool,
@@ -1624,6 +1627,7 @@ impl App {
             focus_settings_search: false,
             settings_search_settle: None,
             search_settle: None,
+            starred_count_due: false,
             search_pending: false,
             chat_search_settle: None,
             settings_return_focus: None,
@@ -1925,7 +1929,9 @@ impl App {
         self.wallpaper_return_focus = None;
         // The Settings search count waits for a page that just closed.
         self.settings_search_settle = None;
-        // The searches the counts wait for were the previous account's.
+        // The searches the counts wait for were the previous account's, and
+        // so was the Starred list.
+        self.starred_count_due = false;
         self.search_pending = false;
         self.search_settle = None;
         self.chat_search_settle = None;
@@ -2374,6 +2380,30 @@ impl App {
             settle.touch(now);
             settle
         })
+    }
+
+    /// Speaks how many starred messages the Starred list shows, while it
+    /// shows.
+    fn announce_starred_count(&mut self) {
+        if !self.show_starred {
+            return;
+        }
+        let count = crate::ui::chats::starred_shown(self).len();
+        let text = if count == 0 {
+            crate::i18n::gettext(self.locale, "No starred messages").into_owned()
+        } else {
+            let plural = u32::try_from(count).unwrap_or(u32::MAX);
+            crate::a11y::fill(
+                &crate::i18n::ngettext(
+                    self.locale,
+                    "{count} starred message",
+                    "{count} starred messages",
+                    plural,
+                ),
+                &[("count", &count.to_string())],
+            )
+        };
+        self.announcer.say(crate::announcer::Category::Status, text);
     }
 
     /// Says that Escape emptied a search field, in any of the three.
@@ -3804,7 +3834,13 @@ impl App {
                     self.backend.send(Command::LoadStarred);
                 }
             }
-            Event::StarredList(list) => self.starred = list,
+            Event::StarredList(list) => {
+                self.starred = list;
+                if live && self.starred_count_due {
+                    self.starred_count_due = false;
+                    self.announce_starred_count();
+                }
+            }
             Event::Pins { chat, items } => {
                 // A pin carries the message's own words, so a locked chat
                 // keeps them off the window until its folder is open, the
@@ -8812,6 +8848,8 @@ impl App {
                     }
                     self.backend.send(Command::LoadStarred);
                 }
+                // How many there are is said once the archive lists them.
+                self.starred_count_due = self.show_starred;
             }
             Action::SelectLabel(label) => self.select_label(label),
             Action::SetChatLabels { chat, labels } => {
@@ -9017,18 +9055,20 @@ impl App {
                 self.chat_cursor = Some(id);
             }
             Action::FocusChats => {
-                let Some(current) = self.current_list_chat() else {
+                // The Starred list, in the chat list's place, takes the
+                // request as the chat list would, whatever chats the filter
+                // leaves: it is a list even with nothing in it.
+                let current = self.current_list_chat();
+                if current.is_none() && !self.show_starred {
                     self.announcer.say(
                         crate::announcer::Category::Status,
                         crate::i18n::gettext(self.locale, "No chats"),
                     );
                     return;
-                };
+                }
                 // From the Calls page or Settings, back to the chats, where
-                // the list is. Starred messages stand in the list's place:
-                // the chats come back, as from the rail's Chats.
+                // the list is.
                 self.page = Page::Chats;
-                self.show_starred = false;
                 // Where the open chat is drawn in the list's place, the list
                 // comes back too. A narrow window gives the chat all of its
                 // width: the list comes back as Back brings it, its current
@@ -9046,7 +9086,9 @@ impl App {
                 // The list takes focus when it is next drawn, with its
                 // current chat in view.
                 self.focus_chats = true;
-                self.scroll_chat_into_view = Some(current);
+                if current.is_some() {
+                    self.scroll_chat_into_view = current;
+                }
                 // Shown as after Tab: the ring goes around the current chat.
                 ctx.data_mut(|data| {
                     data.insert_temp(crate::theme::keyboard_focus_id(), true);
@@ -11750,6 +11792,41 @@ mod tests {
         app.search_settings("sound".into(), t0);
         app.page = Page::Chats;
         assert_eq!(speak_at(&mut app, t0 + ms(1000)), None);
+    }
+
+    /// Opening Starred says how many starred messages it lists, once the
+    /// archive has listed them, and only then: a list read again while it is
+    /// open (a star changed) says nothing more. None listed says so.
+    #[test]
+    fn opening_starred_says_how_many_it_lists() {
+        let (mut app, events, _root) = reading(ADA, "Ada");
+        let ctx = egui::Context::default();
+        let starred = |id: &str| crate::archive::Starred {
+            message: message(ADA, id, 100),
+            starred_at: 200,
+        };
+        app.apply(Action::ToggleStarred, &ctx);
+        assert!(app.show_starred);
+        assert_eq!(speak(&mut app), None, "the archive has not listed them");
+        events
+            .send(Event::StarredList(vec![starred("m1"), starred("m2")]))
+            .unwrap();
+        app.handle_events();
+        assert_eq!(speak(&mut app).as_deref(), Some("2 starred messages"));
+        events
+            .send(Event::StarredList(vec![starred("m1")]))
+            .unwrap();
+        app.handle_events();
+        assert_eq!(speak(&mut app), None, "said once");
+        app.apply(Action::ToggleStarred, &ctx);
+        assert!(!app.show_starred);
+        events.send(Event::StarredList(Vec::new())).unwrap();
+        app.handle_events();
+        assert_eq!(speak(&mut app), None, "closed");
+        app.apply(Action::ToggleStarred, &ctx);
+        events.send(Event::StarredList(Vec::new())).unwrap();
+        app.handle_events();
+        assert_eq!(speak(&mut app).as_deref(), Some("No starred messages"));
     }
 
     /// The chat list's search counts every row it lists: chats, messages
