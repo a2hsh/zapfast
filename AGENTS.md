@@ -230,7 +230,12 @@ protocol. These notes are for coding agents and new contributors.
   A repeated poll question with no usable vote snapshot cannot finish recovery.
 - Chat ids are canonical strings: a chat behind a privacy id (`@lid`) is
   filed under its phone number once the mapping is known. Use
-  `Worker::canonical` for anything that arrives as a `Jid`.
+  `Worker::canonical` for anything that arrives as a `Jid`. A contact's
+  message to one of their broadcast lists arrives addressed to the list and
+  is filed in the chat with them, as on the phone (`Worker::message_chat`);
+  `messages.broadcast_list` keeps the list, where its read and played
+  receipts go with the sender as participant. Our own list messages stay
+  under the list.
 - Updates come from fastframe-update: `src/updates.rs` holds ZapFast's
   `UpdateConfig` (legacy `fastsapp` names, the publisher key) and the
   proxy-aware client. It downloads verified GitHub releases and hands
