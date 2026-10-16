@@ -54,6 +54,7 @@ pub fn of(stop: Stop) -> Section {
         }
         // The chat's search pane docks beside its messages, and searches them.
         Stop::ChatActions
+        | Stop::PinBanner
         | Stop::ChatSearchClose
         | Stop::ChatSearchDate
         | Stop::ChatSearchField
@@ -224,6 +225,7 @@ mod tests {
             (Stop::ChatList, Section::Chats),
             (Stop::ChatActions, Section::Conversation),
             (Stop::ChatSearchField, Section::Conversation),
+            (Stop::PinBanner, Section::Conversation),
             (Stop::InfoClose, Section::Conversation),
             (Stop::InfoControl(0), Section::Conversation),
             (Stop::Messages, Section::Conversation),

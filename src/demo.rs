@@ -7482,6 +7482,64 @@ mod tests {
         assert!(app.announcer.spoken().iter().all(|said| said.is_empty()));
     }
 
+    /// The pinned message line is a Tab stop after the chat header's
+    /// toolbar, read as it shows: plain text with mentions by name, never
+    /// the markup or a mention's number. Enter goes to the pin, whose
+    /// message becomes the list's current one, and shows the next pin; with
+    /// a screen reader, focus goes on to that message.
+    #[test]
+    fn the_pin_banner_is_a_stop_and_reads_its_plain_text() {
+        use crate::ui::focus::Stop;
+        let mut app = app();
+        apply_flags(&mut app, Some("pinned"));
+        let chat = app.open_chat.clone().unwrap();
+        let number = crate::model::phone_of(SAMPLES[0].id).expect("a number");
+        let raw = format!("*Meeting* at 5 @{number}");
+        for pin in app.chat_pins.get_mut(&chat).expect("pins") {
+            pin.text = raw.clone();
+        }
+        let plain = crate::markup::plain(&app.resolve_mention_tokens(&raw), &[]);
+        assert!(!plain.contains('*') && !plain.contains(number), "{plain}");
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let actions = stop_id(&ctx, Stop::ChatActions);
+        ctx.memory_mut(|memory| memory.request_focus(actions));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        let banner = stop_id(&ctx, Stop::PinBanner);
+        assert_eq!(focused(&ctx), Some(banner), "the stop after Chat actions");
+        let first = focused_label(&mut app, &ctx).expect("a label");
+        assert!(
+            first.starts_with("Pinned message ") && first.ends_with(&format!(": {plain}")),
+            "{first}"
+        );
+        let pins: Vec<String> = app.chat_pins[&chat]
+            .iter()
+            .map(|pin| pin.id.clone())
+            .collect();
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        render(&mut app, &ctx);
+        let current = app.message_cursor.get(&chat).cloned();
+        assert!(
+            current
+                .as_ref()
+                .is_some_and(|current| pins.contains(current)),
+            "{current:?} is a pin"
+        );
+        assert_eq!(
+            focused(&ctx),
+            Some(crate::ui::conversation::messages_list_id(&chat)),
+            "a screen reader goes on to the pinned message"
+        );
+        let tree = tree_after(&mut app, &ctx, None);
+        let next = node(&tree, banner.accesskit_id())
+            .and_then(|node| node.label().map(str::to_owned))
+            .expect("the line is still there");
+        assert_ne!(next, first, "the next pin");
+        assert!(next.starts_with("Pinned message "), "{next}");
+    }
+
     /// The chat list and the conversation take focus back where they were
     /// left: the search field, a toolbar's button.
     #[test]

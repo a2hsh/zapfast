@@ -236,24 +236,23 @@ fn pin_banner(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
     theme::paint_icon(ui, Icon::Pin, icon, 14.0, palette.accent);
     let text_left = icon_left + PIN_ICON + 8.0;
     let text_width = (bar.right() - PIN_ROW_INSET - text_left).max(1.0);
-    let label = widgets::line(
-        ui,
-        &crate::markup::plain(&app.resolve_mention_tokens(&row.text), &[]),
-        theme::regular(13.0),
-        palette.text,
-        text_width,
-        1,
-    );
+    // What the line shows: the plain text, its mentions by name. The
+    // screen reader hears the same, never markup or a mention's number.
+    let text = crate::markup::plain(&app.resolve_mention_tokens(&row.text), &[]);
+    let label = widgets::line(ui, &text, theme::regular(13.0), palette.text, text_width, 1);
     label.paint(
         ui,
         pos2(text_left, bar.center().y - label.size().y / 2.0),
         palette.text,
     );
     theme::reveal_focus(&response);
+    // A Tab stop of its own, after the chat header's toolbar: Enter or
+    // Space opens the pin as a click does.
+    let response = response.tab_stop(Stop::PinBanner);
     let described = crate::i18n::gettext(app.locale, "Pinned message {index} of {count}: {text}")
         .replace("{index}", &(shown + 1).to_string())
         .replace("{count}", &rows.len().to_string())
-        .replace("{text}", &row.text);
+        .replace("{text}", &text);
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &described)
     });
@@ -262,6 +261,14 @@ fn pin_banner(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
             chat: chat.id.clone(),
             message: row.id.clone(),
         });
+        // Opened from the keys with a screen reader, the reader goes on to
+        // the pinned message in the message list, now its current message,
+        // rather than to the message field a click leaves focus in.
+        if !ui.input(|input| input.pointer.any_click())
+            && crate::a11y::screen_reader_active(ui.ctx(), response.id)
+        {
+            app.actions.push(Action::FocusMessages);
+        }
         let next = rows[next_pin(rows.len(), shown)].id.clone();
         ui.ctx().data_mut(|data| data.insert_temp(cursor_id, next));
     }

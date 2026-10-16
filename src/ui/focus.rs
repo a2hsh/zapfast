@@ -30,6 +30,9 @@ pub enum Stop {
     /// The chat header's toolbar: chat info, search and the chat's menu,
     /// and Back in a narrow window.
     ChatActions,
+    /// The pinned message line under the chat header, while the chat has a
+    /// pin: Enter goes to the pin shown and shows the next.
+    PinBanner,
     /// The search pane's controls in reading order. The arrows walk its
     /// results from the field.
     ChatSearchClose,

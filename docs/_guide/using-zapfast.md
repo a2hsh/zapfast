@@ -130,7 +130,9 @@ chat holds three pins at a time, and ZapFast refuses a fourth instead of
 quietly replacing one. A line under the chat's header shows the newest pin,
 with a small bar at its left marking how many pins there are and which one is
 shown. Click the line to open that message; the line then moves on to the next
-pin, so repeated clicks walk through them all.
+pin, so repeated clicks walk through them all. From the keyboard the line is
+the Tab stop after the chat's header: Enter opens its message, which becomes
+the message list's current message, and the line moves on to the next pin.
 A pinned message carries a pin beside its time, and the chat shows a notice
 where the pin was made, naming who made it. Pins made on your phone or by
 others arrive the same way. A pin leaves when it expires, and a message
@@ -908,8 +910,9 @@ In the chat view, Tab cycles through the message input, the Message actions
 toolbar, then from the top left of the window the Navigation toolbar (the
 rail), the Chat list actions toolbar, search, the Filters toolbar, the chat
 list (the rail's avatars while the list is hidden), the Chat actions
-toolbar, the chat's search pane while it is open, the chat info panel and
-the message list, and back to the input: the composer comes last, as in the
+toolbar, the pinned message line while the chat has pins, the chat's
+search pane while it is open, the chat info panel and the message list, and
+back to the input: the composer comes last, as in the
 window. Shift+Tab reverses that order; hidden controls are skipped. Single
 messages, their links and phone numbers, reactions and chat rows are not
 stops in this cycle. The React and Reply
