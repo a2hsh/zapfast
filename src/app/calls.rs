@@ -612,7 +612,8 @@ impl App {
 
     /// Joins a call link from a message: drawn as connecting in this same
     /// frame, as a placed call is, while the worker asks to be let in.
-    pub(super) fn join_call_link(&mut self, token: String, video: bool) {
+    /// `muted` joins with the microphone muted from the start, and says so.
+    pub(super) fn join_call_link(&mut self, token: String, video: bool, muted: bool) {
         if self.call_live() {
             self.toast_error(crate::i18n::gettext(
                 self.locale,
@@ -625,9 +626,16 @@ impl App {
         self.backend.send(Command::JoinCallLink {
             token,
             video,
+            muted,
             generation,
             cancel: Arc::clone(&cancel),
         });
+        if muted {
+            self.announcer.say(
+                crate::announcer::Category::Status,
+                crate::i18n::gettext(self.locale, "Joining with the microphone muted"),
+            );
+        }
         let mut placing = CallUpdate::placing(generation, String::new(), video);
         placing.group = Some(crate::calls::GroupCall {
             link: true,
@@ -1176,6 +1184,44 @@ mod tests {
             app.call_member_frames.is_empty(),
             "a stopped camera leaves no frozen picture"
         );
+    }
+
+    /// N23: a call link opened from the keys or with a screen reader joins
+    /// with the microphone muted, and says so; a click joins as before.
+    #[test]
+    fn a_call_link_from_the_keys_joins_muted() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, mut commands) = app(directory.path());
+        let ctx = egui::Context::default();
+        ctx.data_mut(|data| data.insert_temp(crate::theme::keyboard_focus_id(), true));
+        app.apply(
+            Action::OpenUrl("https://call.whatsapp.com/voice/AbCdEf1234567890".to_owned()),
+            &ctx,
+        );
+        let sent = sent(&mut commands);
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [Command::JoinCallLink {
+                    video: false,
+                    muted: true,
+                    ..
+                }]
+            ),
+            "{sent:?}"
+        );
+        assert!(heard(&mut app).contains(&"Joining with the microphone muted".to_owned()));
+
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, mut commands) = self::app(directory.path());
+        app.apply(
+            Action::OpenUrl("https://call.whatsapp.com/voice/AbCdEf1234567890".to_owned()),
+            &egui::Context::default(),
+        );
+        assert!(matches!(
+            self::sent(&mut commands).as_slice(),
+            [Command::JoinCallLink { muted: false, .. }]
+        ));
     }
 
     /// A call link from a message is joined here rather than opened in the browser, and is

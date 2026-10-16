@@ -537,10 +537,28 @@ pub struct AudioInput {
     /// behind the engine's channel, from a reader that was restarted, and how it sees that a mute
     /// restarts nothing at all.
     pub opens: Arc<AtomicUsize>,
+    /// While set, the pump hands the engine silence in place of what the microphone hears: a call
+    /// link joined muted keeps it set until the engine itself is muted (`Call::join_link`).
+    held: Arc<AtomicBool>,
 }
 
 impl AudioInput {
     pub fn spawn(target: Option<String>) -> (Self, async_channel::Receiver<Vec<i16>>) {
+        Self::start(target, false)
+    }
+
+    /// As [`AudioInput::spawn`], feeding the engine silence from the first frame on until
+    /// [`AudioInput::hold`]'s flag is cleared.
+    pub fn spawn_held(target: Option<String>) -> (Self, async_channel::Receiver<Vec<i16>>) {
+        Self::start(target, true)
+    }
+
+    /// The flag that, while set, feeds the engine silence; clearing it lets the microphone through.
+    pub fn hold(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.held)
+    }
+
+    fn start(target: Option<String>, held: bool) -> (Self, async_channel::Receiver<Vec<i16>>) {
         let (out, rx) = async_channel::bounded::<Vec<i16>>(4);
         // Unbounded so a device the user picks while the pump is busy is never dropped: a capacity
         // of one would silently discard the newer selection when two arrive before the pump reads
@@ -551,18 +569,21 @@ impl AudioInput {
         // One per call, read by the test above and written by the pump below, so a reader that
         // survives a mute or a rebind is told from one that was started again.
         let opens = Arc::new(AtomicUsize::new(0));
+        let held = Arc::new(AtomicBool::new(held));
         tokio::spawn(mic_pump(
             out,
             swaps,
             fell,
             target.clone(),
             Arc::clone(&opens),
+            Arc::clone(&held),
         ));
         (
             Self {
                 swap: Some(swap),
                 fell_back,
                 opens,
+                held,
             },
             rx,
         )
@@ -587,6 +608,7 @@ async fn mic_pump(
     fell: async_channel::Sender<()>,
     initial: Option<String>,
     opens: Arc<AtomicUsize>,
+    held: Arc<AtomicBool>,
 ) {
     let mut target = initial;
     loop {
@@ -620,7 +642,10 @@ async fn mic_pump(
             tokio::select! {
                 frame = reader.frames.recv() => {
                     match frame {
-                        Ok(frame) => {
+                        Ok(mut frame) => {
+                            if held.load(Ordering::Relaxed) {
+                                frame.fill(0);
+                            }
                             if out.send(frame).await.is_err() {
                                 // The engine dropped its port: the call is over.
                                 return;
@@ -1631,6 +1656,37 @@ mod tests {
             got.iter().flatten().any(|sample| *sample != 0),
             "the frames carry what the microphone delivered"
         );
+    }
+
+    /// A held microphone feeds the engine silence from its first frame, the stream still running,
+    /// and lets the microphone through once the hold is cleared.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_held_microphone_feeds_silence_until_it_is_let_through() {
+        let samples: Vec<f32> = (0..960).map(|sample| sample as f32 / 1_920.0).collect();
+        let (_devices, _speaker) = fake::install(samples, 2, 48_000, (48_000, 2));
+        let (input, frames) = AudioInput::spawn_held(None);
+        let next = || async {
+            tokio::time::timeout(Duration::from_secs(5), frames.recv())
+                .await
+                .expect("the engine's channel stays open")
+                .expect("the microphone keeps delivering")
+        };
+        for _ in 0..4 {
+            let frame = next().await;
+            assert_eq!(frame.len(), FRAME_SAMPLES);
+            assert!(frame.iter().all(|sample| *sample == 0), "held: silence");
+        }
+        input.hold().store(false, Ordering::Relaxed);
+        // The frames already queued were held; the microphone comes through after them.
+        let mut heard = false;
+        for _ in 0..12 {
+            if next().await.iter().any(|sample| *sample != 0) {
+                heard = true;
+                break;
+            }
+        }
+        drop(input);
+        assert!(heard, "let through, the engine hears the microphone");
     }
 
     /// The engine's frames reach the speaker at the device's own rate and channel count.

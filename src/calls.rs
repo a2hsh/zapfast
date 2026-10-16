@@ -1427,6 +1427,40 @@ pub fn next_generation() -> u64 {
     GENERATION.fetch_add(1, Ordering::Relaxed) + 1
 }
 
+/// A call this side can mute: the engine's handle, or a test's stand-in for it.
+trait Mutable {
+    /// Mutes the microphone: at once on this side, whatever becomes of telling the others.
+    fn mute(&self) -> impl std::future::Future<Output = ()> + Send;
+}
+
+impl Mutable for CallHandle {
+    async fn mute(&self) {
+        // The engine mutes locally before it announces the mute, so the microphone is silent
+        // however the announcement goes.
+        if let Err(error) = self.set_muted(true).await {
+            log::warn!(
+                "[CALL] the call was not told about the mute; the microphone is muted locally: {error}"
+            );
+        }
+    }
+}
+
+/// The end of a call link's join, once `joined` is its answer. Asked to join muted, it mutes the
+/// call it got into before the join answers, so neither the worker nor the window ever has the
+/// call in with the microphone live, and only then lets the microphone through to the engine,
+/// which keeps it silent from there on. Until then `held` fed the engine silence.
+async fn finish_join<H: Mutable>(
+    joined: std::result::Result<H, String>,
+    muted: bool,
+    held: &AtomicBool,
+) -> std::result::Result<H, String> {
+    if muted && let Ok(handle) = &joined {
+        handle.mute().await;
+    }
+    held.store(false, Ordering::Relaxed);
+    joined
+}
+
 /// A live 1:1 call: its signaling identity, its media, and the state the UI renders.
 ///
 /// One per worker. The worker refuses to start or accept a second call while this exists, which is
@@ -1781,6 +1815,7 @@ impl Call {
         generation: u64,
         token: String,
         video: bool,
+        muted: bool,
         camera: Option<String>,
         cancel: &AtomicBool,
         done: async_channel::Sender<std::result::Result<CallHandle, String>>,
@@ -1801,7 +1836,13 @@ impl Call {
         if cancel.load(Ordering::Relaxed) {
             return Err(Cancelled.into());
         }
-        let (mic, mic_rx) = AudioInput::spawn(None);
+        // Joined muted, the engine is fed silence from the first frame until it is muted itself.
+        let (mic, mic_rx) = if muted {
+            AudioInput::spawn_held(None)
+        } else {
+            AudioInput::spawn(None)
+        };
+        let held = mic.hold();
         let (output, output_tx) = AudioOutput::spawn(None);
         let endpoints = pipe
             .as_ref()
@@ -1819,7 +1860,9 @@ impl Call {
                 Some((source, sink)) => builder.video(source, sink).start().await,
                 None => builder.start().await,
             };
-            let _ = done.send(joined.map_err(|error| error.to_string())).await;
+            let joined = joined.map_err(|error| error.to_string());
+            let joined = finish_join(joined, muted, &held).await;
+            let _ = done.send(joined).await;
         });
         log::info!("[CALL] joining a call link video={video}");
         let (video_pipe, frames) = match pipe {
@@ -1864,7 +1907,7 @@ impl Call {
     }
 
     /// Applies the answer of a call link's join: the call is in and its media coming up, or it
-    /// could not get in.
+    /// could not get in. A join asked to be muted is muted already (`finish_join`).
     pub fn link_joined(
         &mut self,
         joined: std::result::Result<CallHandle, String>,
@@ -3267,6 +3310,55 @@ mod tests {
         if muted && frame.len() == crate::call_audio::FRAME_SAMPLES {
             frame.fill(0);
         }
+    }
+
+    /// A call link joined muted is muted before its join answers, while the engine is still fed
+    /// silence, and the microphone is let through only after; joined unmuted, nothing is muted and
+    /// nothing held back.
+    #[tokio::test]
+    async fn a_call_link_joined_muted_is_muted_before_its_join_answers() {
+        struct Handle {
+            held: Arc<AtomicBool>,
+            muted: AtomicBool,
+            muted_while_held: AtomicBool,
+        }
+        impl Mutable for Handle {
+            async fn mute(&self) {
+                self.muted_while_held
+                    .store(self.held.load(Ordering::Relaxed), Ordering::Relaxed);
+                self.muted.store(true, Ordering::Relaxed);
+            }
+        }
+        let handle = |held: &Arc<AtomicBool>| Handle {
+            held: Arc::clone(held),
+            muted: AtomicBool::new(false),
+            muted_while_held: AtomicBool::new(false),
+        };
+        let held = Arc::new(AtomicBool::new(true));
+        let joined = finish_join(Ok(handle(&held)), true, &held)
+            .await
+            .expect("let in");
+        assert!(
+            joined.muted.load(Ordering::Relaxed),
+            "muted before the join answers"
+        );
+        assert!(
+            joined.muted_while_held.load(Ordering::Relaxed),
+            "while the engine was still fed silence"
+        );
+        assert!(
+            !held.load(Ordering::Relaxed),
+            "then the microphone is let through"
+        );
+        let held = Arc::new(AtomicBool::new(false));
+        let joined = finish_join(Ok(handle(&held)), false, &held)
+            .await
+            .expect("let in");
+        assert!(
+            !joined.muted.load(Ordering::Relaxed),
+            "a click joins unmuted"
+        );
+        assert!(!held.load(Ordering::Relaxed));
     }
 
     /// A mute really silences what the engine is fed, without silencing the microphone or stopping

@@ -2397,6 +2397,28 @@ mod tests {
         );
     }
 
+    /// N23: a call link reads as a call link with its kind, not as its
+    /// address, and Space joins it as a click does; other links read as
+    /// before.
+    #[test]
+    fn a_call_link_item_says_it_joins_a_call() {
+        let voice = "https://call.whatsapp.com/voice/AbCdEf1234567890";
+        let video = "https://call.whatsapp.com/video/AbCdEf1234567890";
+        let (_root, mut app, chat) = app_with(vec![(
+            "text",
+            crate::model::Content::text(format!("{voice} or {video} or https://a.org")),
+        )]);
+        let (_, spoken) = message_key(&mut app, &chat, "text", Key::ArrowRight);
+        assert_eq!(spoken, "Call link 2 of 3, video call");
+        let (actions, _) = message_key(&mut app, &chat, "text", Key::Space);
+        assert_eq!(actions, [Action::OpenUrl(video.to_owned())]);
+        let (_, spoken) = message_key(&mut app, &chat, "text", Key::ArrowLeft);
+        assert_eq!(spoken, "Call link 1 of 3, voice call");
+        message_key(&mut app, &chat, "text", Key::ArrowRight);
+        let (_, spoken) = message_key(&mut app, &chat, "text", Key::ArrowRight);
+        assert_eq!(spoken, "Link 3 of 3, https://a.org");
+    }
+
     /// Phone numbers are items between the links, in the order the text has
     /// them; Space on one asks for its menu, never a `tel:` address to open.
     #[test]

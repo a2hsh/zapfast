@@ -449,11 +449,13 @@ pub enum Command {
         generation: u64,
         cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     },
-    /// Joins a call link by its token, with video for a video call's link. `generation` and
+    /// Joins a call link by its token, with video for a video call's link, and with the
+    /// microphone muted from the moment the call lets us in when `muted`. `generation` and
     /// `cancel` are what [`Command::StartCall`] carries.
     JoinCallLink {
         token: String,
         video: bool,
+        muted: bool,
         generation: u64,
         cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     },

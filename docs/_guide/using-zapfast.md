@@ -559,7 +559,13 @@ A call link in a message (`call.whatsapp.com/voice/…` or `/video/…`) joins
 that call here rather than opening the browser. The call screen says
 **Connecting…** until the call lets you in, which can take a while when its
 creator admits people one by one, then shows everyone on it as in a group call.
-Hanging up while you wait stops the join. A call joined through a link belongs
+Hanging up while you wait stops the join. In the message list a call link
+reads as one, "Call link 1 of 1, voice call", rather than as its address;
+opened from the keyboard, or with a screen reader, it joins with your
+microphone muted, says "Joining with the microphone muted", and the call
+starts muted, with nothing your microphone hears sent before it is: unmute
+with the Mute button or Ctrl+Shift+M once you are in.
+A click joins as before. A call joined through a link belongs
 to no chat: it is not filed in one, and shows on the Calls page as **Call
 link** with a link sign for a picture. That row only records the call; there
 is no chat to open from it and no one to call back.

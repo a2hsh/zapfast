@@ -287,6 +287,7 @@ impl Worker {
         &mut self,
         token: String,
         video: bool,
+        muted: bool,
         generation: u64,
         cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) {
@@ -312,8 +313,10 @@ impl Worker {
             .then(|| calls::default_camera(&devices, None))
             .flatten();
         let (done, answers) = async_channel::bounded(1);
-        let joined =
-            Call::join_link(&client, generation, token, video, camera, &cancel, done).await;
+        let joined = Call::join_link(
+            &client, generation, token, video, muted, camera, &cancel, done,
+        )
+        .await;
         match joined {
             Ok((call, frames)) => {
                 let (tx, events) = async_channel::bounded(1);
@@ -506,12 +509,13 @@ impl Worker {
     // -----------------------------------------------------------------------
 
     /// One event from the current call's media plane.
-    pub(super) fn call_runtime(&mut self, event: CallRuntimeEvent) {
+    pub(super) async fn call_runtime(&mut self, event: CallRuntimeEvent) {
         let mut refused = None;
         let update = match self.call.as_mut() {
             Some(runtime) => match event {
                 CallRuntimeEvent::LinkJoined(joined) => {
                     refused = joined.as_ref().err().cloned();
+                    // A join asked to be muted answers muted (`Call::join_link`).
                     let update = runtime.call.link_joined(joined);
                     runtime.watch();
                     update

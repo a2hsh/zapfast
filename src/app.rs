@@ -8078,7 +8078,11 @@ impl App {
             }
             Action::OpenUrl(url) => {
                 if let Some((token, video)) = crate::safety::call_link(&url) {
-                    self.join_call_link(token, video);
+                    // From the keys or a screen reader, a link checked with
+                    // Space must not open the microphone to a call at once:
+                    // it joins muted. A click joins as it always has.
+                    let muted = crate::ui::overlay::followed(ctx);
+                    self.join_call_link(token, video, muted);
                 } else if let Some(code) = crate::safety::group_invite_code(&url) {
                     self.invite = Some(crate::model::GroupInvite {
                         code: code.clone(),
