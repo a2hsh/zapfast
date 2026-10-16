@@ -530,9 +530,18 @@ fn live(
         );
         ui.painter().galley(
             egui::pos2(plate.center().x - line.size().x / 2.0, top + name.size().y),
-            line,
+            line.clone(),
             Color32::WHITE,
         );
+        // Painted over the picture, the name and the line are no widgets: the
+        // plate carries them for a screen reader, without a pixel more.
+        let words = format!("{}, {}", name.text(), line.text());
+        ui.interact(
+            plate,
+            egui::Id::new(SURFACE).with("plate"),
+            egui::Sense::hover(),
+        )
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &words));
         let below = Rect::from_min_max(
             egui::pos2(area.left(), plate.bottom() + 6.0),
             egui::pos2(area.right(), plate.bottom() + 60.0),
@@ -703,20 +712,9 @@ fn status_color(call: &CallUpdate, palette: &Palette) -> Color32 {
 fn notes(ui: &mut egui::Ui, locale: Locale, call: &CallUpdate, palette: &Palette) {
     for lost in &call.lost_devices {
         ui.add_space(4.0);
-        let template = match lost.kind {
-            crate::calls::DeviceKind::Microphone => gettext(
-                locale,
-                "Microphone “{name}” is not available; using the system default",
-            ),
-            crate::calls::DeviceKind::Speaker => gettext(
-                locale,
-                "Speaker “{name}” is not available; using the system default",
-            ),
-            crate::calls::DeviceKind::Camera => gettext(locale, "Camera “{name}” is not available"),
-        };
         theme::text(
             ui,
-            template.replace("{name}", &lost.name),
+            lost_device_text(locale, lost),
             theme::medium(12.5),
             palette.warning,
         );
@@ -732,8 +730,36 @@ fn notes(ui: &mut egui::Ui, locale: Locale, call: &CallUpdate, palette: &Palette
     }
 }
 
+/// A device that went away during the call, in the reader's language.
+pub(crate) fn lost_device_text(locale: Locale, lost: &crate::calls::LostDevice) -> String {
+    let template = match lost.kind {
+        crate::calls::DeviceKind::Microphone => gettext(
+            locale,
+            "Microphone “{name}” is not available; using the system default",
+        ),
+        crate::calls::DeviceKind::Speaker => gettext(
+            locale,
+            "Speaker “{name}” is not available; using the system default",
+        ),
+        crate::calls::DeviceKind::Camera => gettext(locale, "Camera “{name}” is not available"),
+    };
+    template.replace("{name}", &lost.name)
+}
+
+/// What a screen reader is told of the line under the call's name as it
+/// changes: the line itself, but "Connected" once the call is up, rather
+/// than its length, which counts on. Nothing while the call rings, which is
+/// announced as it starts.
+pub(crate) fn spoken_status(locale: Locale, call: &CallUpdate) -> Option<String> {
+    match call.phase {
+        CallPhase::Incoming => None,
+        CallPhase::Active => Some(gettext(locale, "Connected").into_owned()),
+        _ => Some(status(locale, call)),
+    }
+}
+
 /// What the engine says about the peer's audio, in the reader's language.
-fn peer_audio_text(locale: Locale, audio: PeerAudio) -> String {
+pub(crate) fn peer_audio_text(locale: Locale, audio: PeerAudio) -> String {
     match audio {
         PeerAudio::Stalled => gettext(locale, "No audio is arriving from this call").into_owned(),
         PeerAudio::Silent(SilenceReason::NoDecoder) => {

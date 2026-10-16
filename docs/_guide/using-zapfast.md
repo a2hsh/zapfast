@@ -862,6 +862,18 @@ device pickers while they are shown, then Mute, the camera, Devices and Hang
 up. When the call ends, or the screen is put aside, focus returns to where
 it was before the call screen took it.
 
+A call that rings is announced with who calls, "Incoming call from Ada",
+also in a muted or archived chat, whose call raises no notification; a
+locked chat's call, and any call while ZapFast is locked, is only "Incoming
+call". During a call the screen reader hears each change of the line under
+the name once: Connecting…, Calling…, Ringing…, Connected, and how the call
+ended (Declined, Busy, No answer, Connection lost, Call ended and the
+others), "Call ended" or "Call declined" when you end it yourself, and the
+notes the screen shows: a request to switch to video, the other side's
+camera going off or on, a device that went away, or their audio not
+getting through. On a video call the name and the call's length over the
+other side's picture are read as one label.
+
 The message input is named after the open chat, "Type a message to Ada" or
 "Type a message to group Rust Berlin", so opening a chat from the keyboard
 says whose chat it is. While a reply is pending, the input's description says what it

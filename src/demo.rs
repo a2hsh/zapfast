@@ -27498,6 +27498,27 @@ mod call_surface_tests {
         assert_eq!(focused_label(&tree).as_deref(), Some("Mute"));
     }
 
+    /// Over the peer's picture, the name and the call's line are painted: the
+    /// plate under them carries them for a screen reader.
+    #[test]
+    fn a_video_call_names_its_peer_over_the_picture() {
+        let mut app = app();
+        apply_flags(&mut app, Some("call-video"));
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        app.attach(&ctx);
+        let tree = settle_with(&mut app, &ctx, Vec::new());
+        assert!(
+            tree.nodes.iter().any(|(_, node)| {
+                node.role() == egui::accesskit::Role::Label
+                    && node
+                        .value()
+                        .is_some_and(|value| value.starts_with("Ada Lovelace, "))
+            }),
+            "the plate reads who and how long"
+        );
+    }
+
     /// A key typed for the message field just as a call comes up does not
     /// answer or refuse it: focus still lands on Accept, but Enter and Space
     /// there wait a moment after the screen takes focus, and a key held down

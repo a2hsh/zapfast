@@ -309,6 +309,7 @@ impl App {
         if update.phase != CallPhase::Placing {
             self.call_placed = None;
         }
+        let before = self.call.clone();
         // A call we announced that no longer rings was picked up or given up:
         // its notification goes, and only its own.
         if update.phase != CallPhase::Incoming && self.call_notified == Some(update.generation) {
@@ -369,11 +370,89 @@ impl App {
         if finished || incoming {
             self.call_cancel = None;
         }
+        self.say_call_change(before, ringing);
         self.request_call_repaint();
         if ringing {
             self.notify_incoming_call();
         }
         self.sync_call_tone();
+    }
+
+    /// Says what changed in the call the window shows, once: that a call
+    /// rings and who calls, each new line under the call's name (Calling…,
+    /// Ringing…, Connected, how it ended), a request to switch to video, the
+    /// peer's camera going off or on, a device lost, the peer's audio failing.
+    /// A call to us is said whatever the chat's notification rules are: its
+    /// screen takes the window anyway. What names someone is private, so
+    /// nothing of it is said behind the lock screen, where only "Incoming
+    /// call" is; a locked chat's call names nobody.
+    fn say_call_change(&mut self, before: Option<CallUpdate>, ringing: bool) {
+        use crate::announcer::Category;
+        use crate::i18n::gettext;
+        let Some(call) = self.call.clone() else {
+            return;
+        };
+        let locale = self.locale;
+        if ringing {
+            if self.call_is_private() || self.app_lock.is_locked() {
+                self.announcer
+                    .say(Category::Status, gettext(locale, "Incoming call"));
+            } else {
+                let name = self.call_name();
+                let text = crate::a11y::call_heading(
+                    locale,
+                    crate::a11y::TitlePlace::IncomingCall(Some(&name)),
+                );
+                self.announcer.say(Category::ChatStatus, text);
+            }
+            return;
+        }
+        let before = before.filter(|before| before.generation == call.generation);
+        let mut said = Vec::new();
+        let status = crate::ui::call::spoken_status(locale, &call);
+        if status.is_some()
+            && status
+                != before
+                    .as_ref()
+                    .and_then(|before| crate::ui::call::spoken_status(locale, before))
+        {
+            said.extend(status);
+        }
+        let was = |test: fn(&CallUpdate) -> bool| before.as_ref().is_some_and(test);
+        if call.video_requested && !was(|before| before.video_requested) {
+            said.push(
+                gettext(
+                    locale,
+                    "Wants to switch to video: turn on your camera to answer",
+                )
+                .into_owned(),
+            );
+        }
+        // Their camera, once the video call is up and stays up.
+        let video_up = |call: &CallUpdate| call.video && call.phase == CallPhase::Active;
+        if video_up(&call) && was(video_up) {
+            match (was(|before| before.remote_video), call.remote_video) {
+                (true, false) => said.push(gettext(locale, "Their camera is off").into_owned()),
+                (false, true) => said.push(gettext(locale, "Their camera is on").into_owned()),
+                _ => {}
+            }
+        }
+        for lost in &call.lost_devices {
+            if !before
+                .as_ref()
+                .is_some_and(|before| before.lost_devices.contains(lost))
+            {
+                said.push(crate::ui::call::lost_device_text(locale, lost));
+            }
+        }
+        if let Some(audio) = call.peer_audio
+            && before.as_ref().and_then(|before| before.peer_audio) != Some(audio)
+        {
+            said.push(crate::ui::call::peer_audio_text(locale, audio));
+        }
+        for text in said {
+            self.announcer.say(Category::ChatStatus, text);
+        }
     }
 
     /// Places a call from the chat header or the Calls page: the screen shows
@@ -612,12 +691,27 @@ impl App {
             }
             Action::AnswerCall => self.send_call_command(Command::AnswerCall),
             Action::DeclineCall => {
+                let up = self.call_live();
                 self.send_call_command(Command::DeclineCall);
                 self.dismiss_call();
+                // Its screen goes at once, with nothing on it to say so.
+                if up {
+                    self.announcer.say(
+                        crate::announcer::Category::ChatStatus,
+                        crate::i18n::gettext(self.locale, "Call declined"),
+                    );
+                }
             }
             Action::HangupCall => {
+                let up = self.call_live();
                 self.send_call_command(Command::HangupCall);
                 self.dismiss_call();
+                if up {
+                    self.announcer.say(
+                        crate::announcer::Category::ChatStatus,
+                        crate::i18n::gettext(self.locale, "Call ended"),
+                    );
+                }
             }
             Action::SetCallMuted(muted) => self.send_call_command(Command::SetCallMuted(muted)),
             Action::SetCallMicrophone(device) => {
@@ -1306,6 +1400,118 @@ mod tests {
         app.handle_call_update(missed);
         assert_eq!(app.call_tone(), None);
         assert!(app.call_surface_until.is_some(), "missed, briefly");
+    }
+
+    /// What waits to be spoken, which the next frame would speak; taken.
+    fn heard(app: &mut App) -> Vec<String> {
+        let words = app
+            .announcer
+            .waiting()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        app.announcer.show(&egui::Context::default(), true);
+        words
+    }
+
+    /// N4: each new line under the call's name is said once, from the press
+    /// of the button to how the call ended.
+    #[test]
+    fn each_call_phase_is_said_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, mut commands) = app(directory.path());
+        let (generation, _) = press_call(&mut app, &mut commands, false);
+        assert_eq!(heard(&mut app), ["Connecting…"]);
+        for (phase, said) in [
+            (CallPhase::Dialing, &["Calling…"][..]),
+            (CallPhase::Ringing, &["Ringing…"]),
+            (CallPhase::Ringing, &[]),
+            (CallPhase::Connecting, &["Connecting…"]),
+            (CallPhase::Active, &["Connected"]),
+            (CallPhase::Active, &[]),
+        ] {
+            app.handle_call_update(outgoing(generation, phase));
+            assert_eq!(heard(&mut app), said, "{phase:?}");
+        }
+        let mut declined = outgoing(generation, CallPhase::Failed);
+        declined.outcome = Some(CallOutcome::Declined);
+        app.handle_call_update(declined.clone());
+        assert_eq!(heard(&mut app), ["Declined"]);
+        app.handle_call_update(declined);
+        assert!(heard(&mut app).is_empty(), "said once");
+    }
+
+    /// N1: a call that rings is said with who calls, in a muted chat too,
+    /// whose desktop notification stays quiet; a locked chat's names nobody.
+    #[test]
+    fn a_ringing_call_is_said_in_a_muted_chat_and_a_locked_one_names_nobody() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _) = app(directory.path());
+        app.chats[0].muted_until = Some(crate::util::now() + 3600);
+        app.handle_call_update(update(1, CallPhase::Incoming));
+        assert!(app.notifications.shown.is_empty(), "no notification");
+        assert_eq!(heard(&mut app), ["Incoming call from Ada"]);
+        app.handle_call_update(update(1, CallPhase::Incoming));
+        assert!(heard(&mut app).is_empty(), "the same ring is said once");
+
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _) = self::app(directory.path());
+        app.chats[0].locked = true;
+        app.settings.set_chat_lock_code(Some("test-code"));
+        app.handle_call_update(update(1, CallPhase::Incoming));
+        assert_eq!(heard(&mut app), ["Incoming call"]);
+    }
+
+    /// Our own hang-up or refusal takes the screen down at once: it is said
+    /// instead.
+    #[test]
+    fn hanging_up_and_declining_are_said() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _) = app(directory.path());
+        let ctx = egui::Context::default();
+        app.handle_call_update(update(1, CallPhase::Active));
+        heard(&mut app);
+        app.apply(Action::HangupCall, &ctx);
+        assert_eq!(heard(&mut app), ["Call ended"]);
+        app.handle_call_update(update(2, CallPhase::Incoming));
+        heard(&mut app);
+        app.apply(Action::DeclineCall, &ctx);
+        assert_eq!(heard(&mut app), ["Call declined"]);
+        app.apply(Action::HangupCall, &ctx);
+        assert!(heard(&mut app).is_empty(), "no call, nothing to say");
+    }
+
+    /// The notes under a call, and the peer's camera on a video call, are
+    /// said as they change, once each.
+    #[test]
+    fn the_peers_camera_lost_devices_and_audio_are_said_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _) = app(directory.path());
+        let mut call = update(1, CallPhase::Active);
+        call.video = true;
+        call.remote_video = true;
+        app.handle_call_update(call.clone());
+        assert_eq!(heard(&mut app), ["Connected"]);
+        call.remote_video = false;
+        app.handle_call_update(call.clone());
+        assert_eq!(heard(&mut app), ["Their camera is off"]);
+        call.remote_video = true;
+        call.lost_devices = vec![crate::calls::LostDevice {
+            kind: crate::calls::DeviceKind::Microphone,
+            name: "Headset".into(),
+        }];
+        call.peer_audio = Some(crate::calls::PeerAudio::Stalled);
+        app.handle_call_update(call.clone());
+        assert_eq!(
+            heard(&mut app),
+            [
+                "Their camera is on",
+                "Microphone “Headset” is not available; using the system default",
+                "No audio is arriving from this call",
+            ]
+        );
+        app.handle_call_update(call);
+        assert!(heard(&mut app).is_empty());
     }
 
     #[test]
