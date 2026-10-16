@@ -235,6 +235,12 @@ fn history_rows(app: &App) -> Option<Vec<Vec<Message>>> {
     )
 }
 
+/// How many calls the history lists, as `history_rows` picks them, every
+/// call a row folds counted; None while it shows an empty state instead.
+pub(crate) fn history_count(app: &App) -> Option<usize> {
+    history_rows(app).map(|rows| rows.iter().map(Vec::len).sum())
+}
+
 /// Where the history's current row is among `rows`: the cursor's row while
 /// it is listed, else the picked row while that is, else the first. Never a
 /// row the history no longer lists, after a chip, a search or a new call.

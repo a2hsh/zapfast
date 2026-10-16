@@ -347,7 +347,7 @@ fn search_and_filters(app: &mut App, ui: &mut egui::Ui) {
             }
             app.new_call_search = text;
         } else {
-            app.calls_search = text;
+            app.search_calls(text, std::time::Instant::now());
             super::calls::filter_chips(app, ui);
         }
         return;

@@ -842,6 +842,8 @@ pub struct App {
     search_pending: bool,
     /// The typing in the search pane, until its result count is spoken.
     chat_search_settle: Option<crate::announcer::Settle>,
+    /// The typing in the Calls page's search, until its count is spoken.
+    calls_search_settle: Option<crate::announcer::Settle>,
     /// What had focus when Settings opened, to have it again on leaving.
     settings_return_focus: Option<egui::Id>,
     /// What had focus on Settings when the wallpaper page opened from there.
@@ -1630,6 +1632,7 @@ impl App {
             starred_count_due: false,
             search_pending: false,
             chat_search_settle: None,
+            calls_search_settle: None,
             settings_return_focus: None,
             wallpaper_return_focus: None,
             return_focus: None,
@@ -1935,6 +1938,7 @@ impl App {
         self.search_pending = false;
         self.search_settle = None;
         self.chat_search_settle = None;
+        self.calls_search_settle = None;
     }
 
     fn add_account(&mut self) {
@@ -2293,7 +2297,11 @@ impl App {
     /// longer reading their chat.
     pub(crate) fn flush_announcements(&mut self, now: Instant) -> Option<Instant> {
         self.sent_queued = false;
-        let [settings_due, list_due, pane_due] = self.search_deadlines();
+        let [settings_due, list_due, pane_due, calls_due] = self.search_deadlines();
+        if calls_due.is_some_and(|due| now >= due) {
+            self.calls_search_settle = None;
+            self.announce_call_matches(true);
+        }
         if settings_due.is_some_and(|due| now >= due) {
             self.settings_search_settle = None;
             self.announce_settings_matches();
@@ -2352,10 +2360,10 @@ impl App {
     }
 
     /// When each search's result count is due: the Settings search, the chat
-    /// list's and the pane's. A search whose results the archive still owes
+    /// list's, the pane's and the Calls page's. A search whose results the archive still owes
     /// has none: its count waits for them, and the event that brings them
     /// wakes the window, so no repaint is asked for meanwhile.
-    fn search_deadlines(&self) -> [Option<Instant>; 3] {
+    fn search_deadlines(&self) -> [Option<Instant>; 4] {
         let due = |settle: Option<crate::announcer::Settle>, pending: bool| {
             settle.filter(|_| !pending).map(|settle| {
                 settle.deadline(crate::announcer::SEARCH_QUIET, crate::announcer::MAX_HOLD)
@@ -2365,7 +2373,49 @@ impl App {
             due(self.settings_search_settle, false),
             due(self.search_settle, self.search_pending),
             due(self.chat_search_settle, self.chat_search_pending),
+            due(self.calls_search_settle, false),
         ]
+    }
+
+    /// Filters the Calls page's history by `text`, typed at `now`. How many
+    /// calls it lists is spoken once the typing settles; see
+    /// `flush_announcements`.
+    pub(crate) fn search_calls(&mut self, text: String, now: Instant) {
+        if text == self.calls_search {
+            return;
+        }
+        // Typing into an empty field starts a new run.
+        let fresh = self.calls_search.trim().is_empty();
+        self.calls_search = text;
+        let settle = self.calls_search_settle.filter(|_| !fresh);
+        let searching = !self.calls_search.trim().is_empty();
+        self.calls_search_settle = Self::touch_settle(settle, searching, now);
+    }
+
+    /// Speaks how many calls the Calls page's history lists, while it shows
+    /// it: after a search settles (`searched`), or a chip picked other calls.
+    fn announce_call_matches(&mut self, searched: bool) {
+        if self.page != Page::Calls || self.new_call {
+            return;
+        }
+        let text = match crate::ui::calls::history_count(self) {
+            Some(0) if searched => {
+                crate::i18n::gettext(self.locale, "No matching calls").into_owned()
+            }
+            Some(count) => {
+                let plural = u32::try_from(count).unwrap_or(u32::MAX);
+                crate::a11y::fill(
+                    &crate::i18n::ngettext(self.locale, "{count} call", "{count} calls", plural),
+                    &[("count", &count.to_string())],
+                )
+            }
+            // The history shows its empty state instead.
+            None if self.call_filter == crate::model::CallFilter::Missed => {
+                crate::i18n::gettext(self.locale, "No missed calls").into_owned()
+            }
+            None => crate::i18n::gettext(self.locale, "No calls yet").into_owned(),
+        };
+        self.announcer.say(crate::announcer::Category::Status, text);
     }
 
     /// Another letter of a search typed at `now`: the run of typing it
@@ -8786,6 +8836,8 @@ impl App {
             }
             Action::SetCallFilter(filter) => {
                 self.call_filter = filter;
+                // What the chip picked, at once: no typing to wait for.
+                self.announce_call_matches(!self.calls_search.trim().is_empty());
                 // Kept for the next start, as the chat list's chip is.
                 let key = filter.key();
                 if self.account().settings.call_filter != key {
@@ -11792,6 +11844,101 @@ mod tests {
         app.search_settings("sound".into(), t0);
         app.page = Page::Chats;
         assert_eq!(speak_at(&mut app, t0 + ms(1000)), None);
+    }
+
+    /// The Calls page, Ada's missed call and two calls with Grace that do not
+    /// fold into one row.
+    fn calls_page() -> (App, std::sync::mpsc::Sender<Event>, tempfile::TempDir) {
+        let (mut app, events, root) = reading(ADA, "Ada");
+        let call = |chat: &str, id: &str, timestamp: i64, status: crate::model::CallStatus| {
+            let mut call = message(chat, id, timestamp);
+            call.content = Content::Call {
+                video: false,
+                status,
+                duration: 0,
+                group: false,
+            };
+            call
+        };
+        app.page = Page::Calls;
+        app.call_log = vec![
+            call(ADA, "c1", 300, crate::model::CallStatus::Missed),
+            call(GRACE, "c2", 200, crate::model::CallStatus::Answered),
+            call(ADA, "c3", 150, crate::model::CallStatus::Answered),
+            call(GRACE, "c4", 100, crate::model::CallStatus::Missed),
+        ];
+        app.call_log_loaded = true;
+        (app, events, root)
+    }
+
+    /// The Calls page's search says how many calls it lists once the typing
+    /// settles, and says nothing for a search emptied before then.
+    #[test]
+    fn the_calls_search_count_is_spoken_once_the_typing_settles() {
+        use crate::announcer::SEARCH_QUIET;
+        let (mut app, _events, _root) = calls_page();
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        for (index, text) in ["g", "gr", "gra"].into_iter().enumerate() {
+            let at = t0 + ms(150) * index as u32;
+            app.search_calls(text.into(), at);
+            assert_eq!(speak_at(&mut app, at), None, "nothing while typing");
+        }
+        assert_eq!(
+            speak_at(&mut app, t0 + ms(300) + SEARCH_QUIET).as_deref(),
+            Some("2 calls")
+        );
+        assert_eq!(speak_at(&mut app, t0 + ms(5000)), None, "said once");
+        app.search_calls("zzz".into(), t0);
+        assert_eq!(
+            speak_at(&mut app, t0 + SEARCH_QUIET).as_deref(),
+            Some("No matching calls")
+        );
+        app.search_calls("ada".into(), t0);
+        app.search_calls(String::new(), t0 + ms(100));
+        assert_eq!(speak_at(&mut app, t0 + ms(1000)), None, "emptied first");
+    }
+
+    /// A row of the history can fold a run of alike calls: the count says
+    /// how many calls are listed, every call in such a row among them.
+    #[test]
+    fn the_calls_count_counts_the_calls_a_row_folds() {
+        let (mut app, _events, _root) = calls_page();
+        let ctx = egui::Context::default();
+        // Another missed call from Ada just before the one listed: one row.
+        let mut again = app.call_log[0].clone();
+        again.id = "c0".into();
+        again.timestamp = 310;
+        app.call_log.insert(0, again);
+        app.apply(
+            Action::SetCallFilter(crate::model::CallFilter::Missed),
+            &ctx,
+        );
+        assert_eq!(speak(&mut app).as_deref(), Some("3 calls"));
+        app.apply(Action::SetCallFilter(crate::model::CallFilter::All), &ctx);
+        assert_eq!(speak(&mut app).as_deref(), Some("5 calls"));
+    }
+
+    /// A chip picks other calls at once, and says how many it lists.
+    #[test]
+    fn switching_to_missed_says_the_count() {
+        let (mut app, _events, _root) = calls_page();
+        let ctx = egui::Context::default();
+        app.apply(
+            Action::SetCallFilter(crate::model::CallFilter::Missed),
+            &ctx,
+        );
+        assert_eq!(speak(&mut app).as_deref(), Some("2 calls"));
+        app.apply(Action::SetCallFilter(crate::model::CallFilter::All), &ctx);
+        assert_eq!(speak(&mut app).as_deref(), Some("4 calls"));
+        // Nothing missed: the history's own empty state.
+        app.call_log
+            .retain(|call| !matches!(call.content, Content::Call { status, .. } if status == crate::model::CallStatus::Missed));
+        app.apply(
+            Action::SetCallFilter(crate::model::CallFilter::Missed),
+            &ctx,
+        );
+        assert_eq!(speak(&mut app).as_deref(), Some("No missed calls"));
     }
 
     /// Opening Starred says how many starred messages it lists, once the

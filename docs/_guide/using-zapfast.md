@@ -537,7 +537,9 @@ went (a missed call's name is red), when, and how it went, and its phone or
 camera button calls back the same way. The search field finds calls by name or
 number. The chips under it show **All** calls or only the **Missed** ones (calls
 to you that nobody answered, group calls included); a search looks among the
-calls the chip shows, and ZapFast remembers the chip for each number. The chat
+calls the chip shows, and ZapFast remembers the chip for each number. A
+screen reader hears how many calls are listed once you stop typing a search,
+and as soon as you pick a chip. The chat
 you had open stays beside the list; clicking a row opens that
 person's chat there instead, at the call, with the voice and video buttons in
 its header. With no chat open, the pane beside the list offers **Start call**.
