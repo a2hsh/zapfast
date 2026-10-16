@@ -27519,6 +27519,55 @@ mod call_surface_tests {
         );
     }
 
+    /// N19: Mute and a video call's camera are toggle buttons that keep one
+    /// name and say whether they are pressed, Devices says whether its
+    /// pickers are shown, and the pickers, drawn above the controls, come
+    /// before them in Tab order.
+    #[test]
+    fn call_controls_expose_pressed_and_expanded() {
+        use egui::accesskit::Toggled;
+        let find = |tree: &egui::accesskit::TreeUpdate, label: &str| {
+            tree.nodes
+                .iter()
+                .find(|(_, node)| node.label() == Some(label))
+                .map(|(_, node)| node.clone())
+                .unwrap_or_else(|| panic!("{label} is on the call screen"))
+        };
+        let mut app = app();
+        apply_flags(&mut app, Some("call-devices"));
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        app.attach(&ctx);
+        let tree = settle_with(&mut app, &ctx, Vec::new());
+        let mute = find(&tree, "Mute");
+        assert_eq!(mute.role(), egui::accesskit::Role::Button);
+        assert_eq!(mute.toggled(), Some(Toggled::True), "muted");
+        assert_eq!(find(&tree, "Devices").is_expanded(), Some(true));
+        assert_eq!(focused_label(&tree).as_deref(), Some("Mute"));
+        let shift = egui::Modifiers::SHIFT;
+        let tree = settle_with(&mut app, &ctx, vec![chord(egui::Key::Tab, shift)]);
+        assert_eq!(
+            focused_label(&tree).as_deref(),
+            Some("Speaker"),
+            "the pickers above come before Mute"
+        );
+        app.call_devices_open = false;
+        if let Some(call) = app.call.as_mut() {
+            call.muted = false;
+        }
+        let tree = settle_with(&mut app, &ctx, Vec::new());
+        assert_eq!(find(&tree, "Mute").toggled(), Some(Toggled::False));
+        assert_eq!(find(&tree, "Devices").is_expanded(), Some(false));
+
+        let mut app = self::app();
+        apply_flags(&mut app, Some("call-video"));
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        app.attach(&ctx);
+        let tree = settle_with(&mut app, &ctx, Vec::new());
+        assert_eq!(find(&tree, "Camera").toggled(), Some(Toggled::True));
+    }
+
     /// A key typed for the message field just as a call comes up does not
     /// answer or refuse it: focus still lands on Accept, but Enter and Space
     /// there wait a moment after the screen takes focus, and a key held down

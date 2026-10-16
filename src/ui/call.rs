@@ -832,6 +832,9 @@ fn controls(ui: &mut egui::Ui, app: &mut App, call: &CallUpdate, palette: &Palet
             )
         };
         let response = control(ui, icon, fill, tint, &tip, call.phase.is_connected());
+        // The tooltip names what a press does; a screen reader hears one
+        // toggle button, Mute, pressed while muted.
+        toggle(&response, gettext(locale, "Mute").into_owned(), call.muted);
         ring(&response, Control::Mute);
         if response.clicked() {
             app.actions.push(Action::SetCallMuted(!call.muted));
@@ -863,6 +866,15 @@ fn controls(ui: &mut egui::Ui, app: &mut App, call: &CallUpdate, palette: &Palet
         };
         if camera {
             let response = control(ui, icon, fill, tint, &tip, call.phase.is_connected());
+            // On a video call the camera is one toggle button, pressed while
+            // it sends; on a voice call it starts video, and stays a button.
+            if call.video {
+                toggle(
+                    &response,
+                    gettext(locale, "Camera").into_owned(),
+                    call.camera_on,
+                );
+            }
             ring(&response, Control::Camera);
             if response.clicked() {
                 app.actions.push(Action::SetCallCamera(!call.camera_on));
@@ -877,6 +889,9 @@ fn controls(ui: &mut egui::Ui, app: &mut App, call: &CallUpdate, palette: &Palet
             (palette.surface_active, palette.text)
         };
         let response = control(ui, Icon::Volume2, fill, tint, &tip, live);
+        // It shows and hides the pickers above the controls.
+        ui.ctx()
+            .accesskit_node_builder(response.id, |node| node.set_expanded(open));
         ring(&response, Control::Devices);
         if response.clicked() {
             app.call_devices_open = !open;
@@ -896,6 +911,17 @@ fn controls(ui: &mut egui::Ui, app: &mut App, call: &CallUpdate, palette: &Palet
             app.actions.push(Action::HangupCall);
         }
     }
+}
+
+/// Names a control one toggle button, `label`, pressed or not as `pressed`
+/// says, in place of the name that says what a press does.
+fn toggle(response: &egui::Response, label: String, pressed: bool) {
+    let enabled = response.enabled();
+    response.widget_info(|| {
+        let mut info = egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, &label);
+        info.selected = Some(pressed);
+        info
+    });
 }
 
 /// The microphone and speaker pickers. Each one rebinds a live stream, so

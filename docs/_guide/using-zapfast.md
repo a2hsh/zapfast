@@ -863,7 +863,9 @@ on Hang up until the call connects, and answering moves focus from Accept
 to Mute. On the call screen Tab and Shift+Tab move through its own controls
 only, in the order they appear from the top: the corner's buttons, the
 device pickers while they are shown, then Mute, the camera, Devices and Hang
-up. When the call ends, or the screen is put aside, focus returns to where
+up. Mute, and a video call's Camera, are toggle buttons that keep their name
+and say whether they are pressed, and Devices says whether the pickers are
+expanded. When the call ends, or the screen is put aside, focus returns to where
 it was before the call screen took it.
 
 A call that rings is announced with who calls, "Incoming call from Ada",
