@@ -8316,6 +8316,120 @@ mod tests {
         let shown = ctx.read_response(row).expect("the row").rect;
         assert!(area.intersects(shown), "the row is back in view");
     }
+
+    /// The forwarding dialog's chats are one list, a single stop entered
+    /// with Down from the search field: one node per chat, checked or not,
+    /// its checkbox drawn for the pointer only. Space ticks the current
+    /// chat and says how many are picked; Tab goes on to Review recipients
+    /// and Shift+Tab comes back. Review moves focus to Back, and Back to the
+    /// list on the chat it was on.
+    #[test]
+    fn the_forward_list_is_one_stop_and_says_the_count() {
+        use crate::ui::dialogs::forward_list_id;
+        let mut app = app();
+        apply_flags(&mut app, Some("forward"));
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let field = egui::Id::new("forward-search");
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(field));
+        let list = forward_list_id();
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        let tree = tree_after(&mut app, &ctx, None);
+        let (node_of_list, active) = list_nodes(&tree, list);
+        assert_eq!(node_of_list.role(), egui::accesskit::Role::ListBox);
+        assert_eq!(node_of_list.label(), Some("Chats"));
+        assert!(node_of_list.is_multiselectable());
+        let len = node_of_list.size_of_set().expect("a counted list");
+        assert!(len >= 2, "{len}");
+        let active = active.expect("the first chat is current");
+        assert_eq!(active.position_in_set(), Some(0));
+        assert_eq!(active.toggled(), Some(egui::accesskit::Toggled::False));
+        let name = active.label().expect("a name").to_owned();
+        let named: Vec<_> = tree
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.label() == Some(name.as_str()) && !node.is_hidden())
+            .collect();
+        assert_eq!(named.len(), 1, "one node per chat: {named:?}");
+        press_key(&mut app, &ctx, egui::Key::Space, egui::Modifiers::NONE);
+        assert_eq!(app.forward_recipients.len(), 1);
+        assert!(
+            said_last(&app, "1 recipient selected"),
+            "{:?}",
+            app.announcer.spoken()
+        );
+        let tree = tree_after(&mut app, &ctx, None);
+        let active = list_nodes(&tree, list).1.expect("still current");
+        assert_eq!(active.toggled(), Some(egui::accesskit::Toggled::True));
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::Space, egui::Modifiers::NONE);
+        assert_eq!(app.forward_recipients.len(), 2);
+        assert!(
+            said_last(&app, "2 recipients selected"),
+            "{:?}",
+            app.announcer.spoken()
+        );
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        // Tab goes on to Review recipients, past the rows' checkboxes.
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        assert_eq!(
+            focused_label(&mut app, &ctx).as_deref(),
+            Some("Review recipients")
+        );
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::SHIFT);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        render(&mut app, &ctx);
+        assert!(app.forward_reviewing);
+        assert_eq!(focused_label(&mut app, &ctx).as_deref(), Some("Back"));
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        render(&mut app, &ctx);
+        assert!(!app.forward_reviewing);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        let tree = tree_after(&mut app, &ctx, None);
+        let active = list_nodes(&tree, list).1.expect("the chat it was on");
+        assert_eq!(active.position_in_set(), Some(1));
+        assert_eq!(active.toggled(), Some(egui::accesskit::Toggled::True));
+    }
+
+    /// A full forwarding list keeps its other chats out: each is unavailable
+    /// and says why, and Space on one says it too.
+    #[test]
+    fn a_full_forward_list_says_why_a_chat_is_out() {
+        use crate::ui::dialogs::forward_list_id;
+        let mut app = app();
+        apply_flags(&mut app, Some("forward-full"));
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let list = forward_list_id();
+        let out = app
+            .chats
+            .iter()
+            .filter(|chat| chat.can_send())
+            .map(|chat| chat.id.clone())
+            .find(|chat| !app.forward_recipients.contains(chat))
+            .expect("a chat left out");
+        app.forward_cursor = Some(out.clone());
+        ctx.memory_mut(|memory| memory.request_focus(list));
+        render(&mut app, &ctx);
+        let tree = tree_after(&mut app, &ctx, None);
+        let active = list_nodes(&tree, list).1.expect("the chat left out");
+        let why = format!(
+            "You can forward to up to {} chats",
+            crate::model::FORWARD_LIMIT
+        );
+        assert!(active.is_disabled());
+        assert_eq!(active.description(), Some(why.as_str()));
+        let before = app.forward_recipients.clone();
+        press_key(&mut app, &ctx, egui::Key::Space, egui::Modifiers::NONE);
+        assert_eq!(app.forward_recipients, before);
+        assert!(said_last(&app, &why), "{:?}", app.announcer.spoken());
+    }
+
     #[test]
     fn arrows_move_the_chat_cursor_without_opening() {
         let mut app = app();

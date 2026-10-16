@@ -1681,7 +1681,7 @@ fn locked_list(app: &mut App, ui: &mut egui::Ui, focus: bool) {
 }
 
 /// Returns the smallest offset that fully reveals a fixed-height row.
-fn row_scroll_offset(
+pub(super) fn row_scroll_offset(
     current: f32,
     viewport_height: f32,
     row: usize,

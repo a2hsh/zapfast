@@ -738,6 +738,12 @@ pub struct App {
     pub forward_reviewing: bool,
     /// How many recipients the forwarding dialog's messages may have.
     pub forward_limit: usize,
+    /// The forwarding dialog's current chat for its list's keys.
+    pub forward_cursor: Option<ChatId>,
+    /// One-shot: the forwarding dialog's step just changed from the keys or
+    /// with a screen reader, and the step drawn next takes focus: its Back,
+    /// or its list.
+    pub(crate) forward_refocus: bool,
     /// The group name being typed in the group info dialog.
     pub group_name_edit: Option<String>,
     /// The new-contact dialog's "Save to phone" box.
@@ -1586,6 +1592,8 @@ impl App {
             forward_recipients: Vec::new(),
             forward_reviewing: false,
             forward_limit: crate::model::FORWARD_LIMIT,
+            forward_cursor: None,
+            forward_refocus: false,
             group_name_edit: None,
             new_contact_to_phone: true,
             sidebar_visible: true,
@@ -1841,6 +1849,8 @@ impl App {
     fn clear_account_ui(&mut self) {
         self.forward_recipients.clear();
         self.forward_reviewing = false;
+        self.forward_cursor = None;
+        self.forward_refocus = false;
         // The locked folder and the picker show the previous account's chats
         // and stickers.
         if self.locked_folder {
@@ -7857,6 +7867,7 @@ impl App {
                 {
                     return;
                 }
+                let before = self.forward_recipients.clone();
                 if self.forward_recipients.contains(&id) {
                     self.forward_recipients.retain(|recipient| recipient != &id);
                 } else if self.forward_limit == 1 {
@@ -7866,15 +7877,42 @@ impl App {
                 } else if self.forward_recipients.len() < self.forward_limit {
                     self.forward_recipients.push(id);
                 }
+                // What the dialog's line under the list says, as it changes,
+                // or why the chat was not added.
+                let count = self.forward_recipients.len();
+                let text = if self.forward_recipients == before {
+                    crate::ui::dialogs::forward_limit_text(self)
+                } else {
+                    Some(
+                        crate::i18n::ngettext(
+                            self.locale,
+                            "{count} recipient selected",
+                            "{count} recipients selected",
+                            u32::try_from(count).unwrap_or(u32::MAX),
+                        )
+                        .replace("{count}", &count.to_string()),
+                    )
+                };
+                if let Some(text) = text {
+                    self.announcer.say(crate::announcer::Category::Status, text);
+                }
             }
             Action::ReviewForward => {
                 if matches!(self.dialog, Some(Dialog::Forward { .. }))
                     && self.forward_recipients.len() > 1
                 {
                     self.forward_reviewing = true;
+                    // From the keys, or with a screen reader, focus goes to
+                    // the review's first control: the control it was on is
+                    // gone.
+                    self.forward_refocus = crate::ui::keys::keyboard_or_reader(ctx);
                 }
             }
-            Action::BackToForwardSelection => self.forward_reviewing = false,
+            Action::BackToForwardSelection => {
+                self.forward_reviewing = false;
+                // And back to the list, on the chat it was on.
+                self.forward_refocus = crate::ui::keys::keyboard_or_reader(ctx);
+            }
             Action::ConfirmForward => {
                 let Some(Dialog::Forward { chat, messages }) = self.dialog.clone() else {
                     return;
@@ -8731,6 +8769,8 @@ impl App {
                     self.forward_search.clear();
                     self.forward_recipients.clear();
                     self.forward_reviewing = false;
+                    self.forward_cursor = None;
+                    self.forward_refocus = false;
                     // Until the worker has read the messages' forwarding
                     // scores; it refuses a batch over the real limit anyway.
                     self.forward_limit = crate::model::FORWARD_LIMIT;
@@ -8761,6 +8801,8 @@ impl App {
                 self.forward_search.clear();
                 self.forward_recipients.clear();
                 self.forward_reviewing = false;
+                self.forward_cursor = None;
+                self.forward_refocus = false;
                 self.contact_edit = None;
                 self.group_name_edit = None;
                 self.refocus_composer(ctx);

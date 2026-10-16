@@ -519,14 +519,18 @@ fn forward(app: &mut App, ui: &mut egui::Ui, messages: &[String]) {
             });
         ui.add_space(12.0);
         ui.horizontal(|ui| {
-            if theme::pill_button(
+            let back = theme::pill_button(
                 ui,
                 &palette,
                 &crate::i18n::gettext(app.locale, "Back"),
                 false,
-            )
-            .clicked()
-            {
+            );
+            // Reached from the keys, the review starts on Back: Review and
+            // the list it was on are gone.
+            if std::mem::take(&mut app.forward_refocus) {
+                back.request_focus();
+            }
+            if back.clicked() {
                 app.actions.push(Action::BackToForwardSelection);
             }
             if theme::pill_button(
@@ -575,98 +579,190 @@ fn forward(app: &mut App, ui: &mut egui::Ui, messages: &[String]) {
     // With room for one recipient a click swaps it; otherwise a full list
     // takes no more.
     let full = app.forward_limit > 1 && app.forward_recipients.len() >= app.forward_limit;
+    let limit = forward_limit_text(app);
 
-    egui::ScrollArea::vertical()
+    // The chats are one list, a single stop whose arrows walk them: Space
+    // or Enter ticks the current one. The row's own checkbox is drawn for
+    // the pointer only.
+    let list = forward_list_id();
+    let cursor = chats
+        .iter()
+        .position(|chat| app.forward_cursor.as_deref() == Some(chat.id.as_str()))
+        .or_else(|| (!chats.is_empty()).then_some(0));
+    let moved = forward_keys(app, ui, &search, &chats, cursor, row_height, max_height);
+    let cursor = chats
+        .iter()
+        .position(|chat| app.forward_cursor.as_deref() == Some(chat.id.as_str()))
+        .or(cursor);
+    if std::mem::take(&mut app.forward_refocus) {
+        ui.memory_mut(|memory| memory.request_focus(list));
+    }
+    let list_rect = Rect::from_min_size(
+        ui.cursor().min,
+        vec2(
+            ui.available_width(),
+            (chats.len() as f32 * row_height).clamp(row_height, max_height),
+        ),
+    );
+    let label = crate::i18n::gettext(app.locale, "Chats");
+    let list_response =
+        super::list_nav::container(ui, list, list_rect, || label.into_owned(), chats.len());
+    ui.ctx()
+        .accesskit_node_builder(list, |node| node.set_multiselectable());
+    let focused = list_response.has_focus();
+    let mut active = None;
+    let mut scroll_area = egui::ScrollArea::vertical()
         .id_salt("forward-chats")
         .max_height(max_height)
-        .auto_shrink([false, true])
-        .show_rows(ui, row_height, chats.len(), |ui, range| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            for chat in &chats[range] {
-                let title = app.chat_title(chat);
-                let (rect, response) =
-                    ui.allocate_exact_size(vec2(ui.available_width(), row_height), Sense::click());
-                theme::reveal_focus(&response);
-                // Named by the chat it forwards to, as the row shows it.
-                response.widget_info(|| {
+        .auto_shrink([false, true]);
+    // A current chat the keys moved off screen comes into view, so it is
+    // laid out and can be read.
+    if moved && let Some(cursor) = cursor {
+        let id = ui.make_persistent_id(egui::IdSalt::new("forward-chats"));
+        let current = egui::scroll_area::State::load(ui.ctx(), id)
+            .unwrap_or_default()
+            .offset
+            .y;
+        let offset = super::chats::row_scroll_offset(current, max_height, cursor, row_height, 0.0);
+        scroll_area = scroll_area.vertical_scroll_offset(offset);
+    }
+
+    scroll_area.show_rows(ui, row_height, chats.len(), |ui, range| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let first = range.start;
+        for (offset, chat) in chats[range].iter().enumerate() {
+            let index = first + offset;
+            let title = app.chat_title(chat);
+            // Clicks only, never focus: the keyboard reaches rows through
+            // the list's one stop and its arrows.
+            let (rect, response) = ui
+                .scope_builder(
+                    egui::UiBuilder::new()
+                        .id_salt(("forward", &chat.id))
+                        .accessibility_parent(list),
+                    |ui| {
+                        ui.allocate_exact_size(vec2(ui.available_width(), row_height), Sense::CLICK)
+                    },
+                )
+                .inner;
+            // Named by the chat it forwards to, as the row shows it.
+            response.widget_info(|| {
+                egui::WidgetInfo::selected(
+                    egui::WidgetType::SelectableLabel,
+                    ui.is_enabled(),
+                    app.forward_recipients.contains(&chat.id),
+                    crate::a11y::without_push_marker(&title),
+                )
+            });
+            let ticked = app.forward_recipients.contains(&chat.id);
+            let blocked_row = full && !ticked;
+            super::list_nav::mark_row(
+                ui.ctx(),
+                response.id,
+                crate::a11y::without_push_marker(&title).to_owned(),
+                index,
+                chats.len(),
+                rect,
+                false,
+            );
+            // Checked or not, as its checkbox; a chat the limit keeps out
+            // is unavailable, and says why.
+            ui.ctx().accesskit_node_builder(response.id, |node| {
+                node.set_toggled(if ticked {
+                    egui::accesskit::Toggled::True
+                } else {
+                    egui::accesskit::Toggled::False
+                });
+                if blocked_row {
+                    node.set_disabled();
+                    if let Some(limit) = &limit {
+                        node.set_description(limit.clone());
+                    }
+                }
+            });
+            if cursor == Some(index) {
+                if focused {
+                    theme::focus_outline(ui, list, rect, f32::from(theme::RADIUS_SMALL));
+                }
+                active = Some(response.id);
+            }
+            #[cfg(any(test, feature = "demo"))]
+            ui.ctx().data_mut(|data| {
+                data.insert_temp(egui::Id::new(("forward-recipient", &chat.id)), rect)
+            });
+            let selected = app.forward_recipients.contains(&chat.id);
+            let blocked = full && !selected;
+            if ui.is_rect_visible(rect) {
+                if (response.hovered() && !blocked) || selected {
+                    super::widgets::dialog_row_highlight(ui, rect, palette.surface_hover);
+                }
+                let check = egui::Rect::from_center_size(
+                    pos2(rect.right() - 18.0, rect.center().y),
+                    egui::Vec2::splat(20.0),
+                );
+                let mut checked = selected;
+                let checkbox = ui.put(check, egui::Checkbox::without_text(&mut checked));
+                checkbox.widget_info(|| {
                     egui::WidgetInfo::selected(
-                        egui::WidgetType::SelectableLabel,
+                        egui::WidgetType::Checkbox,
                         ui.is_enabled(),
-                        app.forward_recipients.contains(&chat.id),
-                        crate::a11y::without_push_marker(&title),
+                        checked,
+                        &title,
                     )
                 });
-                #[cfg(any(test, feature = "demo"))]
-                ui.ctx().data_mut(|data| {
-                    data.insert_temp(egui::Id::new(("forward-recipient", &chat.id)), rect)
-                });
-                let selected = app.forward_recipients.contains(&chat.id);
-                let blocked = full && !selected;
-                if ui.is_rect_visible(rect) {
-                    if (response.hovered() && !blocked) || selected {
-                        super::widgets::dialog_row_highlight(ui, rect, palette.surface_hover);
-                    }
-                    let check = egui::Rect::from_center_size(
-                        pos2(rect.right() - 18.0, rect.center().y),
-                        egui::Vec2::splat(20.0),
-                    );
-                    let mut checked = selected;
-                    let checkbox = ui.put(check, egui::Checkbox::without_text(&mut checked));
-                    checkbox.widget_info(|| {
-                        egui::WidgetInfo::selected(
-                            egui::WidgetType::Checkbox,
-                            ui.is_enabled(),
-                            checked,
-                            &title,
-                        )
-                    });
-                    if checked != selected && !blocked {
-                        app.actions
-                            .push(Action::ToggleForwardRecipient(chat.id.clone()));
-                    }
-                    let avatar = egui::Rect::from_center_size(
-                        pos2(rect.left() + 23.0, rect.center().y),
-                        egui::Vec2::splat(38.0),
-                    );
-                    let picture = app.avatar(&chat.id);
-                    super::widgets::paint_avatar(
-                        ui,
-                        &palette,
-                        avatar,
-                        &title,
-                        &chat.id,
-                        picture.as_deref(),
-                    );
-                    let line = super::widgets::line(
-                        ui,
-                        &title,
-                        theme::medium(14.5),
-                        palette.text,
-                        rect.width() - 90.0,
-                        1,
-                    );
-                    let colour = if blocked {
-                        palette.secondary
-                    } else {
-                        palette.text
-                    };
-                    line.paint(
-                        ui,
-                        pos2(rect.left() + 50.0, rect.center().y - line.size().y / 2.0),
-                        colour,
-                    );
-                }
-                let response = if blocked {
-                    response
-                } else {
-                    response.on_hover_cursor(egui::CursorIcon::PointingHand)
-                };
-                if response.clicked() && !blocked {
+                // The row says all the checkbox does: a second node
+                // with the same name would read every chat twice.
+                ui.ctx()
+                    .accesskit_node_builder(checkbox.id, |node| node.set_hidden());
+                remember_checkbox(ui.ctx(), checkbox.id);
+                if checked != selected && !blocked {
                     app.actions
                         .push(Action::ToggleForwardRecipient(chat.id.clone()));
                 }
+                let avatar = egui::Rect::from_center_size(
+                    pos2(rect.left() + 23.0, rect.center().y),
+                    egui::Vec2::splat(38.0),
+                );
+                let picture = app.avatar(&chat.id);
+                super::widgets::paint_avatar(
+                    ui,
+                    &palette,
+                    avatar,
+                    &title,
+                    &chat.id,
+                    picture.as_deref(),
+                );
+                let line = super::widgets::line(
+                    ui,
+                    &title,
+                    theme::medium(14.5),
+                    palette.text,
+                    rect.width() - 90.0,
+                    1,
+                );
+                let colour = if blocked {
+                    palette.secondary
+                } else {
+                    palette.text
+                };
+                line.paint(
+                    ui,
+                    pos2(rect.left() + 50.0, rect.center().y - line.size().y / 2.0),
+                    colour,
+                );
             }
-        });
+            let response = if blocked {
+                response
+            } else {
+                response.on_hover_cursor(egui::CursorIcon::PointingHand)
+            };
+            if response.clicked() && !blocked {
+                app.actions
+                    .push(Action::ToggleForwardRecipient(chat.id.clone()));
+            }
+        }
+    });
+    super::list_nav::set_active(ui.ctx(), list, active);
     if chats.is_empty() {
         ui.add_space(12.0);
         ui.horizontal(|ui| {
@@ -681,28 +777,6 @@ fn forward(app: &mut App, ui: &mut egui::Ui, messages: &[String]) {
         ui.add_space(12.0);
     }
     ui.add_space(12.0);
-    // Says why no more chats can be picked, as WhatsApp does.
-    let limit = if app.forward_limit == 1 {
-        Some(
-            crate::i18n::gettext(
-                app.locale,
-                "Messages forwarded many times can be sent to one chat at a time",
-            )
-            .into_owned(),
-        )
-    } else if full {
-        Some(
-            crate::i18n::ngettext(
-                app.locale,
-                "You can forward to up to {count} chat",
-                "You can forward to up to {count} chats",
-                app.forward_limit as u32,
-            )
-            .replace("{count}", &app.forward_limit.to_string()),
-        )
-    } else {
-        None
-    };
     if let Some(limit) = limit {
         ui.add(
             egui::Label::new(
@@ -745,10 +819,177 @@ fn forward(app: &mut App, ui: &mut egui::Ui, messages: &[String]) {
                 theme::pill_button(ui, &palette, &label, true)
             })
             .inner;
+        // Where Tab goes from the list, which comes before it.
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(
+                forward_list_id().with("next"),
+                button.enabled().then_some(button.id),
+            );
+        });
         if button.clicked() {
             app.actions.push(action);
         }
     });
+}
+
+/// Why no more chats can be picked in the forwarding dialog, as WhatsApp
+/// says: a message forwarded many times goes to one chat only, and a full
+/// list takes no more. None while there is room.
+pub(crate) fn forward_limit_text(app: &App) -> Option<String> {
+    let full = app.forward_limit > 1 && app.forward_recipients.len() >= app.forward_limit;
+    if app.forward_limit == 1 {
+        Some(
+            crate::i18n::gettext(
+                app.locale,
+                "Messages forwarded many times can be sent to one chat at a time",
+            )
+            .into_owned(),
+        )
+    } else if full {
+        Some(
+            crate::i18n::ngettext(
+                app.locale,
+                "You can forward to up to {count} chat",
+                "You can forward to up to {count} chats",
+                app.forward_limit as u32,
+            )
+            .replace("{count}", &app.forward_limit.to_string()),
+        )
+    } else {
+        None
+    }
+}
+
+/// The forwarding dialog's list of chats: one focusable ListBox.
+pub fn forward_list_id() -> egui::Id {
+    egui::Id::new("forward-chat-list")
+}
+
+/// Notes that the row checkbox `id` was drawn in this frame: Tab passes it
+/// by (`forward_keys`).
+fn remember_checkbox(ctx: &egui::Context, id: egui::Id) {
+    let frame = ctx.cumulative_frame_nr();
+    ctx.data_mut(|data| {
+        let drawn =
+            data.get_temp_mut_or_default::<(u64, Vec<egui::Id>)>(forward_list_id().with("boxes"));
+        if drawn.0 != frame {
+            *drawn = (frame, Vec::new());
+        }
+        drawn.1.push(id);
+    });
+}
+
+/// The forwarding dialog's keys, taken before its list is drawn. Down in
+/// the search field moves into the list on its first chat, and Up from the
+/// first chat goes back. In the list the arrows, Home, End and the page keys
+/// move the current chat, and Space or Enter ticks it as a click does. Tab
+/// from the list goes on to the dialog's next control, Forward or Review
+/// recipients (the dialog's first control while neither is available), and
+/// Shift+Tab from there comes back: the rows' own checkboxes, drawn for the
+/// pointer, are no stops. Returns whether the current chat moved.
+fn forward_keys(
+    app: &mut App,
+    ui: &egui::Ui,
+    search: &egui::Response,
+    chats: &[crate::model::Chat],
+    cursor: Option<usize>,
+    row_height: f32,
+    max_height: f32,
+) -> bool {
+    let list = forward_list_id();
+    let ctx = ui.ctx();
+    let focused = ctx.memory(|memory| memory.focused());
+    let mut moved = false;
+    if search.has_focus()
+        && !chats.is_empty()
+        && ui.input_mut(|input| super::keys::take_plain(input, egui::Key::ArrowDown))
+    {
+        app.forward_cursor = Some(chats[0].id.clone());
+        ctx.data_mut(|data| data.insert_temp(theme::keyboard_focus_id(), true));
+        ctx.memory_mut(|memory| memory.request_focus(list));
+        return true;
+    }
+    let next = ctx
+        .data(|data| data.get_temp::<Option<egui::Id>>(list.with("next")))
+        .flatten();
+    let (tab, back_tab) = ui.input(|input| {
+        let pressed = |modifiers: egui::Modifiers| {
+            input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key {
+                        key: egui::Key::Tab,
+                        pressed: true,
+                        modifiers: held,
+                        ..
+                    } if *held == modifiers
+                )
+            })
+        };
+        (
+            pressed(egui::Modifiers::NONE),
+            pressed(egui::Modifiers::SHIFT),
+        )
+    });
+    let boxes: Vec<egui::Id> = ctx
+        .data(|data| data.get_temp::<(u64, Vec<egui::Id>)>(list.with("boxes")))
+        .map(|(_, boxes)| boxes)
+        .unwrap_or_default();
+    // egui's own order would go on from the list to the rows' checkboxes.
+    let target = if focused == Some(list) && tab {
+        next.or_else(|| ctx.data(|data| data.get_temp::<egui::Id>(dialog_close_id())))
+    } else if back_tab && next.is_some() && focused == next {
+        Some(list)
+    } else if tab && focused.is_some_and(|focused| boxes.contains(&focused)) {
+        next
+    } else {
+        None
+    };
+    if let Some(target) = target {
+        ctx.input_mut(|input| {
+            input.events.retain(|event| {
+                !matches!(
+                    event,
+                    egui::Event::Key {
+                        key: egui::Key::Tab,
+                        ..
+                    }
+                )
+            });
+        });
+        ctx.memory_mut(|memory| {
+            memory.move_focus(egui::FocusDirection::None);
+            memory.request_focus(target);
+        });
+        return false;
+    }
+    if focused != Some(list) {
+        return false;
+    }
+    let page = ((max_height / row_height).floor() as usize).max(1);
+    if let Some(step) = super::list_nav::take_step(ctx, || page) {
+        if step == super::list_nav::Step::Previous && cursor == Some(0) {
+            ctx.memory_mut(|memory| memory.request_focus(search.id));
+        } else if let Some(index) = super::list_nav::step(cursor, chats.len(), step) {
+            app.forward_cursor = Some(chats[index].id.clone());
+            moved = true;
+        }
+        return moved;
+    }
+    let toggle = ui.input_mut(|input| {
+        super::keys::take_plain(input, egui::Key::Space)
+            | super::keys::take_plain(input, egui::Key::Enter)
+    });
+    if toggle && let Some(chat) = cursor.map(|index| chats[index].id.clone()) {
+        app.forward_cursor = Some(chat.clone());
+        app.actions.push(Action::ToggleForwardRecipient(chat));
+    }
+    moved
+}
+
+/// Where a dialog's title row records its Close button.
+fn dialog_close_id() -> egui::Id {
+    egui::Id::new("dialog-close")
 }
 
 /// Uses the model's send permissions to reject unavailable forwarding destinations.
@@ -761,9 +1002,11 @@ fn title(ui: &mut egui::Ui, app: &mut App, label: &str) {
     ui.horizontal(|ui| {
         theme::text(ui, label, theme::bold(18.0), palette.text);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if theme::icon_button(ui, Icon::X, 16.0, palette.secondary, palette.text, "Close")
-                .clicked()
-            {
+            let close =
+                theme::icon_button(ui, Icon::X, 16.0, palette.secondary, palette.text, "Close");
+            ui.ctx()
+                .data_mut(|data| data.insert_temp(dialog_close_id(), close.id));
+            if close.clicked() {
                 app.actions.push(Action::CloseDialog);
             }
         });

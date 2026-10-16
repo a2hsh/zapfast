@@ -44,6 +44,12 @@ several, **Review recipients** lists them for you to confirm, and **Back**
 returns to the picker without losing the selection. If a destination becomes
 locked or read-only, ZapFast returns to selection instead of sending a partial
 batch. Switching accounts discards the open forwarding selection.
+From the keyboard the chats are one list: Down in the search field moves
+into it, the arrows move through it, and Space or Enter ticks or unticks the
+current chat, after which the screen reader says how many are selected, or
+why a chat cannot be added. Tab goes on to **Forward** or **Review
+recipients**. Review starts on **Back**, and Back returns to the chat you
+were on.
 
 Right-click a group message and choose **Reply privately** to open a direct
 conversation with its sender while quoting the group message. The quote
