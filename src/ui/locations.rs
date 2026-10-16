@@ -41,6 +41,21 @@ pub fn send(app: &mut App, ui: &mut egui::Ui, chat: &str) {
     // The spot is read again here and shown before it is sent: a pair read the
     // wrong way round is visible in this dialog, not in someone else's chat.
     let here = geo::spot(&app.location_draft);
+    // What the check found, as the line under the field shows it: the
+    // field's description, so a screen reader hears it with the field.
+    let read = match here {
+        Some(here) => Some(here.text()),
+        None if app.location_draft.trim().is_empty() => None,
+        None if geo::is_short_link(&app.location_draft) => Some(
+            crate::i18n::gettext(
+                app.locale,
+                "Short links only open online. Paste the full map link or the coordinates.",
+            )
+            .into_owned(),
+        ),
+        None => Some(crate::i18n::gettext(app.locale, "That is not a location.").into_owned()),
+    };
+    describe(&field, read.as_deref());
     match here {
         Some(here) => {
             theme::text(ui, here.text(), theme::regular(13.0), palette.text);
@@ -78,9 +93,20 @@ pub fn send(app: &mut App, ui: &mut egui::Ui, chat: &str) {
         if theme::soft_action_button(ui, &palette, None, cancel.as_ref(), false).clicked() {
             app.actions.push(Action::CloseDialog);
         }
-        ui.add_enabled_ui(here.is_some() && app.link.is_connected(), |ui| {
+        let connected = app.link.is_connected();
+        ui.add_enabled_ui(here.is_some() && connected, |ui| {
             let send = crate::i18n::gettext(app.locale, "Send");
-            if theme::pill_button(ui, &palette, send.as_ref(), true).clicked()
+            let button = theme::pill_button(ui, &palette, send.as_ref(), true);
+            // Unavailable, Send says why: offline, or nothing to send yet.
+            let why = if !connected {
+                Some(crate::i18n::gettext(app.locale, "Not connected to WhatsApp").into_owned())
+            } else if here.is_none() {
+                Some(read.clone().unwrap_or_else(|| hint.clone().into_owned()))
+            } else {
+                None
+            };
+            describe(&button, why.as_deref());
+            if button.clicked()
                 && let Some(here) = here
             {
                 app.actions.push(Action::SendLocation {
@@ -92,4 +118,15 @@ pub fn send(app: &mut App, ui: &mut egui::Ui, chat: &str) {
             }
         });
     });
+}
+
+/// Gives `response`'s node `description`, or none.
+fn describe(response: &egui::Response, description: Option<&str>) {
+    let description = description.map(str::to_owned);
+    response
+        .ctx
+        .accesskit_node_builder(response.id, |node| match description {
+            Some(description) => node.set_description(description),
+            None => node.clear_description(),
+        });
 }

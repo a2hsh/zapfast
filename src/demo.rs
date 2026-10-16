@@ -27974,6 +27974,44 @@ mod settings_access_tests {
         }
     }
 
+    /// Send location's field is described by what its check read, the line
+    /// under it: the spot, or why there is none. Send, while unavailable,
+    /// says why too.
+    #[test]
+    fn the_location_field_describes_what_it_read() {
+        let (mut app, ctx) = settings("location");
+        let hint = "Paste a map link or coordinates";
+        let described = |app: &mut App, ctx: &egui::Context, role: Role, label: &str| {
+            find(&tree(app, ctx), role, label)
+                .unwrap_or_else(|| panic!("{label}"))
+                .1
+                .description()
+                .map(str::to_owned)
+        };
+        let connected = app.link.is_connected();
+        let offline = (!connected).then(|| "Not connected to WhatsApp".to_owned());
+        let spot = crate::geo::spot(&app.location_draft)
+            .expect("the demo's spot")
+            .text();
+        assert_eq!(described(&mut app, &ctx, Role::TextInput, hint), Some(spot));
+        assert_eq!(described(&mut app, &ctx, Role::Button, "Send"), offline);
+        app.location_draft = "nonsense".into();
+        render(&mut app, &ctx);
+        let wrong = Some("That is not a location.".to_owned());
+        assert_eq!(described(&mut app, &ctx, Role::TextInput, hint), wrong);
+        assert_eq!(
+            described(&mut app, &ctx, Role::Button, "Send"),
+            offline.clone().or(wrong)
+        );
+        app.location_draft.clear();
+        render(&mut app, &ctx);
+        assert_eq!(described(&mut app, &ctx, Role::TextInput, hint), None);
+        assert_eq!(
+            described(&mut app, &ctx, Role::Button, "Send"),
+            offline.or(Some(hint.to_owned()))
+        );
+    }
+
     /// A pointer click at `pos`: pressed in one frame, released in the next.
     fn click(app: &mut App, ctx: &egui::Context, pos: egui::Pos2) {
         let button = |pressed| egui::Event::PointerButton {
