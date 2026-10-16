@@ -119,6 +119,13 @@ pub struct Account {
     pub calls_search: String,
     /// What the new-call list's search field holds.
     pub new_call_search: String,
+    /// The call history's current row for its keys: its chat and its first
+    /// call. A row the history no longer shows hands over to the picked
+    /// row, or to the first (`ui::calls`).
+    pub call_cursor: Option<(ChatId, String)>,
+    /// The new-call list's current person for its keys: whether the row is
+    /// among the frequently contacted, and the person.
+    pub new_call_cursor: Option<(bool, ChatId)>,
 }
 
 impl Account {
@@ -215,6 +222,8 @@ impl Account {
             picked_call: None,
             new_call: false,
             calls_search: String::new(),
+            call_cursor: None,
+            new_call_cursor: None,
             new_call_search: String::new(),
         }
     }

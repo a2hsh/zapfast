@@ -855,6 +855,15 @@ Escape returns to the list. In the search field, Down moves into the search
 results on the first one, Up from the first returns to the field, and Enter
 in either opens a chat, as before.
 
+On the Calls tab the call history is a list in the same place, named Calls,
+or Missed calls under the Missed chip, and the New call list is another, named
+New call. The same keys move through them, and Down in the search field moves
+into them. In the history, Enter opens the row's chat at that call, as a click
+does, and Shift+F10 opens a menu that calls the person back by voice or video;
+a group call's menu says that group calls happen on the phone, and a call
+link's row says it has nothing to open. In the New call list, Enter or
+Shift+F10 opens a menu with Voice call and Video call.
+
 In the chat view, Tab moves through the message input and its buttons, chat
 search, the chat info panel, the message list, the rail, the chat list's
 header, search, the chat filters and the chat list, then returns to the

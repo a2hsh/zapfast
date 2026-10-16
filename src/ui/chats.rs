@@ -294,10 +294,12 @@ fn search_and_filters(app: &mut App, ui: &mut egui::Ui) {
     let width = ui.available_width();
     if app.page == Page::Calls {
         let hint = crate::i18n::gettext(app.locale, "Search name or number");
+        // Down from the field goes into the list under it.
+        super::calls::search_keyboard(app, ui);
         let (id, mut text) = if app.new_call {
-            ("new-call-search", app.new_call_search.clone())
+            (super::calls::NEW_CALL_SEARCH, app.new_call_search.clone())
         } else {
-            ("calls-search", app.calls_search.clone())
+            (super::calls::HISTORY_SEARCH, app.calls_search.clone())
         };
         let response = widgets::search_field(
             ui,

@@ -197,6 +197,20 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
             actions.extend(chat_list_keys(app, ctx, chat));
         }
     }
+    // The Calls page's focused call history or new-call list: the same keys
+    // move its current row, Enter and Shift+F10 act on it.
+    if app.page == Page::Calls
+        && app.dialog.is_none()
+        && !app.show_update
+        && app.picker.is_none()
+        && app.reaction_target.is_none()
+        && app.recording.is_none()
+        && !menu_open
+        // The call screen covers the list.
+        && (app.call.is_none() || app.call_surface_hidden)
+    {
+        actions.extend(crate::ui::calls::list_keys(app, ctx));
+    }
     // The focused list's current message takes the keys that act on it.
     if app.dialog.is_none()
         && !app.show_update

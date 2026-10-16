@@ -7255,6 +7255,197 @@ mod tests {
         assert_ne!(app.current_list_chat(), current);
     }
 
+    /// The demo on the Calls page `page`, laid out.
+    fn calls_page(page: &str) -> (App, egui::Context) {
+        let mut app = app();
+        apply_flags(&mut app, Some(page));
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        (app, ctx)
+    }
+
+    /// The node of the list `list`, and the node of its active descendant.
+    fn list_nodes(
+        tree: &egui::accesskit::TreeUpdate,
+        list: egui::Id,
+    ) -> (egui::accesskit::Node, Option<egui::accesskit::Node>) {
+        let node_of_list = node(tree, list.accesskit_id()).expect("the list is in the tree");
+        let active = node_of_list
+            .active_descendant()
+            .map(|active| node(tree, active).expect("the active row is in this update"));
+        (node_of_list, active)
+    }
+
+    /// The call history is one Tab stop after the chips, named and counted
+    /// as a list, whose arrows walk its rows without opening them. Enter
+    /// opens the current row's chat beside it, as a click does, and
+    /// Shift+F10 its menu, which calls back by voice or video.
+    #[test]
+    fn the_call_history_is_one_list_walked_by_the_arrows() {
+        use crate::ui::calls;
+        let (mut app, ctx) = calls_page("calls");
+        let list = calls::history_list_id();
+        let missed = crate::ui::focus::control(&ctx, crate::ui::focus::Stop::Missed)
+            .expect("the Missed chip");
+        ctx.memory_mut(|memory| memory.request_focus(missed));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        let rows: Vec<Message> = calls::rows(&app.call_log)
+            .into_iter()
+            .map(|row| row[0].clone())
+            .collect();
+        assert!(rows.len() >= 3, "{rows:?}");
+        let tree = tree_after(&mut app, &ctx, None);
+        let (node_of_list, active) = list_nodes(&tree, list);
+        assert_eq!(node_of_list.role(), egui::accesskit::Role::ListBox);
+        assert_eq!(node_of_list.label(), Some("Calls"));
+        assert_eq!(node_of_list.size_of_set(), Some(rows.len()));
+        assert_eq!(tree.focus, list.accesskit_id());
+        let active = active.expect("the first row is current");
+        assert_eq!(active.role(), egui::accesskit::Role::ListBoxOption);
+        assert_eq!(active.position_in_set(), Some(0));
+        let open = app.open_chat.clone();
+        for (key, expected) in [
+            (egui::Key::ArrowDown, 1),
+            (egui::Key::End, rows.len() - 1),
+            (egui::Key::Home, 0),
+            (egui::Key::ArrowDown, 1),
+        ] {
+            let tree = tree_after(&mut app, &ctx, Some(key));
+            let active = list_nodes(&tree, list).1.expect("the current row is drawn");
+            assert_eq!(active.position_in_set(), Some(expected), "{key:?}");
+            assert_eq!(active.size_of_set(), Some(rows.len()));
+            let name = app.display_name(&rows[expected].chat);
+            assert!(
+                active.label().is_some_and(|label| label.starts_with(&name)),
+                "{key:?}: {:?}",
+                active.label()
+            );
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(list), "{key:?}");
+            assert_eq!(app.open_chat, open, "{key:?} opened a chat");
+        }
+        // A one-to-one row's menu calls back either way.
+        let one_to_one = rows
+            .iter()
+            .position(|row| {
+                matches!(row.content, Content::Call { group: false, .. })
+                    && row.chat != crate::model::CALL_LINK_CHAT
+            })
+            .expect("a one-to-one call");
+        app.call_cursor = Some((rows[one_to_one].chat.clone(), rows[one_to_one].id.clone()));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::F10, egui::Modifiers::SHIFT);
+        let popup = egui::Popup::default_response_id(
+            &ctx.read_response(calls::row_id(&rows[one_to_one].chat, &rows[one_to_one].id))
+                .expect("the row is drawn"),
+        );
+        assert!(egui::Popup::is_id_open(&ctx, popup), "the row's menu");
+        assert_eq!(focused_layer(&ctx).map(|layer| layer.id), Some(popup));
+        assert_eq!(focused_label(&mut app, &ctx).as_deref(), Some("Voice call"));
+        walk_menu_to(&mut app, &ctx, "Video call");
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(!egui::Popup::is_id_open(&ctx, popup));
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        // Enter opens the row's chat at its call.
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(
+            app.picked_call,
+            Some((rows[one_to_one].chat.clone(), rows[one_to_one].id.clone()))
+        );
+        assert_eq!(app.open_chat.as_ref(), Some(&rows[one_to_one].chat));
+        assert_eq!(app.page, crate::model::Page::Calls);
+    }
+
+    /// The new-call list is reached with Down from its search field and Up
+    /// goes back; a row alone starts nothing, so Enter opens its menu, whose
+    /// Voice call rings the person and closes the list.
+    #[test]
+    fn the_new_call_list_calls_from_the_keys() {
+        use crate::ui::calls;
+        let (mut app, ctx) = calls_page("new-call");
+        let field = egui::Id::new(calls::NEW_CALL_SEARCH);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(field));
+        let list = calls::new_call_list_id();
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        let tree = tree_after(&mut app, &ctx, None);
+        let (node_of_list, active) = list_nodes(&tree, list);
+        assert_eq!(node_of_list.label(), Some("New call"));
+        let len = node_of_list.size_of_set().expect("a counted list");
+        assert!(len >= 2, "{len}");
+        let active = active.expect("the first person is current");
+        assert_eq!(active.position_in_set(), Some(0));
+        press_key(&mut app, &ctx, egui::Key::ArrowUp, egui::Modifiers::NONE);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(field));
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        let tree = tree_after(&mut app, &ctx, None);
+        let active = list_nodes(&tree, list).1.expect("the second person");
+        assert_eq!(active.position_in_set(), Some(1));
+        let (frequent, person) = app.new_call_cursor.clone().expect("a current person");
+        assert!(
+            active
+                .label()
+                .is_some_and(|label| label.starts_with(&app.display_name(&person))),
+            "{:?}",
+            active.label()
+        );
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        let popup = egui::Popup::default_response_id(
+            &ctx.read_response(calls::person_row_id(frequent, &person))
+                .expect("the row is drawn"),
+        );
+        assert!(egui::Popup::is_id_open(&ctx, popup), "the person's menu");
+        assert!(app.new_call && app.call.is_none(), "nothing rang yet");
+        assert_eq!(focused_label(&mut app, &ctx).as_deref(), Some("Voice call"));
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        render(&mut app, &ctx);
+        assert!(!app.new_call, "the list closes");
+        assert_eq!(
+            app.call.as_ref().map(|call| call.chat.as_str()),
+            Some(person.as_str()),
+            "the call goes to the person"
+        );
+    }
+
+    /// A call joined through a link has no chat to open and nobody to call
+    /// back: its row's click does nothing, and its keys say why.
+    #[test]
+    fn a_call_link_row_says_why_it_opens_nothing() {
+        use crate::ui::calls;
+        let (mut app, ctx) = calls_page("calls-link");
+        let link = app
+            .call_log
+            .iter()
+            .find(|call| call.chat == crate::model::CALL_LINK_CHAT)
+            .cloned()
+            .expect("the call link's call");
+        let list = calls::history_list_id();
+        app.call_cursor = Some((link.chat.clone(), link.id.clone()));
+        ctx.memory_mut(|memory| memory.request_focus(list));
+        render(&mut app, &ctx);
+        let open = app.open_chat.clone();
+        for (key, modifiers) in [
+            (egui::Key::Enter, egui::Modifiers::NONE),
+            (egui::Key::F10, egui::Modifiers::SHIFT),
+        ] {
+            let before = app.announcer.spoken().map(str::to_owned);
+            press_key(&mut app, &ctx, key, modifiers);
+            assert_ne!(app.announcer.spoken().map(str::to_owned), before, "{key:?}");
+            assert!(
+                said_last(&app, "Nothing to open for a call link"),
+                "{key:?}: {:?}",
+                app.announcer.spoken()
+            );
+            assert_eq!(app.picked_call, None, "{key:?}");
+            assert_eq!(app.open_chat, open, "{key:?}");
+            assert!(!egui::Popup::is_any_open(&ctx), "{key:?}: no menu");
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        }
+    }
+
     #[test]
     fn arrows_move_the_chat_cursor_without_opening() {
         let mut app = app();
