@@ -1732,18 +1732,49 @@ impl App {
 
     /// The window's title for what it shows now (`a11y::window_title`). The
     /// lock screen names nothing, and a locked chat is left out as if none
-    /// were open, so the title never gives away what the lock hides.
-    pub fn window_title(&self) -> String {
+    /// were open, so the title never gives away what the lock hides. A call
+    /// on screen names who calls, or who it is with, and the account it is
+    /// on; put aside or over, the title is the page's again. `narrow` is whether the window is narrow,
+    /// where the Calls page shows only the history until a call is picked.
+    pub fn window_title(&mut self, narrow: bool) -> String {
         use crate::a11y::TitlePlace;
         let locked = self.app_lock.is_locked();
         let chat;
+        let caller;
+        // A call ringing, or under way, on the call screen, which covers the
+        // window.
+        let call = self
+            .call
+            .as_ref()
+            .filter(|call| call.phase.is_live() && !self.call_surface_hidden)
+            .map(|call| {
+                (
+                    call.phase == crate::calls::CallPhase::Incoming,
+                    call.group.as_ref().is_some_and(|group| group.link),
+                )
+            });
         let place = if locked || !self.is_linked() {
             TitlePlace::Elsewhere
+        } else if let Some((ringing, link)) = call {
+            let private = self.call_is_private();
+            caller = (!private).then(|| self.call_name());
+            match (ringing, link) {
+                (true, _) => TitlePlace::IncomingCall(caller.as_deref()),
+                (false, true) => TitlePlace::CallLink,
+                (false, false) => TitlePlace::Call(caller.as_deref()),
+            }
         } else if matches!(self.page, Page::Settings | Page::Wallpaper) {
             TitlePlace::Settings
         } else if self.page == Page::Calls {
-            // The chat left open is not on screen.
-            TitlePlace::Calls
+            // The chat left open shows beside the history, except in a
+            // narrow window that shows only the history until a call is
+            // picked from it.
+            chat = self
+                .current_chat()
+                .filter(|chat| !chat.locked)
+                .filter(|_| !narrow || self.call_picked())
+                .map(|chat| self.chat_title(chat));
+            chat.as_deref().map_or(TitlePlace::Calls, TitlePlace::Chat)
         } else {
             chat = self
                 .current_chat()
@@ -1752,8 +1783,20 @@ impl App {
             chat.as_deref()
                 .map_or(TitlePlace::Elsewhere, TitlePlace::Chat)
         };
-        let account = (!locked && self.has_several_accounts())
-            .then(|| self.account().display_label(self.locale));
+        // A call names the account it is on, which need not be the one on
+        // screen.
+        let on_call = matches!(
+            place,
+            TitlePlace::IncomingCall(_) | TitlePlace::Call(_) | TitlePlace::CallLink
+        );
+        let account = (!locked && self.has_several_accounts()).then(|| {
+            self.call_account
+                .as_ref()
+                .filter(|_| on_call)
+                .and_then(|id| self.accounts.iter().find(|account| &account.id == id))
+                .unwrap_or_else(|| self.account())
+                .display_label(self.locale)
+        });
         let mut title = crate::a11y::window_title(self.locale, place, account.as_deref());
         if self.demo_title {
             title.push_str(" Demo");
@@ -1770,7 +1813,7 @@ impl App {
         if self.window_hidden {
             return;
         }
-        let title = self.window_title();
+        let title = self.window_title(crate::ui::narrow(ctx));
         if self.sent_title.as_ref() != Some(&title) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.sent_title = Some(title);
@@ -25168,24 +25211,30 @@ mod window_title_tests {
     #[test]
     fn the_title_names_where_the_reader_is() {
         let mut app = app();
-        assert_eq!(app.window_title(), "ZapFast", "no chat open");
+        assert_eq!(app.window_title(false), "ZapFast", "no chat open");
         app.open_chat = Some(ADA.into());
-        assert_eq!(app.window_title(), "Ada Lovelace - ZapFast");
+        assert_eq!(app.window_title(false), "Ada Lovelace - ZapFast");
         // The header says "~Sara"; the title, like speech, drops the "~".
         app.open_chat = Some(SARA.into());
         assert_eq!(app.chat_title(app.current_chat().unwrap()), "~Sara");
-        assert_eq!(app.window_title(), "Sara - ZapFast");
+        assert_eq!(app.window_title(false), "Sara - ZapFast");
         app.page = Page::Settings;
-        assert_eq!(app.window_title(), "Settings - ZapFast");
+        assert_eq!(app.window_title(false), "Settings - ZapFast");
         app.page = Page::Wallpaper;
-        assert_eq!(app.window_title(), "Settings - ZapFast", "a Settings page");
-        // The Calls page shows the call history, not the chat left open.
+        assert_eq!(
+            app.window_title(false),
+            "Settings - ZapFast",
+            "a Settings page"
+        );
+        // The Calls page shows the chat left open beside the call history.
         app.page = Page::Calls;
-        assert_eq!(app.window_title(), "Calls - ZapFast");
+        assert_eq!(app.window_title(false), "Sara - ZapFast");
+        app.open_chat = None;
+        assert_eq!(app.window_title(false), "Calls - ZapFast");
         app.page = Page::Chats;
         app.link = LinkStatus::LoggedOut;
         app.chats.clear();
-        assert_eq!(app.window_title(), "ZapFast", "the linking screen");
+        assert_eq!(app.window_title(false), "ZapFast", "the linking screen");
     }
 
     /// The lock screen names nothing: no chat, no page, no account.
@@ -25195,19 +25244,19 @@ mod window_title_tests {
         app.open_chat = Some(ADA.into());
         app.lock_app();
         assert!(app.app_lock.is_locked());
-        assert_eq!(app.window_title(), "ZapFast");
+        assert_eq!(app.window_title(false), "ZapFast");
         // Unlocking names the chat again.
         app.app_lock.release();
-        assert_eq!(app.window_title(), "Ada Lovelace - ZapFast");
+        assert_eq!(app.window_title(false), "Ada Lovelace - ZapFast");
         app.lock_app();
         app.page = Page::Settings;
-        assert_eq!(app.window_title(), "ZapFast");
+        assert_eq!(app.window_title(false), "ZapFast");
         app.app_lock.release();
         app.apply(Action::AddAccount, &egui::Context::default());
         assert!(app.has_several_accounts());
         app.lock_app();
         assert!(app.app_lock.is_locked());
-        assert_eq!(app.window_title(), "ZapFast");
+        assert_eq!(app.window_title(false), "ZapFast");
     }
 
     /// A locked chat's name never reaches the title, even with the locked
@@ -25218,9 +25267,9 @@ mod window_title_tests {
         open_locked_folder(&mut app);
         app.open_chat = Some(SECRET.into());
         assert!(app.current_chat().is_some(), "the chat is on screen");
-        assert_eq!(app.window_title(), "ZapFast");
+        assert_eq!(app.window_title(false), "ZapFast");
         app.open_chat = Some(ADA.into());
-        assert_eq!(app.window_title(), "Ada Lovelace - ZapFast");
+        assert_eq!(app.window_title(false), "Ada Lovelace - ZapFast");
     }
 
     /// With a second account here, the title names the account on screen
@@ -25231,30 +25280,145 @@ mod window_title_tests {
         let ctx = egui::Context::default();
         let first = app.account().id.clone();
         app.apply(Action::AddAccount, &ctx);
-        assert_eq!(app.window_title(), "Account 2 - ZapFast", "linking it");
+        assert_eq!(app.window_title(false), "Account 2 - ZapFast", "linking it");
         app.apply(Action::SwitchAccount(first), &ctx);
         app.link = LinkStatus::Connected;
         assert!(app.has_several_accounts());
-        assert_eq!(app.window_title(), "Carmine - ZapFast");
+        assert_eq!(app.window_title(false), "Carmine - ZapFast");
         app.open_chat = Some(ADA.into());
-        assert_eq!(app.window_title(), "Ada Lovelace - Carmine - ZapFast");
+        assert_eq!(app.window_title(false), "Ada Lovelace - Carmine - ZapFast");
         app.page = Page::Settings;
-        assert_eq!(app.window_title(), "Settings - Carmine - ZapFast");
+        assert_eq!(app.window_title(false), "Settings - Carmine - ZapFast");
         app.page = Page::Chats;
         open_locked_folder(&mut app);
         app.open_chat = Some(SECRET.into());
-        assert_eq!(app.window_title(), "Carmine - ZapFast");
+        assert_eq!(app.window_title(false), "Carmine - ZapFast");
+    }
+
+    /// A call on screen names the account it rings on, which need not be the
+    /// one on screen.
+    #[test]
+    fn a_call_on_another_account_names_that_account() {
+        use crate::calls::{CallPhase, CallUpdate};
+        let mut app = app();
+        let ctx = egui::Context::default();
+        let first = app.account().id.clone();
+        app.apply(Action::AddAccount, &ctx);
+        let second = app.account().id.clone();
+        app.apply(Action::SwitchAccount(first), &ctx);
+        app.link = LinkStatus::Connected;
+        app.call_account = Some(second);
+        app.call = Some(CallUpdate {
+            generation: 1,
+            chat: ADA.to_owned(),
+            direction: crate::model::CallDirection::Incoming,
+            video: false,
+            phase: CallPhase::Incoming,
+            started: None,
+            muted: false,
+            camera_on: false,
+            remote_video: false,
+            video_requested: false,
+            outcome: None,
+            peer_audio: None,
+            lost_devices: Vec::new(),
+            microphone: None,
+            speaker: None,
+            camera: None,
+            group: None,
+        });
+        let title = app.window_title(false);
+        assert!(title.ends_with(" - Account 2 - ZapFast"), "{title}");
+        app.call_surface_hidden = true;
+        assert_eq!(
+            app.window_title(false),
+            "Carmine - ZapFast",
+            "put aside, the account on screen"
+        );
+    }
+    /// The Calls page is titled by the chat it shows beside the history, and
+    /// by the history where none shows: no chat open, a locked chat, or a
+    /// narrow window that shows only the history until a call is picked.
+    #[test]
+    fn the_calls_page_with_a_chat_is_titled_by_the_chat() {
+        let mut app = app();
+        app.page = Page::Calls;
+        app.open_chat = Some(ADA.into());
+        assert_eq!(app.window_title(false), "Ada Lovelace - ZapFast");
+        assert_eq!(
+            app.window_title(true),
+            "Calls - ZapFast",
+            "only the history"
+        );
+        app.picked_call = Some((ADA.into(), "call-1".into()));
+        assert_eq!(app.window_title(true), "Ada Lovelace - ZapFast", "picked");
+        open_locked_folder(&mut app);
+        app.open_chat = Some(SECRET.into());
+        app.picked_call = None;
+        assert!(app.current_chat().is_some(), "the chat is on screen");
+        assert_eq!(app.window_title(false), "Calls - ZapFast");
+    }
+
+    /// A call on the call screen titles the window: who calls while it
+    /// rings, who it is with once it is under way. A locked chat's call names
+    /// nobody, the lock screen nothing at all, and a call put aside or over
+    /// leaves the page's title.
+    #[test]
+    fn a_ringing_call_titles_the_window_and_a_locked_one_names_nobody() {
+        use crate::calls::{CallPhase, CallUpdate};
+        use crate::model::CallDirection;
+        let mut app = app();
+        app.open_chat = Some(SARA.into());
+        let call = |chat: &str, phase| CallUpdate {
+            generation: 1,
+            chat: chat.to_owned(),
+            direction: CallDirection::Incoming,
+            video: false,
+            phase,
+            started: None,
+            muted: false,
+            camera_on: false,
+            remote_video: false,
+            video_requested: false,
+            outcome: None,
+            peer_audio: None,
+            lost_devices: Vec::new(),
+            microphone: None,
+            speaker: None,
+            camera: None,
+            group: None,
+        };
+        app.call_account = Some(app.account().id.clone());
+        app.call = Some(call(ADA, CallPhase::Incoming));
+        assert_eq!(
+            app.window_title(false),
+            "Incoming call from Ada Lovelace - ZapFast"
+        );
+        app.call = Some(call(ADA, CallPhase::Active));
+        assert_eq!(app.window_title(false), "Call with Ada Lovelace - ZapFast");
+        app.call_surface_hidden = true;
+        assert_eq!(app.window_title(false), "Sara - ZapFast", "put aside");
+        app.call_surface_hidden = false;
+        app.call = Some(call(ADA, CallPhase::Ended));
+        assert_eq!(app.window_title(false), "Sara - ZapFast", "over");
+        app.call = Some(call(SECRET, CallPhase::Incoming));
+        assert_eq!(app.window_title(false), "Incoming call - ZapFast");
+        app.call = Some(call(SECRET, CallPhase::Active));
+        assert_eq!(app.window_title(false), "Call in progress - ZapFast");
+        app.call = Some(call(ADA, CallPhase::Incoming));
+        app.lock_app();
+        assert_eq!(app.window_title(false), "ZapFast");
     }
 
     #[test]
     fn a_demo_title_says_so() {
         let mut app = app();
         app.demo_title = true;
-        assert_eq!(app.window_title(), "ZapFast Demo");
+        assert_eq!(app.window_title(false), "ZapFast Demo");
         app.open_chat = Some(ADA.into());
-        assert_eq!(app.window_title(), "Ada Lovelace - ZapFast Demo");
+        assert_eq!(app.window_title(false), "Ada Lovelace - ZapFast Demo");
         app.lock_app();
-        assert_eq!(app.window_title(), "ZapFast Demo");
+        assert_eq!(app.window_title(false), "ZapFast Demo");
     }
 
     /// The titles one frame gave the window.

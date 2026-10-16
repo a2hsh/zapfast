@@ -804,11 +804,14 @@ shortcuts.
 ## Screen readers
 
 The window's title, which NVDA+T and Alt+Tab read, names where you are:
-"Ada - ZapFast" with a chat open, "Settings - ZapFast", "Calls - ZapFast",
-or "ZapFast";
-with several accounts, the account's name comes before ZapFast. While
-ZapFast is locked the title is only "ZapFast", and a locked chat's name
-never appears in it.
+"Ada - ZapFast" with a chat open, on the Calls page too, "Settings -
+ZapFast", "Calls - ZapFast", or "ZapFast"; while the call screen is up,
+"Incoming call from Ada - ZapFast" as a call rings and "Call with Ada -
+ZapFast" once it is under way. With several accounts, the account's name
+comes before ZapFast: during a call, the name of the account the call is
+on. While ZapFast is locked the title is only "ZapFast", and a locked
+chat's name never appears in it: its call is "Incoming call - ZapFast" and
+"Call in progress - ZapFast".
 
 The message input is named after the open chat, "Type a message to Ada" or
 "Type a message to group Rust Berlin", so opening a chat from the keyboard

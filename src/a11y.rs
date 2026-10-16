@@ -144,6 +144,14 @@ pub enum TitlePlace<'a> {
     Settings,
     /// The Calls page, which shows the call history in the chats' place.
     Calls,
+    /// A call ringing on screen, with the name of who calls, or none for a
+    /// call that must not name its chat (a locked chat's).
+    IncomingCall(Option<&'a str>),
+    /// A call on screen and under way, with the name of who it is with, or
+    /// none for a call that must not name its chat.
+    Call(Option<&'a str>),
+    /// A call joined through a call link, which belongs to no chat.
+    CallLink,
     /// Anywhere else: the chat list with no chat open, the linking screen,
     /// or a locked chat, whose name stays out of the title.
     Elsewhere,
@@ -172,6 +180,9 @@ pub fn window_title(locale: Locale, place: TitlePlace<'_>, account: Option<&str>
         TitlePlace::Chat(name) => Some(title_text(without_push_marker(name))),
         TitlePlace::Settings => Some(gettext(locale, "Settings").into_owned()),
         TitlePlace::Calls => Some(gettext(locale, "Calls").into_owned()),
+        TitlePlace::IncomingCall(_) | TitlePlace::Call(_) | TitlePlace::CallLink => {
+            Some(call_heading(locale, place))
+        }
         TitlePlace::Elsewhere => None,
     }
     .filter(|place| !place.is_empty());
@@ -181,19 +192,57 @@ pub fn window_title(locale: Locale, place: TitlePlace<'_>, account: Option<&str>
     match (place, account) {
         (Some(place), Some(account)) => fill(
             // Translators: the window title: where the reader is (a chat's
-            // name, or "Settings"), then the account's name. Keep ZapFast
-            // unchanged, at the end.
+            // name, "Settings", "Calls" or a call on screen), then the
+            // account's name. Keep ZapFast unchanged, at the end.
             &gettext(locale, "{place} - {account} - ZapFast"),
             &[("place", &place), ("account", &account)],
         ),
         (Some(name), None) | (None, Some(name)) => fill(
             // Translators: the window title: where the reader is (a chat's
-            // name, or "Settings"), or the account's name. Keep ZapFast
-            // unchanged, at the end.
+            // name, "Settings", "Calls" or a call on screen), or the
+            // account's name. Keep ZapFast unchanged, at the end.
             &gettext(locale, "{name} - ZapFast"),
             &[("name", &name)],
         ),
         (None, None) => "ZapFast".to_owned(),
+    }
+}
+
+/// What a call on screen is, as the window's title names it: who calls, who
+/// the call is with, or a call link. A call that must not name its chat, or
+/// whose name is nothing once on one line, names nobody. Any other place is
+/// not a call, and reads as nothing.
+///
+/// Each message is a literal passed to `gettext` right here, so xgettext
+/// finds it and it reaches the translation template.
+fn call_heading(locale: Locale, place: TitlePlace<'_>) -> String {
+    let named = |name: Option<&str>| {
+        name.map(|name| title_text(without_push_marker(name)))
+            .filter(|name| !name.is_empty())
+    };
+    match place {
+        TitlePlace::IncomingCall(name) => match named(name) {
+            Some(name) => fill(
+                // Translators: the window title while a call rings, with
+                // who calls.
+                &gettext(locale, "Incoming call from {name}"),
+                &[("name", &name)],
+            ),
+            None => gettext(locale, "Incoming call").into_owned(),
+        },
+        TitlePlace::Call(name) => match named(name) {
+            Some(name) => fill(
+                // Translators: the window title during a call, with who it
+                // is with.
+                &gettext(locale, "Call with {name}"),
+                &[("name", &name)],
+            ),
+            // Translators: the window title during a call whose chat is
+            // locked, which names nobody.
+            None => gettext(locale, "Call in progress").into_owned(),
+        },
+        TitlePlace::CallLink => gettext(locale, "Call link").into_owned(),
+        _ => String::new(),
     }
 }
 
@@ -1083,6 +1132,35 @@ mod tests {
             window_title(Locale::German, TitlePlace::Settings, None),
             "Einstellungen - ZapFast"
         );
+    }
+
+    /// A call on screen names who calls, or who it is with, and nobody when
+    /// it must not; the account still follows, and ZapFast ends it.
+    #[test]
+    fn a_call_titles_the_window_by_who_it_is_with() {
+        let title = |place, account| window_title(Locale::English, place, account);
+        assert_eq!(
+            title(TitlePlace::IncomingCall(Some("~Ada")), None),
+            "Incoming call from Ada - ZapFast"
+        );
+        assert_eq!(
+            title(TitlePlace::IncomingCall(None), None),
+            "Incoming call - ZapFast"
+        );
+        assert_eq!(
+            title(TitlePlace::Call(Some("Ada")), Some("Work")),
+            "Call with Ada - Work - ZapFast"
+        );
+        assert_eq!(
+            title(TitlePlace::Call(None), None),
+            "Call in progress - ZapFast"
+        );
+        assert_eq!(
+            title(TitlePlace::Call(Some("~")), None),
+            "Call in progress - ZapFast",
+            "nothing left of the name"
+        );
+        assert_eq!(title(TitlePlace::CallLink, None), "Call link - ZapFast");
     }
 
     /// A name known only from a profile wears a "~" on screen; a screen
