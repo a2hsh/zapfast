@@ -844,6 +844,21 @@ on. While ZapFast is locked the title is only "ZapFast", and a locked
 chat's name never appears in it: its call is "Incoming call - ZapFast" and
 "Call in progress - ZapFast".
 
+The call screen is one dialog, named as the title names the call, with
+how the call is going as its description, such as "Incoming voice call" or
+the call's length. A call that rings takes focus on Accept, with a screen
+reader or after you used the keyboard, and so does a click on its
+notification; Tab reaches Decline. So that a key you were typing as the
+call came up does not answer or decline it, Enter and Space on Accept and
+Decline do nothing for a second after the call screen takes focus, and a
+key held down does nothing there; press it again. A call you place takes focus on Mute, or
+on Hang up until the call connects, and answering moves focus from Accept
+to Mute. On the call screen Tab and Shift+Tab move through its own controls
+only, in the order they appear from the top: the corner's buttons, the
+device pickers while they are shown, then Mute, the camera, Devices and Hang
+up. When the call ends, or the screen is put aside, focus returns to where
+it was before the call screen took it.
+
 The message input is named after the open chat, "Type a message to Ada" or
 "Type a message to group Rust Berlin", so opening a chat from the keyboard
 says whose chat it is. While a reply is pending, the input's description says what it

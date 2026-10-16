@@ -258,14 +258,14 @@ pub fn window_title(locale: Locale, place: TitlePlace<'_>, account: Option<&str>
     }
 }
 
-/// What a call on screen is, as the window's title names it: who calls, who
-/// the call is with, or a call link. A call that must not name its chat, or
-/// whose name is nothing once on one line, names nobody. Any other place is
-/// not a call, and reads as nothing.
+/// What a call on screen is, as the window's title and the call screen
+/// name it: who calls, who the call is with, or a call link. A call that
+/// must not name its chat, or whose name is nothing once on one line, names
+/// nobody. Any other place is not a call, and reads as nothing.
 ///
 /// Each message is a literal passed to `gettext` right here, so xgettext
 /// finds it and it reaches the translation template.
-fn call_heading(locale: Locale, place: TitlePlace<'_>) -> String {
+pub fn call_heading(locale: Locale, place: TitlePlace<'_>) -> String {
     let named = |name: Option<&str>| {
         name.map(|name| title_text(without_push_marker(name)))
             .filter(|name| !name.is_empty())
@@ -273,8 +273,8 @@ fn call_heading(locale: Locale, place: TitlePlace<'_>) -> String {
     match place {
         TitlePlace::IncomingCall(name) => match named(name) {
             Some(name) => fill(
-                // Translators: the window title while a call rings, with
-                // who calls.
+                // Translators: the window title and the call screen's name
+                // while a call rings, with who calls.
                 &gettext(locale, "Incoming call from {name}"),
                 &[("name", &name)],
             ),
@@ -282,13 +282,13 @@ fn call_heading(locale: Locale, place: TitlePlace<'_>) -> String {
         },
         TitlePlace::Call(name) => match named(name) {
             Some(name) => fill(
-                // Translators: the window title during a call, with who it
-                // is with.
+                // Translators: the window title and the call screen's name
+                // during a call, with who it is with.
                 &gettext(locale, "Call with {name}"),
                 &[("name", &name)],
             ),
-            // Translators: the window title during a call whose chat is
-            // locked, which names nobody.
+            // Translators: the window title and the call screen's name
+            // during a call whose chat is locked, which names nobody.
             None => gettext(locale, "Call in progress").into_owned(),
         },
         TitlePlace::CallLink => gettext(locale, "Call link").into_owned(),

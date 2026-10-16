@@ -1610,9 +1610,13 @@ fn editor_keys(app: &mut App, ctx: &egui::Context) {
 /// Nothing else reaches the chat drawn beneath: none of its shortcuts is
 /// taken, and a control left focused there, such as the message field, gets
 /// no keys and no text, so nothing typed during a call is sent. The screen's
-/// own focused control keeps the keys that press it.
+/// own focused control keeps the keys that press it, and Tab walks the
+/// screen's controls alone (`call::tab`).
 fn call_keys(app: &mut App, ctx: &egui::Context) {
     let menu_open = egui::Popup::is_any_open(ctx);
+    if !menu_open {
+        super::call::tab(ctx);
+    }
     let ringing = app
         .call
         .as_ref()
@@ -1663,6 +1667,11 @@ fn call_keys(app: &mut App, ctx: &egui::Context) {
         }
     }
     let on_screen = menu_open || focus_on_call_screen(ctx);
+    // A key typed for the field the ringing screen covered must not answer
+    // or refuse the call: Enter and Space on Accept and Decline wait a
+    // moment after the screen takes focus, and a key held down since then
+    // never answers.
+    let answer_waits = ringing && !menu_open && super::call::answer_waits(ctx);
     ctx.input_mut(|input| {
         input.events.retain(|event| match event {
             // There is no text to type, paste or copy on the call screen.
@@ -1671,10 +1680,17 @@ fn call_keys(app: &mut App, ctx: &egui::Context) {
             | egui::Event::Copy
             | egui::Event::Cut
             | egui::Event::Ime(_) => false,
-            // Tab still finds the screen's controls from anywhere.
             egui::Event::Key {
-                key, pressed: true, ..
-            } => *key == Key::Tab || (on_screen && call_screen_key(*key, menu_open)),
+                key,
+                pressed: true,
+                repeat,
+                ..
+            } => {
+                let answering = ringing && !menu_open && matches!(key, Key::Enter | Key::Space);
+                on_screen
+                    && call_screen_key(*key, menu_open)
+                    && !(answering && (answer_waits || *repeat))
+            }
             _ => true,
         });
     });

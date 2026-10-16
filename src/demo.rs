@@ -27320,6 +27320,233 @@ mod call_surface_tests {
         );
     }
 
+    /// One frame with `events`, then the frames that settle it; returns the
+    /// last frame's accessibility tree.
+    fn settle_with(
+        app: &mut App,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> egui::accesskit::TreeUpdate {
+        frame_with(app, ctx, events);
+        let mut tree = None;
+        for _ in 0..3 {
+            tree = super::settings_access_tests::input_frame(app, ctx, Vec::new())
+                .platform_output
+                .accesskit_update;
+        }
+        tree.expect("accessibility tree")
+    }
+
+    /// The label of the node the tree says has focus.
+    fn focused_label(tree: &egui::accesskit::TreeUpdate) -> Option<String> {
+        tree.nodes
+            .iter()
+            .find(|(id, _)| *id == tree.focus)
+            .and_then(|(_, node)| node.label().map(str::to_owned))
+    }
+
+    /// Whether egui's focused widget is on the call screen.
+    fn focus_on_the_screen(ctx: &egui::Context) -> bool {
+        let Some(focused) = ctx.memory(|memory| memory.focused()) else {
+            return false;
+        };
+        ctx.viewport(|viewport| {
+            viewport
+                .prev_pass
+                .widgets
+                .get(focused)
+                .is_some_and(|widget| widget.layer_id == crate::ui::call::layer())
+        })
+    }
+
+    /// A call that rings takes focus on Accept with a screen reader, under a
+    /// screen named for who calls; Tab reaches Decline and wraps, and never
+    /// leaves the screen.
+    #[test]
+    fn a_ringing_call_takes_focus_on_accept_and_tab_reaches_decline() {
+        let mut app = app();
+        apply_flags(&mut app, Some("call"));
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        app.attach(&ctx);
+        let tree = settle_with(&mut app, &ctx, Vec::new());
+        assert_eq!(focused_label(&tree).as_deref(), Some("Accept"));
+        let (_, screen) = tree
+            .nodes
+            .iter()
+            .find(|(_, node)| node.role() == egui::accesskit::Role::AlertDialog)
+            .expect("the ringing screen is one alert dialog");
+        assert_eq!(screen.label(), Some("Incoming call from Ada Lovelace"));
+        assert_eq!(screen.description(), Some("Incoming voice call"));
+        let shift = egui::Modifiers::SHIFT;
+        for (event, expected) in [
+            (key(egui::Key::Tab), "Decline"),
+            (key(egui::Key::Tab), "Accept"),
+            (chord(egui::Key::Tab, shift), "Decline"),
+        ] {
+            let tree = settle_with(&mut app, &ctx, vec![event]);
+            assert_eq!(focused_label(&tree).as_deref(), Some(expected));
+            assert!(focus_on_the_screen(&ctx));
+        }
+    }
+
+    /// A call placed from the keys takes focus on its screen, where Tab walks
+    /// the screen's controls alone; hanging up gives focus back to where it
+    /// was.
+    #[test]
+    fn placing_a_call_enters_the_call_screen_and_hanging_up_returns() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        app.attach(&ctx);
+        let open = app.open_chat.clone().expect("a chat is open");
+        settle_with(&mut app, &ctx, Vec::new());
+        let composer = egui::Id::new("composer-text");
+        ctx.memory_mut(|memory| memory.request_focus(composer));
+        settle_with(&mut app, &ctx, Vec::new());
+        app.actions.push(Action::StartCall(open));
+        let tree = settle_with(&mut app, &ctx, Vec::new());
+        assert_eq!(
+            focused_label(&tree).as_deref(),
+            Some("Hang up"),
+            "Mute does not apply while the call is placed"
+        );
+        let (_, screen) = tree
+            .nodes
+            .iter()
+            .find(|(_, node)| node.role() == egui::accesskit::Role::Dialog)
+            .expect("the call screen is one dialog");
+        assert_eq!(screen.label(), Some("Call with Ada Lovelace"));
+        assert_eq!(screen.description(), Some("Connecting…"));
+        let mut met = Vec::new();
+        for _ in 0..6 {
+            let tree = settle_with(&mut app, &ctx, vec![key(egui::Key::Tab)]);
+            assert!(focus_on_the_screen(&ctx), "Tab stays on the call screen");
+            met.extend(focused_label(&tree));
+        }
+        assert!(met.iter().all(|label| !label.is_empty()), "{met:?}");
+        assert!(met.contains(&"Devices".to_owned()), "{met:?}");
+        app.actions.push(Action::HangupCall);
+        settle_with(&mut app, &ctx, Vec::new());
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(composer),
+            "focus returns to the message field"
+        );
+    }
+
+    /// Focus sent beneath the call screen, such as to the message field it
+    /// covers, does not stay there: it comes back to the screen.
+    #[test]
+    fn focus_that_goes_beneath_the_call_screen_comes_back() {
+        let (mut app, ctx) = on_a_call();
+        ctx.enable_accesskit();
+        let tree = settle_with(&mut app, &ctx, Vec::new());
+        assert_eq!(focused_label(&tree).as_deref(), Some("Mute"));
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("composer-text")));
+        let tree = settle_with(&mut app, &ctx, Vec::new());
+        assert_eq!(focused_label(&tree).as_deref(), Some("Mute"));
+        assert!(focus_on_the_screen(&ctx));
+    }
+
+    /// A key typed for the message field just as a call comes up does not
+    /// answer or refuse it: focus still lands on Accept, but Enter and Space
+    /// there wait a moment after the screen takes focus, and a key held down
+    /// never answers. A fresh press after the moment does.
+    #[test]
+    fn a_key_typed_as_a_call_rings_does_not_answer_it() {
+        let mut app = app();
+        apply_flags(&mut app, Some("call"));
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        app.attach(&ctx);
+        app.backend.record_demo_commands();
+        let answers = |app: &mut App| {
+            app.backend
+                .take_demo_commands()
+                .into_iter()
+                .filter(|command| {
+                    matches!(
+                        command,
+                        crate::backend::Command::AnswerCall | crate::backend::Command::DeclineCall
+                    )
+                })
+                .count()
+        };
+        let release = |key: egui::Key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let tree = settle_with(&mut app, &ctx, Vec::new());
+        assert_eq!(focused_label(&tree).as_deref(), Some("Accept"));
+        // Typed as the screen came up: nothing answers. Space stays down.
+        frame_with(&mut app, &ctx, vec![key(egui::Key::Enter)]);
+        frame_with(&mut app, &ctx, vec![release(egui::Key::Enter)]);
+        frame_with(&mut app, &ctx, vec![key(egui::Key::Space)]);
+        assert_eq!(answers(&mut app), 0, "a key typed as it rang");
+        // Past the moment, the held Space repeating still does not answer.
+        let frames = (crate::ui::call::ANSWER_GUARD * 60.0) as usize + 2;
+        for _ in 0..frames {
+            frame_with(&mut app, &ctx, Vec::new());
+        }
+        frame_with(&mut app, &ctx, vec![key(egui::Key::Space)]);
+        assert_eq!(answers(&mut app), 0, "a held key's repeat");
+        assert_eq!(
+            app.call.as_ref().map(|call| call.phase),
+            Some(CallPhase::Incoming)
+        );
+        // A fresh press answers, as it always did.
+        frame_with(&mut app, &ctx, vec![release(egui::Key::Space)]);
+        frame_with(&mut app, &ctx, vec![key(egui::Key::Space)]);
+        assert_eq!(answers(&mut app), 1, "a fresh press answers");
+    }
+
+    /// Answering takes Accept away: focus moves on to Mute rather than being
+    /// lost.
+    #[test]
+    fn answering_keeps_focus_on_the_call_screen() {
+        let mut app = app();
+        apply_flags(&mut app, Some("call"));
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        app.attach(&ctx);
+        let tree = settle_with(&mut app, &ctx, Vec::new());
+        assert_eq!(focused_label(&tree).as_deref(), Some("Accept"));
+        let call = app.call.as_mut().expect("a call rings");
+        call.phase = CallPhase::Active;
+        call.started = Some(std::time::Instant::now());
+        let tree = settle_with(&mut app, &ctx, Vec::new());
+        assert_eq!(focused_label(&tree).as_deref(), Some("Mute"));
+    }
+
+    /// A click on a ringing call's notification brings the window up with
+    /// focus on Accept, even with no screen reader and no keyboard use.
+    #[test]
+    fn the_notification_of_a_call_brings_focus_to_accept() {
+        let mut app = app();
+        apply_flags(&mut app, Some("call"));
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        super::tests::render(&mut app, &ctx);
+        let accept = crate::ui::call::control_id(&ctx, crate::ui::call::Control::Accept)
+            .expect("Accept is drawn");
+        assert_ne!(ctx.memory(|memory| memory.focused()), Some(accept));
+        let chat = app.call.as_ref().unwrap().chat.clone();
+        app.notification_opens
+            .lock()
+            .unwrap()
+            .push(crate::notify::NotificationTarget {
+                account: app.account().id.clone(),
+                chat,
+                message: None,
+            });
+        super::tests::render(&mut app, &ctx);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(accept));
+    }
+
     /// A call that rings over the media viewer takes the keys: Escape is the
     /// call's, and the viewer it covers stays as it was.
     #[test]

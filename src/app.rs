@@ -901,6 +901,10 @@ pub struct App {
     /// leaving it never touches the call, and a call that ends puts the
     /// window back itself.
     pub call_fullscreen: bool,
+    /// Whether the call screen takes focus again in the next pass, as a
+    /// click on a call's notification brings the window up
+    /// (`ui::overlay::settle`).
+    pub call_refocus: bool,
     /// The incoming call the desktop was told about, so its notification can
     /// be taken back once it is answered or given up.
     call_notified: Option<u64>,
@@ -979,7 +983,8 @@ pub struct App {
     /// Requests received from later launches.
     control_commands: Option<std::sync::Arc<std::sync::Mutex<Vec<ControlCommand>>>>,
     /// Chats and messages from clicked notifications.
-    notification_opens: std::sync::Arc<std::sync::Mutex<Vec<crate::notify::NotificationTarget>>>,
+    pub(crate) notification_opens:
+        std::sync::Arc<std::sync::Mutex<Vec<crate::notify::NotificationTarget>>>,
     notifications: crate::notify::Notifications,
     /// Unread count on the taskbar icon, where the desktop reads it. `None`
     /// for demo and test runs, which must not touch the real taskbar.
@@ -1682,6 +1687,7 @@ impl App {
             call_devices_open: false,
             call_surface_hidden: false,
             call_fullscreen: false,
+            call_refocus: false,
             call_notified: None,
             call_rings: None,
             call_tones: Default::default(),
@@ -2403,8 +2409,11 @@ impl App {
                     message,
                 }),
                 // A call's notification brings the window up, where the call
-                // is waiting.
-                None => self.actions.push(Action::ReturnToCall),
+                // is waiting, with focus on its screen.
+                None => {
+                    self.actions.push(Action::ReturnToCall);
+                    self.call_refocus = true;
+                }
             }
             self.actions.push(Action::ShowWindow);
         }
@@ -6583,7 +6592,12 @@ impl App {
     /// overlay is active.
     pub(crate) fn refocus_composer(&mut self, ctx: &egui::Context) {
         let search_focused = ctx.memory(|memory| memory.has_focus(egui::Id::new("chat-search")));
-        if self.chat_view()
+        // The call screen covers the message field, and takes focus itself
+        // wherever focus is followed. For the pointer the field takes it as
+        // it always did, and gets no keys while covered.
+        let covered = self.call_screen_on() && crate::ui::keys::keyboard_or_reader(ctx);
+        if !covered
+            && self.chat_view()
             && self.dialog.is_none()
             && self.picker.is_none()
             && self.reaction_target.is_none()
