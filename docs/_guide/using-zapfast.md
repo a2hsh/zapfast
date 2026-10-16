@@ -501,7 +501,11 @@ microphone and speaker pickers, and hang up. Mute tells the other side, as on
 the phone. The arrow in the top corner puts the call screen aside: the call
 keeps running in a strip at the bottom of the window with **Return to the
 call** and a hang-up button, and you can read and write in any chat meanwhile.
-Escape does the same, and leaves full screen first. Only hanging up ends a
+Escape does the same, and leaves full screen first; on a call that rings it
+closes nothing and says "Incoming call: Accept or Decline". While the call
+screen is up, the window's shortcuts for chats do not reach the chat beneath
+it, and nothing typed goes into a message field left there; quitting, closing
+the window, zoom and locking ZapFast still work. Only hanging up ends a
 call; closing the window to the tray keeps it running. A call you hang up or
 decline leaves the screen at once; one the other side ends, declines, or
 misses, or one that could not connect, says so for a second and a half.

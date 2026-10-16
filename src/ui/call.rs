@@ -20,6 +20,12 @@ use crate::ui::widgets;
 
 /// The area's id, so the surface keeps its place in the layer order.
 const SURFACE: &str = "zapfast-call-surface";
+/// The layer the surface is drawn on: the keys know a control of its own by
+/// it.
+pub(crate) fn layer() -> egui::LayerId {
+    egui::LayerId::new(egui::Order::Foreground, egui::Id::new(SURFACE))
+}
+
 /// Padding between the window edge and everything the surface draws.
 const PADDING: f32 = 24.0;
 /// The round controls along the bottom.

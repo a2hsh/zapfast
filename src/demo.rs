@@ -27277,6 +27277,160 @@ mod call_surface_tests {
         );
     }
 
+    /// Whether one of the announcer's nodes says `text`.
+    fn said(app: &App, text: &str) -> bool {
+        app.announcer
+            .spoken()
+            .iter()
+            .any(|spoken| spoken.trim_end_matches('\u{200B}') == text)
+    }
+
+    /// A key press with modifiers held.
+    fn chord(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    /// Escape on a ringing call answers nothing and declines nothing, and it
+    /// does not reach the chat drawn beneath it either: the chat stays open,
+    /// and the reader is told what does answer.
+    #[test]
+    fn escape_on_a_ringing_call_leaves_the_chat_beneath_alone() {
+        let mut app = app();
+        apply_flags(&mut app, Some("call"));
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        let open = app.open_chat.clone();
+        assert!(open.is_some(), "a chat is open beneath the call");
+        frame_with(&mut app, &ctx, Vec::new());
+        frame_with(&mut app, &ctx, vec![key(egui::Key::Escape)]);
+        frame_with(&mut app, &ctx, Vec::new());
+        assert_eq!(app.open_chat, open, "the chat beneath stays open");
+        assert_eq!(app.page, Page::Chats);
+        assert!(app.call_screen_on(), "the ringing call is still there");
+        assert!(
+            said(&app, "Incoming call: Accept or Decline"),
+            "{:?}",
+            app.announcer.spoken()
+        );
+    }
+
+    /// A call that rings over the media viewer takes the keys: Escape is the
+    /// call's, and the viewer it covers stays as it was.
+    #[test]
+    fn a_ringing_call_over_the_viewer_takes_the_keys() {
+        let mut app = app();
+        apply_flags(&mut app, Some("carousel-viewer,call"));
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        frame_with(&mut app, &ctx, Vec::new());
+        assert!(app.image_preview.is_some(), "the viewer is open beneath");
+        frame_with(&mut app, &ctx, vec![key(egui::Key::Escape)]);
+        frame_with(&mut app, &ctx, Vec::new());
+        assert!(app.image_preview.is_some(), "Escape does not close it");
+        assert!(app.call_screen_on());
+        assert!(said(&app, "Incoming call: Accept or Decline"));
+    }
+
+    /// While the call screen covers the chats, the window's shortcuts leave
+    /// the chat beneath alone, and nothing typed into its message field, left
+    /// focused there, is typed or sent.
+    #[test]
+    fn the_call_screen_keeps_the_windows_keys_off_the_chat_beneath() {
+        let (mut app, ctx) = on_a_call();
+        app.backend.record_demo_commands();
+        let open = app
+            .open_chat
+            .clone()
+            .expect("a chat is open beneath the call");
+        frame_with(&mut app, &ctx, Vec::new());
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("composer-text")));
+        frame_with(&mut app, &ctx, Vec::new());
+        let command = egui::Modifiers::COMMAND;
+        let shifted = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
+        for event in [
+            chord(egui::Key::L, command),
+            chord(egui::Key::E, command),
+            chord(egui::Key::N, command),
+            chord(egui::Key::R, shifted),
+            chord(egui::Key::Num2, shifted),
+            chord(egui::Key::ArrowDown, egui::Modifiers::ALT),
+            key(egui::Key::PageUp),
+            egui::Event::Text("hi".to_owned()),
+            key(egui::Key::Enter),
+        ] {
+            frame_with(&mut app, &ctx, vec![event]);
+        }
+        frame_with(&mut app, &ctx, Vec::new());
+        assert_eq!(app.open_chat.as_ref(), Some(&open), "no other chat opens");
+        assert_eq!(app.page, Page::Chats, "the page beneath stays");
+        assert!(
+            app.chat(&open).is_some_and(|chat| !chat.archived),
+            "the chat is not archived"
+        );
+        assert!(app.dialog.is_none(), "no dialog opens beneath");
+        assert!(app.recording.is_none(), "no voice message records");
+        assert_eq!(app.composer, "", "nothing is typed into the hidden field");
+        assert!(
+            !app.backend
+                .take_demo_commands()
+                .iter()
+                .any(|command| matches!(command, crate::backend::Command::SendText { .. })),
+            "nothing is sent"
+        );
+        assert!(app.call_surface_open(), "and the call screen is still up");
+    }
+
+    /// The linking screen, which an account logged out during a call on
+    /// another one shows, draws no call screen: its keys and typing stay its
+    /// own, so a phone number can be typed to link again.
+    #[test]
+    fn the_linking_screen_keeps_its_keys_during_a_call() {
+        let (mut app, ctx) = on_a_call();
+        // The account on screen links again with a phone number.
+        apply_flags(&mut app, Some("phone"));
+        assert!(app.call.is_some() && !app.is_linked());
+        for _ in 0..3 {
+            frame_with(&mut app, &ctx, Vec::new());
+        }
+        assert!(!app.call_screen_on());
+        assert!(
+            ctx.memory(|memory| memory.focused()).is_some(),
+            "the number field has focus"
+        );
+        frame_with(&mut app, &ctx, vec![egui::Event::Text("4155550123".into())]);
+        assert_eq!(app.pair_phone, "4155550123");
+    }
+
+    /// The first Escape on the call screen puts it aside, whatever the chat
+    /// beneath was in the middle of: a reply pending there is not what the
+    /// reader sees.
+    #[test]
+    fn escape_on_the_call_screen_puts_it_aside_even_with_a_reply_pending() {
+        let (mut app, ctx) = on_a_call();
+        let open = app
+            .open_chat
+            .clone()
+            .expect("a chat is open beneath the call");
+        let message = app.conversations[&open]
+            .messages
+            .last()
+            .expect("the chat has messages")
+            .id
+            .clone();
+        app.actions.push(Action::Reply(message));
+        frame_with(&mut app, &ctx, Vec::new());
+        assert!(app.reply_to.is_some());
+        frame_with(&mut app, &ctx, vec![key(egui::Key::Escape)]);
+        assert!(app.call_surface_hidden, "the screen is put aside");
+        assert!(app.reply_to.is_some(), "and the reply beneath is kept");
+    }
+
     #[test]
     fn the_bar_brings_the_call_screen_back() {
         let (mut app, ctx) = on_a_call();

@@ -57,6 +57,16 @@ impl App {
             && !self.call_surface_hidden
     }
 
+    /// Whether the call screen covers the window: a call ringing, under way or
+    /// saying how it ended, that the reader has not put aside. The keys and
+    /// focus are the screen's then (`ui::keys`, `ui::overlay`), not the chat's
+    /// drawn beneath it. Only the chats have it over them: the linking screen,
+    /// which an account logged out during a call on another one shows, draws
+    /// no call screen and keeps its keys.
+    pub fn call_screen_on(&self) -> bool {
+        self.is_linked() && self.call.is_some() && !self.call_surface_hidden
+    }
+
     /// Whether this chat of the account on screen has the live call, which is
     /// what the chat header's call button reflects. A finished call keeps its
     /// snapshot for the farewell, but that is no call to hang up.
