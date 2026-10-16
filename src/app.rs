@@ -374,6 +374,25 @@ pub struct UnreadDivider {
     pub placed: bool,
 }
 
+/// A replied message the keys asked to go to while it was not loaded. It
+/// ends quietly as soon as the reader moves on, as Alt+3's jump does.
+#[derive(Clone)]
+struct PendingFollow {
+    chat: ChatId,
+    message: String,
+    /// The widget focused when it was asked: focus moved elsewhere ends it.
+    focus: Option<egui::Id>,
+    /// The frame it was asked in. A key or text in a later one ends it.
+    frame: u64,
+    /// Whether its own request for history toward the message is on its
+    /// way. Only that request's answer can say the message is not there.
+    asked: bool,
+    /// That answer came empty: "Replied message not found" follows. A
+    /// request that failed answers with its error instead
+    /// (`Event::HistoryUnavailable`), and ends the wait.
+    answered: bool,
+}
+
 pub struct App {
     pub dirs: AppDirs,
     pub settings: Settings,
@@ -523,8 +542,18 @@ pub struct App {
     /// The reaction picker came from a message's context menu, which stays
     /// open beside it.
     pub reaction_beside_menu: bool,
-    /// Demo/test: keep this message's context menu open.
-    pub open_message_menu: Option<String>,
+    /// One-shot: open this message's context menu, by chat and message id,
+    /// when its bubble is next drawn. Set by the message list's keys that
+    /// open it, and by demo pages; the menu then stays open until it is
+    /// closed. A chat or page change drops a request not yet drawn.
+    pub open_message_menu: Option<(ChatId, String)>,
+    /// One-shot, as `open_message_menu`: open the menu of a phone number in
+    /// a message, by chat, message id and the number's `tel:` address. Set
+    /// by Space on the number in the message list.
+    pub open_phone_menu: Option<(ChatId, String, String)>,
+    /// The reaction picker came from the message list's E: closing it
+    /// returns focus to the list.
+    pub reaction_from_list: bool,
     /// Demo/test: keep this chat row's context menu open.
     #[cfg(any(test, feature = "demo"))]
     pub open_chat_menu: Option<ChatId>,
@@ -550,6 +579,19 @@ pub struct App {
     video_chat: Option<ChatId>,
     /// Video to play once its download finishes.
     video_wanted: Option<(ChatId, String)>,
+    /// The attachment whose download Space asked for, with the carousel
+    /// card it belongs to, if any: if it fails, the failure is spoken.
+    /// Downloads that start by themselves, or from a click, fail in the
+    /// bubble only, so a scroll through media on a poor connection does not
+    /// speak a run of errors.
+    pub(crate) download_heard: Option<(ChatId, String, Option<usize>)>,
+    /// The focused message's item cursor: which of its links, cards or file
+    /// the keys act on. It belongs to that message only; any other message
+    /// starts on its first item. Never drawn.
+    pub(crate) message_item: Option<(ChatId, String, usize, crate::a11y::KeyTarget)>,
+    /// The replied message the keys asked to go to while it was not loaded:
+    /// the list moves to it once history brings it, and stays put until then.
+    pending_follow: Option<PendingFollow>,
     /// Chat whose voice messages carry on into the next unheard one when a
     /// clip ends. Leaving the chat, or playing a video, ends the run.
     voice_chat: Option<ChatId>,
@@ -607,6 +649,11 @@ pub struct App {
     /// overtaken by a cancellation or by another picture, and opening the
     /// cropper on it would take the window off whoever has it now.
     pub picture_inspecting: Option<AttachmentId>,
+    /// Whether the cropper asked for follows focus: asked for from the keys
+    /// or with a screen reader, as `ui::overlay::followed` says at the time
+    /// of asking. A file opens the cropper only once its size is read, in a
+    /// later frame that no longer knows how it was asked for.
+    pub picture_edit_followed: Option<bool>,
     /// Where the picture being written came from, by the attachment it will
     /// replace, so two edits in flight cannot swap their origins.
     pub picture_applying: std::collections::HashMap<AttachmentId, crate::model::PictureOrigin>,
@@ -1238,6 +1285,14 @@ impl App {
             ..AccountRoster::default()
         };
         let app = Self::with_accounts(dirs, settings, roster, vec![account], 0, Waker::default());
+        // Tests never make a sound, nor open the sound device a test machine
+        // may lack: voice messages play silently there.
+        #[cfg(test)]
+        let app = {
+            let mut app = app;
+            app.player.silence();
+            app
+        };
         (app, events)
     }
 
@@ -1379,6 +1434,8 @@ impl App {
             reaction_anchor: None,
             reaction_beside_menu: false,
             open_message_menu: None,
+            open_phone_menu: None,
+            reaction_from_list: false,
             #[cfg(any(test, feature = "demo"))]
             open_chat_menu: None,
             #[cfg(any(test, feature = "demo"))]
@@ -1393,6 +1450,9 @@ impl App {
             video: crate::video::Player::new(waker.clone()),
             video_chat: None,
             video_wanted: None,
+            download_heard: None,
+            message_item: None,
+            pending_follow: None,
             voice_chat: None,
             voice_wanted: None,
             recording: None,
@@ -1420,6 +1480,7 @@ impl App {
             sticker_draft: None,
             picture_edit: None,
             picture_inspecting: None,
+            picture_edit_followed: None,
             picture_applying: Default::default(),
             picture_origins: Default::default(),
             picture_texture: None,
@@ -1731,6 +1792,17 @@ impl App {
         // The newest message the keys followed goes with it.
         self.message_cursor.clear();
         self.cursor_followed = None;
+        // So was a message menu asked for and not drawn yet.
+        self.open_message_menu = None;
+        self.open_phone_menu = None;
+        // A reaction picker the message list opened belongs to the chat
+        // left behind.
+        self.reaction_from_list = false;
+        // So do the keys' item cursor, the download Space asked for and a
+        // replied message still loading, as on a chat change.
+        self.message_item = None;
+        self.download_heard = None;
+        self.pending_follow = None;
     }
 
     fn add_account(&mut self) {
@@ -3312,6 +3384,7 @@ impl App {
                 }
                 let conversation = self.conversations.entry(chat.clone()).or_default();
                 let was_empty = conversation.messages.is_empty();
+                let messages_empty = messages.is_empty();
                 if older && !messages.is_empty() {
                     conversation.phone_delivered = true;
                 }
@@ -3327,6 +3400,11 @@ impl App {
                 // A message that arrives while the viewer is open joins its album.
                 if !older {
                     self.refresh_viewer_album(&chat);
+                }
+                // A replied message the keys wait for is in the chat on
+                // screen; another account's chat of the same id is not it.
+                if live && older {
+                    self.settle_pending_follow(&chat, messages_empty, complete);
                 }
                 if live && self.open_chat.as_deref() == Some(chat.as_str()) {
                     if !older && (self.at_bottom || was_empty) {
@@ -4096,6 +4174,30 @@ impl App {
                     _ => message,
                 };
                 self.toast_error(shown);
+            }
+            Event::HistoryUnavailable { chat, error } => {
+                // The replied message's own request, asked before this
+                // answer came, failed: its wait ends, and the error alone is
+                // said. Another request's answer leaves the wait as an empty
+                // page does.
+                let answer = live
+                    && self
+                        .pending_follow
+                        .as_ref()
+                        .is_some_and(|pending| pending.chat == chat && pending.asked);
+                self.apply_backend_event(
+                    Event::Messages {
+                        chat,
+                        messages: Vec::new(),
+                        older: true,
+                        complete: false,
+                    },
+                    live,
+                );
+                if answer {
+                    self.pending_follow = None;
+                }
+                self.apply_backend_event(Event::Error(error), live);
             }
             Event::AccountRemoved => {}
         }
@@ -4889,6 +4991,73 @@ impl App {
         });
     }
 
+    /// The viewer's name for item `index` of `album`, from `chat`: "Photo 3
+    /// of 12", who sent it, when, and its caption, as `a11y::ViewerItem`
+    /// says them. A message the transcript holds names its mentions too.
+    pub(crate) fn viewer_item_label(
+        &self,
+        chat: &str,
+        album: &[crate::model::MediaItem],
+        index: usize,
+    ) -> Option<String> {
+        let item = album.get(index)?;
+        let about = &item.about;
+        let loaded = self
+            .conversations
+            .get(chat)
+            .and_then(|conversation| conversation.message(&item.id));
+        let sender = if about.from_me {
+            crate::i18n::gettext(self.locale, "You").into_owned()
+        } else if about.sender.is_empty() {
+            String::new()
+        } else {
+            self.display_name_or(&about.sender, about.sender_name.as_deref())
+        };
+        let mentions: Vec<crate::markup::Mention> = loaded
+            .map(|message| {
+                message
+                    .mentions
+                    .iter()
+                    .map(|mention| crate::markup::Mention {
+                        user: mention.user.clone(),
+                        name: self.mention_name(&mention.id),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let caption = about
+            .caption
+            .as_deref()
+            .map(|caption| crate::markup::plain(caption, &mentions))
+            .unwrap_or_default();
+        Some(crate::a11y::viewer_item_label(
+            self.locale,
+            &crate::a11y::ViewerItem {
+                video: item.video,
+                position: index + 1,
+                total: album.len(),
+                sender: &sender,
+                day: &crate::util::day_label(self.locale, item.timestamp),
+                time: &crate::util::clock(item.timestamp),
+                caption: &caption,
+            },
+        ))
+    }
+
+    /// Says the viewer's item, as the arrows or the strip moved to it, or as
+    /// the arrows found the end of the album.
+    fn say_viewer_item(&mut self) {
+        let Some(preview) = self.image_preview.as_ref() else {
+            return;
+        };
+        let Some(index) = preview.position(&self.viewer_media) else {
+            return;
+        };
+        if let Some(text) = self.viewer_item_label(preview.chat(), &self.viewer_media, index) {
+            self.announcer.say(crate::announcer::Category::Item, text);
+        }
+    }
+
     /// Drops a message from the viewer's album and from its download
     /// state, for a message deleted while the viewer is open.
     fn forget_viewer_item(&mut self, chat: &str, id: &str) {
@@ -4949,12 +5118,22 @@ impl App {
                         preview.show_item(Some(path.clone()), id.to_owned());
                     }
                     self.viewer_media_state.remove(id);
+                    // Nothing is said: the picture takes the download button's
+                    // focus as it is drawn, and a clip's frame keeps its own.
+                    self.take_download_heard(chat, id, None);
                 }
                 Err(error) => {
-                    self.viewer_media_state.insert(
-                        id.to_owned(),
-                        MediaState::Failed(download_notice(error.clone())),
-                    );
+                    let failed = MediaState::Failed(download_notice(error.clone()));
+                    // Asked for in the viewer from the keys or with a screen
+                    // reader: why it failed is said, as for Space or Enter in
+                    // the list. The transcript's copy below then says nothing
+                    // more.
+                    if self.take_download_heard(chat, id, None)
+                        && let Some(said) = crate::a11y::download_state(self.locale, &failed)
+                    {
+                        self.announcer.say(crate::announcer::Category::Error, said);
+                    }
+                    self.viewer_media_state.insert(id.to_owned(), failed);
                 }
             }
         }
@@ -5005,6 +5184,10 @@ impl App {
         };
         match applied {
             Ok(path) => {
+                // The download Space asked for is the account on screen's.
+                if !self.events_hidden {
+                    self.take_download_heard(chat, id, card);
+                }
                 if want_video {
                     self.video_wanted = None;
                     self.actions.push(Action::PlayVideo {
@@ -5025,8 +5208,91 @@ impl App {
                 if want_voice {
                     self.voice_wanted = None;
                 }
+                if !self.events_hidden {
+                    self.say_download_failed(chat, id, card);
+                }
             }
         }
+    }
+
+    /// Speaks why the download Space asked for failed, in the words the
+    /// message's label ends with, and forgets it. Other downloads fail
+    /// silently: their bubble and label carry the reason.
+    fn say_download_failed(&mut self, chat: &str, id: &str, card: Option<usize>) {
+        if !self.take_download_heard(chat, id, card) {
+            return;
+        }
+        let Some(message) = self
+            .conversations
+            .get(chat)
+            .and_then(|conversation| conversation.message(id))
+        else {
+            return;
+        };
+        let media = match (card, &message.content) {
+            (None, content) => content.media(),
+            (
+                Some(index),
+                Content::Interactive {
+                    card: Some(parent), ..
+                },
+            ) => parent
+                .carousel
+                .get(index)
+                .and_then(|card| card.image.as_ref()),
+            _ => None,
+        };
+        let Some(error) =
+            media.and_then(|media| crate::a11y::media_state(self.locale, media, false))
+        else {
+            return;
+        };
+        // Said away from its message, the error names what failed.
+        let current = self.open_chat.as_deref() == Some(chat)
+            && self.current_message(chat).as_deref() == Some(id);
+        let text = if current {
+            error
+        } else {
+            let what = match (card, &message.content) {
+                (Some(index), _) => crate::a11y::fill(
+                    &crate::i18n::gettext(self.locale, "Card {number}"),
+                    &[("number", &(index + 1).to_string())],
+                ),
+                (None, Content::Document { file_name, .. }) => file_name.clone(),
+                (None, content) => crate::a11y::file_kind(self.locale, content),
+            };
+            crate::a11y::fill(
+                &crate::i18n::gettext(self.locale, "{what}: {error}"),
+                &[("what", &what), ("error", &error)],
+            )
+        };
+        self.announcer.say(crate::announcer::Category::Error, text);
+    }
+
+    /// The message list's current message in `chat`: the cursor's, or the
+    /// newest, as the list resolves it.
+    fn current_message(&self, chat: &str) -> Option<String> {
+        let messages = &self.conversations.get(chat)?.messages;
+        self.message_cursor
+            .get(chat)
+            .filter(|id| messages.iter().any(|message| &message.id == *id))
+            .cloned()
+            .or_else(|| messages.last().map(|message| message.id.clone()))
+    }
+
+    /// Whether the download of `id` in `chat` (and `card`) is the one Space
+    /// asked for, which it then no longer is.
+    fn take_download_heard(&mut self, chat: &str, id: &str, card: Option<usize>) -> bool {
+        let heard = self
+            .download_heard
+            .as_ref()
+            .is_some_and(|(heard_chat, heard, heard_card)| {
+                heard_chat == chat && heard == id && *heard_card == card
+            });
+        if heard {
+            self.download_heard = None;
+        }
+        heard
     }
 
     fn ensure_loaded(&mut self, chat: &str) {
@@ -5242,6 +5508,10 @@ impl App {
         if self.open_chat.as_deref() != Some(id.as_str()) {
             self.reaction_target = None;
             self.reaction_anchor = None;
+            self.reaction_from_list = false;
+            // A menu asked for in the chat being left is not opened later.
+            self.open_message_menu = None;
+            self.open_phone_menu = None;
             self.composer_tools_open = false;
             self.emoji_jump = None;
             self.jump_highlight = None;
@@ -5297,6 +5567,11 @@ impl App {
             // A run of voice messages belongs to the chat it started in.
             self.voice_chat = None;
             self.voice_wanted = None;
+            // So do the download Space asked for, the item cursor and a
+            // replied message still loading.
+            self.download_heard = None;
+            self.message_item = None;
+            self.pending_follow = None;
             // A page request belongs to the chat it was pressed in.
             self.scroll_page = None;
             if let Some(conversation) = self.conversations.get_mut(&id) {
@@ -6065,6 +6340,18 @@ impl App {
 
     /// Applies one model action after drawing the views, respecting the app lock and account state.
     fn apply(&mut self, action: Action, ctx: &egui::Context) {
+        let selecting = self.selection.as_ref().map(|(chat, _)| chat.clone());
+        self.apply_one(action, ctx);
+        // A selection draws no message menus: one asked for and not drawn
+        // yet is dropped as a selection starts or ends, rather than opened
+        // over the selection's check boxes or after it.
+        if self.selection.as_ref().map(|(chat, _)| chat) != selecting.as_ref() {
+            self.open_message_menu = None;
+            self.open_phone_menu = None;
+        }
+    }
+
+    fn apply_one(&mut self, action: Action, ctx: &egui::Context) {
         if self.app_lock.is_locked() && !allowed_while_locked(&action) {
             // A clicked notification opens its message once unlocked, and a
             // link opens the chat it named; the rest would show or change
@@ -6177,6 +6464,12 @@ impl App {
                 }
                 if matches!(self.dialog, Some(Dialog::NewContact)) {
                     self.cancel_contact_dialog_request();
+                }
+                if self.page != page {
+                    // A menu asked for on the page being left is not opened
+                    // later.
+                    self.open_message_menu = None;
+                    self.open_phone_menu = None;
                 }
                 self.page = page;
                 self.dialog = None;
@@ -6357,6 +6650,8 @@ impl App {
                 // A narrow window's Back from a picked call returns to the
                 // call history.
                 self.picked_call = None;
+                self.open_message_menu = None;
+                self.open_phone_menu = None;
                 if let Some(chat) = self.open_chat.take() {
                     self.save_attachment_draft(&chat);
                     self.stop_composing(&chat);
@@ -6612,9 +6907,15 @@ impl App {
                     self.dialog = None;
                     self.picker = None;
                     // As for the image preview: the composer must not take
-                    // Enter in the frame before the modal is known.
+                    // Enter in the frame before the modal is known, and
+                    // anything else keeps focus until the card takes it when
+                    // the keys or a screen reader opened it.
+                    let composer = crate::ui::conversation::composer_id();
+                    let followed = crate::ui::overlay::followed(ctx);
                     ctx.memory_mut(|memory| {
-                        if let Some(focused) = memory.focused() {
+                        if let Some(focused) = memory.focused()
+                            && (focused == composer || !followed)
+                        {
                             memory.surrender_focus(focused);
                         }
                     });
@@ -6664,6 +6965,8 @@ impl App {
                 if let Some(preview) = &mut self.image_preview {
                     preview.show_album_item(path, item.id.clone(), item.card);
                 }
+                // Its tile keeps focus: the item it shows now is said.
+                self.say_viewer_item();
             }
             Action::ViewerStep(step) => {
                 let Some(preview) = self.image_preview.as_ref() else {
@@ -6681,11 +6984,13 @@ impl App {
                 let Some(index) = preview.position(&self.viewer_media) else {
                     return;
                 };
-                // Stepping stops at either end of the album, as it always has.
+                // Stepping stops at either end of the album, as it always has,
+                // and says the end item again, as the message list's keys do.
                 let Some(next) = index
                     .checked_add_signed(isize::from(step))
                     .filter(|next| *next < self.viewer_media.len())
                 else {
+                    self.say_viewer_item();
                     return;
                 };
                 let item = self.viewer_media[next].clone();
@@ -6699,6 +7004,8 @@ impl App {
                 if let Some(preview) = &mut self.image_preview {
                     preview.show_album_item(path, item.id.clone(), item.card);
                 }
+                // Focus stays where it was: the new item is said.
+                self.say_viewer_item();
             }
             Action::OpenFile(path) => {
                 if crate::safety::can_open_attachment(&path) && path.is_file() {
@@ -7127,6 +7434,7 @@ impl App {
             Action::EditPicture(target) => {
                 // Whatever was being waited for is not what is wanted now.
                 self.picture_inspecting = None;
+                self.picture_edit_followed = Some(crate::ui::overlay::followed(ctx));
                 // Read out before anything is written back, so the borrow of
                 // the strip ends here.
                 let pasted = match self.staged_at(target) {
@@ -7233,6 +7541,13 @@ impl App {
                     self.toast_error(error);
                 }
             }
+            // Only a clip that is already loaded moves, so the one sound
+            // playing, and the run it belongs to, are already this one.
+            Action::JumpVoice { message, fraction } => {
+                if let Err(error) = self.player.jump(&message, fraction) {
+                    self.toast_error(error);
+                }
+            }
             Action::SetVoiceSpeed(speed) => {
                 self.settings.voice_speed = self.player.set_speed(speed);
                 self.mark_settings_dirty();
@@ -7322,6 +7637,7 @@ impl App {
                 self.reaction_target = None;
                 self.reaction_anchor = None;
                 self.emoji_jump = None;
+                self.return_from_reaction_picker(was_reaction);
                 if !was_reaction {
                     self.refocus_composer(ctx);
                 }
@@ -7330,7 +7646,9 @@ impl App {
                 chat,
                 message,
                 beside_menu,
+                from_list,
             } => {
+                self.reaction_from_list = from_list;
                 self.focus_composer = false;
                 self.emoji_start = None;
                 self.mention_start = None;
@@ -7576,6 +7894,9 @@ impl App {
                 message,
                 emoji,
             } => {
+                // Only a reaction chosen in the open picker hands focus back
+                // to the list that opened it.
+                let picker_open = self.reaction_target.is_some();
                 if !emoji.is_empty() {
                     let count = self
                         .settings
@@ -7601,6 +7922,7 @@ impl App {
                 );
                 self.reaction_target = None;
                 self.reaction_anchor = None;
+                self.return_from_reaction_picker(picker_open);
                 self.backend.send(Command::React {
                     chat,
                     message,
@@ -7999,6 +8321,14 @@ impl App {
                 };
                 let id = messages[starts[row]].id.clone();
                 let newest = row + 1 == starts.len();
+                // The reader moved: a replied message still loading does not
+                // take the list back later.
+                self.pending_follow = None;
+                // Another message starts on its first item; the same one,
+                // where the list stood without a cursor of its own, does not.
+                if current.map(|current| &messages[starts[current]].id) != Some(&id) {
+                    self.message_item = None;
+                }
                 self.message_cursor.insert(chat.clone(), id);
                 self.reveal_cursor = true;
                 // Home on the oldest loaded message asks for older ones, as
@@ -8014,6 +8344,24 @@ impl App {
                     self.cursor_followed = None;
                 }
             }
+            Action::OpenMessageMenu(id) => {
+                // The bubble opens its menu when it is next drawn; the
+                // current message is brought into view so that it is.
+                if let Some(chat) = self.open_chat.clone() {
+                    self.open_message_menu = Some((chat, id));
+                    self.reveal_cursor = true;
+                }
+            }
+            Action::MessageMenuOpened => self.open_message_menu = None,
+            Action::OpenPhoneMenu { message, url } => {
+                // As `OpenMessageMenu`: the number's message opens the menu
+                // when it is next drawn, brought into view so that it is.
+                if let Some(chat) = self.open_chat.clone() {
+                    self.open_phone_menu = Some((chat, message, url));
+                    self.reveal_cursor = true;
+                }
+            }
+            Action::PhoneMenuOpened => self.open_phone_menu = None,
             Action::FocusMessages => {
                 if self.current_chat().is_some() {
                     // The Calls tab keeps its history beside the chat, as
@@ -8045,31 +8393,32 @@ impl App {
                 }
             }
             Action::ScrollTo(id) => {
-                self.scroll_to_bottom = false;
+                self.scroll_to_message(id, true);
+            }
+            Action::GoToReplied(id) => {
                 let Some(chat) = self.open_chat.clone() else {
                     return;
                 };
-                let load = {
-                    let conversation = self.conversations.entry(chat.clone()).or_default();
-                    if conversation.message(&id).is_none() && !conversation.loading_older {
-                        conversation.messages.first().map(|oldest| {
-                            conversation.loading_older = true;
-                            (oldest.timestamp, oldest.id.clone())
-                        })
-                    } else {
-                        None
-                    }
-                };
-                if let Some(before) = load {
-                    self.backend.send(Command::LoadUntil {
-                        chat: chat.clone(),
-                        id: id.clone(),
-                        before,
+                let loaded = self
+                    .conversations
+                    .get(&chat)
+                    .is_some_and(|conversation| conversation.message(&id).is_some());
+                // Not loaded yet: the list keeps its place, rather than fall
+                // back to the newest message, and moves once the replied
+                // message arrives.
+                let asked = self.scroll_to_message(id.clone(), loaded);
+                if !loaded {
+                    self.pending_follow = Some(PendingFollow {
+                        chat,
+                        message: id,
+                        focus: ctx.memory(|memory| memory.focused()),
+                        frame: ctx.cumulative_frame_nr(),
+                        asked,
+                        answered: false,
                     });
+                    let text = crate::i18n::gettext(self.locale, "Loading the replied message");
+                    self.announcer.say(crate::announcer::Category::Status, text);
                 }
-                self.follow_message(&chat, &id);
-                self.jump_highlight = Some(JumpHighlight::new(chat, id.clone()));
-                self.scroll_anchor = Some(id);
             }
             Action::Search(text) => {
                 self.search = text;
@@ -8660,6 +9009,8 @@ impl App {
         let wallpaper = self.account().settings.wallpaper_image.clone();
         self.wallpaper_image.sync(wallpaper.as_deref(), &self.waker);
         self.handle_notification_opens();
+        // Before this frame's pages: a reader who moved on ends the wait.
+        self.end_pending_follow(ctx);
         self.handle_events();
         for uri in std::mem::take(&mut self.stale_images) {
             crate::image_cache::forget(ctx, &uri);
@@ -8775,6 +9126,10 @@ impl App {
         self.voice_chat = None;
         self.voice_wanted = None;
         self.video_wanted = None;
+        // A failure is never spoken over the lock screen, nor a replied
+        // message found.
+        self.download_heard = None;
+        self.pending_follow = None;
         self.dropping = false;
         self.notifications.clear_all();
         self.clear_chat_lock_entry();
@@ -9059,9 +9414,16 @@ impl App {
         self.picker = None;
         // egui drops the focus of widgets behind a modal only from the frame
         // after it first shows; until then a focused composer would still
-        // take Enter and send the draft.
+        // take Enter and send the draft. Opened from the keys or for a screen
+        // reader, anything else keeps focus until the viewer takes it, in the
+        // pass that shows it (`ui::overlay`): let go now, focus would be on
+        // the window meanwhile.
+        let composer = crate::ui::conversation::composer_id();
+        let followed = crate::ui::overlay::followed(ctx);
         ctx.memory_mut(|memory| {
-            if let Some(focused) = memory.focused() {
+            if let Some(focused) = memory.focused()
+                && (focused == composer || !followed)
+            {
                 memory.surrender_focus(focused);
             }
         });
@@ -9219,11 +9581,161 @@ impl App {
             .map(|message| message.id.clone())
     }
 
+    /// A reaction picker opened by the message list's E hands focus back to
+    /// the list as it closes, by Escape or a chosen emoji: egui's Escape has
+    /// already cleared focus, and nothing else would take it. `picker_open`
+    /// says the picker was still open: one closed another way (the emoji tab,
+    /// the composer tools, a cleared chat) leaves the flag behind, and a
+    /// later reaction from a chip or the menu's row is not the picker's.
+    /// The flag is dropped either way.
+    fn return_from_reaction_picker(&mut self, picker_open: bool) {
+        if std::mem::take(&mut self.reaction_from_list) && picker_open {
+            self.focus_composer = false;
+            self.focus_messages = true;
+        }
+    }
+
+    /// Scrolls the open chat to message `id`, loading older history toward it
+    /// when it is not loaded; `follow` also makes it the list's current one.
+    /// Returns whether it asked for that history.
+    fn scroll_to_message(&mut self, id: String, follow: bool) -> bool {
+        self.scroll_to_bottom = false;
+        let Some(chat) = self.open_chat.clone() else {
+            return false;
+        };
+        let asked = self.load_until(&chat, &id);
+        if follow {
+            self.follow_message(&chat, &id);
+        }
+        self.jump_highlight = Some(JumpHighlight::new(chat, id.clone()));
+        self.scroll_anchor = Some(id);
+        asked
+    }
+
+    /// Asks for older archive pages down to message `id` when it is not
+    /// loaded and no older page is already on its way. Returns whether it
+    /// asked.
+    fn load_until(&mut self, chat: &str, id: &str) -> bool {
+        // Load older archive pages toward the target.
+        let load = {
+            let conversation = self.conversations.entry(chat.to_owned()).or_default();
+            if conversation.message(id).is_none() && !conversation.loading_older {
+                conversation.messages.first().map(|oldest| {
+                    conversation.loading_older = true;
+                    (oldest.timestamp, oldest.id.clone())
+                })
+            } else {
+                None
+            }
+        };
+        let Some(before) = load else {
+            return false;
+        };
+        self.backend.send(Command::LoadUntil {
+            chat: chat.to_owned(),
+            id: id.to_owned(),
+            before,
+        });
+        true
+    }
+
+    /// An older page arrived in `chat`: the replied message the keys wait for
+    /// is followed once it is there. Another page (one already on its way when
+    /// G was pressed, or the phone's) only lets the wait ask for its own; the
+    /// answer to its own request is the one that can say the message is not
+    /// there, as can a `complete` page, after which there is no older history
+    /// to bring it.
+    fn settle_pending_follow(&mut self, chat: &str, empty: bool, complete: bool) {
+        let Some(mut pending) = self.pending_follow.clone() else {
+            return;
+        };
+        if pending.chat != chat {
+            return;
+        }
+        let found = self
+            .conversations
+            .get(chat)
+            .is_some_and(|conversation| conversation.message(&pending.message).is_some());
+        if found {
+            self.pending_follow = None;
+            self.follow_message(chat, &pending.message);
+        } else if complete {
+            // The chat's history is all here, and the message is not in it.
+            self.pending_follow = None;
+            let text = crate::i18n::gettext(self.locale, "Replied message not found");
+            self.announcer.say(crate::announcer::Category::Status, text);
+        } else if !pending.asked {
+            pending.asked = self.load_until(chat, &pending.message);
+            self.pending_follow = Some(pending);
+        } else if empty {
+            // Its own request found nothing more toward it: once this
+            // frame's events are in, `end_pending_follow` says the message
+            // is not found. A request that failed says why instead
+            // (`Event::HistoryUnavailable`).
+            pending.answered = true;
+            self.pending_follow = Some(pending);
+        }
+    }
+
+    /// Ends the replied message's wait quietly once the reader moved on: to
+    /// another chat, to another widget, behind the lock, or with a key or
+    /// text after the one that asked. A key held down is not a new one: its
+    /// repeats, and the text they type, leave the wait alone. An answer that
+    /// came empty says the message is not there.
+    fn end_pending_follow(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_follow.as_ref() else {
+            return;
+        };
+        let typed = ctx.cumulative_frame_nr() > pending.frame
+            && ctx.input(|input| {
+                let events = &input.raw.events;
+                let held = events.iter().any(|event| {
+                    matches!(
+                        event,
+                        egui::Event::Key {
+                            pressed: true,
+                            repeat: true,
+                            ..
+                        }
+                    )
+                });
+                events.iter().any(|event| match event {
+                    egui::Event::Key {
+                        pressed: true,
+                        repeat,
+                        ..
+                    } => !repeat,
+                    egui::Event::Text(_) => !held,
+                    egui::Event::Paste(_) => true,
+                    _ => false,
+                })
+            });
+        let moved_on = self.open_chat.as_deref() != Some(pending.chat.as_str())
+            || ctx.memory(|memory| memory.focused()) != pending.focus
+            || self.app_lock.is_locked()
+            || typed;
+        let answered = pending.answered;
+        if moved_on {
+            self.pending_follow = None;
+        } else if answered {
+            self.pending_follow = None;
+            let text = crate::i18n::gettext(self.locale, "Replied message not found");
+            self.announcer.say(crate::announcer::Category::Status, text);
+        }
+    }
+
     /// Makes `message` the current one in `chat`'s message list, where the
     /// app just took the reader on its own (the next voice message, a quote,
     /// a search result), so the list and the view agree. A focused list also
     /// scrolls it into view.
     pub fn follow_message(&mut self, chat: &str, message: &str) {
+        // The reader went somewhere: a replied message still loading does
+        // not take the list back later.
+        self.pending_follow = None;
+        // Another message starts on its first item.
+        if self.message_cursor.get(chat).map(String::as_str) != Some(message) {
+            self.message_item = None;
+        }
         self.message_cursor
             .insert(chat.to_owned(), message.to_owned());
         if self.messages_focused && self.open_chat.as_deref() == Some(chat) {
@@ -9395,6 +9907,7 @@ impl App {
         }
         crate::ui::show(self, ui);
         self.apply_actions(ctx);
+        crate::ui::overlay::settle(self, ctx);
         // The old colours, if a change is being revealed, go over everything.
         self.theme_transition.paint(ctx);
         // Release the image caches of everything that scrolled away.
@@ -11509,6 +12022,145 @@ mod tests {
         assert!(!app.focus_messages);
     }
 
+    /// A reaction picker the message list opened is not handed back to the
+    /// list of another account's chat.
+    #[test]
+    fn switching_accounts_forgets_the_lists_reaction_picker() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _commands) = two_accounts(directory.path());
+        let ctx = egui::Context::default();
+        app.reaction_from_list = true;
+        app.apply(Action::SwitchAccount(AccountId::parse("2").unwrap()), &ctx);
+        assert!(!app.reaction_from_list);
+    }
+
+    /// A reaction picker the list opened and something else closed (the
+    /// emoji tab, the composer tools, the chat cleared on the phone) has no
+    /// claim on focus: a later reaction from a chip leaves focus alone.
+    #[test]
+    fn a_reaction_after_the_lists_picker_closed_elsewhere_leaves_focus_alone() {
+        let chat = "peer@s.whatsapp.net";
+        for close in ["emoji tab", "composer tools", "chat cleared"] {
+            let directory = tempfile::tempdir().unwrap();
+            let (mut app, _events) =
+                App::headless(AppDirs::under(directory.path()), Settings::default());
+            app.chats.push(Chat::new(chat.into(), "Peer".into()));
+            app.conversations.entry(chat.into()).or_default().merge(
+                vec![message(chat, "m1", 100), message(chat, "m2", 200)],
+                false,
+            );
+            app.open_chat = Some(chat.into());
+            let ctx = egui::Context::default();
+            app.apply(
+                crate::ui::conversation::open_reaction_picker_action(chat, "m1", true),
+                &ctx,
+            );
+            assert!(app.reaction_target.is_some() && app.reaction_from_list);
+            match close {
+                "emoji tab" => app.apply(Action::TogglePicker(PickerTab::Emoji), &ctx),
+                "composer tools" => app.apply(Action::SetComposerTools(true), &ctx),
+                _ => app.handle_chat_cleared(chat, 100, true),
+            }
+            assert_eq!(app.reaction_target, None, "{close} closes the picker");
+            app.focus_messages = false;
+            app.apply(
+                Action::React {
+                    chat: chat.into(),
+                    message: "m2".into(),
+                    emoji: "👍".into(),
+                },
+                &ctx,
+            );
+            assert!(
+                !app.focus_messages,
+                "after the {close}, a chip's reaction does not move focus to the list"
+            );
+            assert!(!app.reaction_from_list, "{close}: the flag is gone");
+        }
+    }
+
+    /// A message menu asked for and not drawn yet is not opened on another
+    /// account's chat.
+    #[test]
+    fn switching_accounts_drops_a_pending_message_menu() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _commands) = two_accounts(directory.path());
+        let ctx = egui::Context::default();
+        app.open_message_menu = Some(("15550007777@s.whatsapp.net".into(), "m".into()));
+        app.open_phone_menu = Some((
+            "15550007777@s.whatsapp.net".into(),
+            "m".into(),
+            "tel:0501234567".into(),
+        ));
+        app.apply(Action::SwitchAccount(AccountId::parse("2").unwrap()), &ctx);
+        assert!(app.open_message_menu.is_none());
+        assert!(app.open_phone_menu.is_none(), "nor a phone number's menu");
+    }
+
+    /// A selection draws no message menus: a menu asked for and not drawn
+    /// yet, the message's or a phone number's, is dropped as a selection
+    /// starts and as it ends, rather than opened after it.
+    #[test]
+    fn starting_or_ending_a_selection_drops_a_pending_menu() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        let chat = "1@s.whatsapp.net";
+        app.chats = vec![Chat::new(chat.into(), "Ada".into())];
+        app.open_chat = Some(chat.into());
+        app.conversations
+            .entry(chat.into())
+            .or_default()
+            .merge(vec![message(chat, "first", 1)], false);
+        let ask = |app: &mut App| {
+            app.open_message_menu = Some((chat.into(), "first".into()));
+            app.open_phone_menu = Some((chat.into(), "first".into(), "tel:0501234567".into()));
+        };
+        let dropped = |app: &App| app.open_message_menu.is_none() && app.open_phone_menu.is_none();
+        ask(&mut app);
+        app.apply(Action::StartSelection, &ctx);
+        assert!(dropped(&app), "started");
+        ask(&mut app);
+        app.apply(Action::CancelSelection, &ctx);
+        assert!(dropped(&app), "cancelled");
+        ask(&mut app);
+        app.apply(Action::SelectMessage("first".into()), &ctx);
+        assert!(dropped(&app), "started on a message");
+        ask(&mut app);
+        app.apply(Action::ToggleSelected("first".into()), &ctx);
+        assert!(!dropped(&app), "a change within the selection is neither");
+        app.apply(Action::CancelSelection, &ctx);
+        assert!(dropped(&app), "ended");
+    }
+
+    /// The keys' item cursor, a download waiting to be spoken and a replied
+    /// message still loading end with their account, as with their chat.
+    #[test]
+    fn switching_accounts_ends_the_keys_waits_and_item() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _commands) = two_accounts(directory.path());
+        let ctx = egui::Context::default();
+        let chat: ChatId = "15550007777@s.whatsapp.net".into();
+        app.message_item = Some((
+            chat.clone(),
+            "item".into(),
+            1,
+            crate::a11y::KeyTarget::Attachment,
+        ));
+        app.download_heard = Some((chat.clone(), "file".into(), None));
+        app.pending_follow = Some(PendingFollow {
+            chat,
+            message: "quoted".into(),
+            focus: None,
+            frame: 0,
+            asked: true,
+            answered: false,
+        });
+        app.apply(Action::SwitchAccount(AccountId::parse("2").unwrap()), &ctx);
+        assert!(app.message_item.is_none());
+        assert!(app.download_heard.is_none());
+        assert!(app.pending_follow.is_none());
+    }
+
     #[test]
     fn leaving_an_account_before_it_is_linked_removes_it() {
         let directory = tempfile::tempdir().unwrap();
@@ -13360,6 +14012,7 @@ mod tests {
                 video: false,
                 path: Some(PathBuf::from(format!("/fixture/{index}.png"))),
                 thumbnail: None,
+                about: Default::default(),
             })
             .collect();
         app.viewer_media_chat = Some(chat);
@@ -13748,6 +14401,7 @@ mod tests {
             video: false,
             path: Some(PathBuf::from(format!("/fixture/{id}.png"))),
             thumbnail: None,
+            about: Default::default(),
         };
         app.viewer_media = vec![item("m0"), item("m1")];
         app.viewer_media_chat = Some(chat.into());

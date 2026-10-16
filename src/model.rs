@@ -982,6 +982,21 @@ pub struct MediaItem {
     pub path: Option<std::path::PathBuf>,
     /// The stored thumbnail, drawn instead of decoding the file.
     pub thumbnail: Option<Vec<u8>>,
+    /// Who sent it and its caption, which the viewer says for it.
+    pub about: MediaAbout,
+}
+
+/// Who sent an album item and its caption, as the viewer names the item:
+/// the archive's row carries them for a message the transcript has not
+/// loaded.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MediaAbout {
+    pub from_me: bool,
+    /// The sender's id, and the name they gave, for `App::display_name_or`.
+    pub sender: String,
+    pub sender_name: Option<String>,
+    /// The photo's or video's caption, as written.
+    pub caption: Option<String>,
 }
 
 impl MediaItem {
@@ -1008,6 +1023,15 @@ impl MediaItem {
             video,
             path,
             thumbnail: thumbnail.map(<[u8]>::to_vec),
+            about: MediaAbout {
+                caption: match content {
+                    Content::Image { caption, .. } | Content::Video { caption, .. } => {
+                        caption.clone()
+                    }
+                    _ => None,
+                },
+                ..MediaAbout::default()
+            },
         };
         if let Some(kind) = content.gallery_kind() {
             let path = content
@@ -1052,13 +1076,19 @@ impl MediaItem {
 
     /// The album items of a message already in memory, checking its files.
     pub fn of_message(message: &Message) -> Vec<MediaItem> {
-        Self::of_content(
+        let mut items = Self::of_content(
             &message.id,
             message.timestamp,
             &message.content,
             message.thumbnail.as_deref(),
             Path::is_file,
-        )
+        );
+        for item in &mut items {
+            item.about.from_me = message.from_me;
+            item.about.sender.clone_from(&message.sender);
+            item.about.sender_name.clone_from(&message.sender_name);
+        }
+        items
     }
 }
 
@@ -2391,6 +2421,12 @@ pub enum Action {
         path: PathBuf,
         fraction: f32,
     },
+    /// Moves the playing or paused voice message to a fraction from 0 to 1,
+    /// leaving it playing or paused.
+    JumpVoice {
+        message: String,
+        fraction: f32,
+    },
     /// Sets the voice playback speed to one of the supported speeds.
     SetVoiceSpeed(f32),
     /// Plays or pauses a downloaded video inside its message.
@@ -2550,10 +2586,13 @@ pub enum Action {
     /// Opens the full emoji picker to react to a message. `beside_menu` keeps
     /// the message's context menu open next to it, as when the picker comes
     /// from the menu's "+"; the hover button opens the picker alone.
+    /// `from_list`: opened by the message list's E, so closing the picker
+    /// returns focus to the list.
     OpenReactionPicker {
         chat: ChatId,
         message: String,
         beside_menu: bool,
+        from_list: bool,
     },
     /// Inserts an emoji at the composer cursor.
     InsertEmoji(String),
@@ -2716,8 +2755,24 @@ pub enum Action {
     MessageCursor(crate::ui::list_nav::Step),
     /// Gives the open chat's message list keyboard focus.
     FocusMessages,
+    /// Opens a message's context menu in the open chat, from the keyboard.
+    OpenMessageMenu(String),
+    /// The menu asked for by `OpenMessageMenu` is open: stop asking, so it
+    /// opens once and closes as any menu does.
+    MessageMenuOpened,
+    /// Opens the menu of a phone number in a message of the open chat, by
+    /// the number's `tel:` address, from the keyboard.
+    OpenPhoneMenu {
+        message: String,
+        url: String,
+    },
+    /// The menu asked for by `OpenPhoneMenu` is open: stop asking.
+    PhoneMenuOpened,
     /// Scrolls the open chat to a message.
     ScrollTo(String),
+    /// Goes to a replied message from the keys: as `ScrollTo`, but the
+    /// message list moves only once the message is loaded.
+    GoToReplied(String),
     /// Updates chat-list search text.
     Search(String),
     ShowUpdate,

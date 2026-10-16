@@ -612,18 +612,66 @@ pub fn menu_item_enabled(
     label: &str,
     enabled: bool,
 ) -> bool {
+    // Drawn either way: a disabled item still shows, greyed out.
+    let response = menu_item_response(ui, palette, icon, label, enabled);
+    enabled && response.clicked()
+}
+
+/// A menu item as [`menu_item_enabled`] draws it, returning its response,
+/// for a menu that needs the item's id (to focus it from the keyboard).
+pub fn menu_item_response(
+    ui: &mut Ui,
+    palette: &Palette,
+    icon: Option<Icon>,
+    label: &str,
+    enabled: bool,
+) -> egui::Response {
+    menu_item_named(ui, palette, icon, label, label, enabled)
+}
+
+/// As [`menu_item_response`], with a screen reader name that differs from the
+/// visible `label`, for a row whose unavailability needs explaining.
+pub fn menu_item_named(
+    ui: &mut Ui,
+    palette: &Palette,
+    icon: Option<Icon>,
+    label: &str,
+    accessible: &str,
+    enabled: bool,
+) -> egui::Response {
+    menu_item_focusable(ui, palette, icon, label, accessible, enabled, enabled)
+}
+
+/// [`menu_item_named`] whose row can take focus even when disabled, for a
+/// menu opened to read one: the screen reader then says it is unavailable,
+/// and why, from its name.
+pub fn menu_item_focusable(
+    ui: &mut Ui,
+    palette: &Palette,
+    icon: Option<Icon>,
+    label: &str,
+    accessible: &str,
+    enabled: bool,
+    focusable: bool,
+) -> egui::Response {
     let width = ui.available_width();
+    // A disabled row still takes the click, so it does not reach a widget
+    // under the menu; `Sense::CLICK` is not focusable, so Tab skips it.
     let (rect, response) = ui.allocate_exact_size(
         vec2(width, 28.0),
-        if enabled {
+        if focusable {
             Sense::click()
         } else {
-            Sense::hover()
+            Sense::CLICK
         },
     );
     theme::reveal_focus(&response);
     response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled && ui.is_enabled(), label)
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            enabled && ui.is_enabled(),
+            accessible,
+        )
     });
     if ui.is_rect_visible(rect) {
         if response.hovered() && enabled {
@@ -664,14 +712,14 @@ pub fn menu_item_enabled(
             color,
         );
     }
-    let clicked = enabled && response.clicked();
-    if clicked {
+    if enabled && response.clicked() {
         ui.close();
     }
     if enabled {
-        response.on_hover_cursor(egui::CursorIcon::PointingHand);
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        response
     }
-    clicked
 }
 
 pub fn menu_separator(ui: &mut Ui, palette: &Palette) {

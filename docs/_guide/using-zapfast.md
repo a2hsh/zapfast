@@ -225,7 +225,10 @@ opens over the window with the region to keep marked, and you can drag that
 region by its edges and corners or move it whole. **Turn left** and **Turn
 right** turn the picture a quarter at a time, and **Reset** puts it back the way
 it started. Press Enter or click the check to keep the crop, or Escape or the
-close button to leave the picture as it was.
+close button to leave the picture as it was. Opened from the keyboard, the
+cropper puts focus on the check (**Keep this crop**), Tab moves between its
+buttons, and Enter or Space presses the focused one, so Enter on the close
+button cancels. The region itself moves and resizes with the pointer only.
 
 Keeping a crop does not change the file you picked. ZapFast writes the cropped
 picture beside its other media and sends that one, keeping any see-through
@@ -378,8 +381,11 @@ waits for the download to finish; videos over the
 Double-click one, or use the button at the end of its
 controls, to play it in the full-window viewer:
 Space plays and pauses, the arrows jump five seconds, M mutes, S changes the
-speed, and Escape closes the viewer and stops the video. The built-in player
-supports H.264 video in MP4 files; other formats open in your system player.
+speed, and Escape closes the viewer and stops the video. The arrows, M and S
+say what they changed. Opened from the keyboard, the viewer puts focus on the
+video; Space on a focused button, such as Close, presses that button
+instead. The built-in player supports H.264 video in MP4 files; other
+formats open in your system player.
 
 Click a downloaded JPEG, PNG, or WebP photo to open it in the full-window
 viewer, with zoom (wheel, Ctrl+wheel, or a pinch, and a double-click between
@@ -387,8 +393,12 @@ fitting the window and the original size) and **Copy image**. **Open in the
 viewer** in a photo's or a video's menu does the same. The chat's photos,
 videos and interactive-card images run along the bottom: click one, press the
 Left and Right arrow keys, or hover over the picture and click the previous and
-next arrows at its sides to move between them. The header replies, reacts,
-forwards, saves or downloads, and shows the message in the chat. A click on the
+next arrows at its sides to move between them. With a screen reader, the
+picture and the arrows name each item: its place in the album ("Photo 3 of
+12"), who sent it, when, and its caption. A download started there from the
+keyboard keeps focus on its button and says why it failed. The header replies,
+reacts, forwards, saves or downloads, and shows the message in the chat. A
+click on the
 empty space around the picture, or Escape, closes the viewer. It also closes
 when its chat is removed, becomes locked outside the unlocked folder, or when
 you close the locked folder. **Save as…** in a downloaded attachment's
@@ -782,18 +792,58 @@ time and delivery status, then any quote, forward, edit and reactions; the
 first message of a day starts with the day and the first unread one with
 Unread.
 
-The messages form one list, named for the chat, such as "Messages with Ada" or
-"Messages in Rust Berlin", and each message, or album, reports its position in
-it. The list is a single Tab stop: Alt+2 (Control+2 on macOS) also moves there.
-In the list, Up and Down move one item, Home and End go to the oldest loaded
-and the newest message, and PgUp and PgDn move about a screen; Home on the
-oldest loaded message loads older history. The current message stays put when
-new messages arrive, and follows when ZapFast itself takes you to a message:
-the next voice message playing on, a quoted message, or a search result. After
-keyboard navigation it is outlined like any other focused control.
+The messages form one list, named for the chat, such as "Messages with Ada"
+or "Messages in Rust Berlin", and each message, or album, reports its
+position in it.
+The list is a single Tab stop: Alt+2 (Control+2 on macOS)
+also moves there. In the list, Up and Down move one item, Home and End go
+to the oldest loaded and the newest message, and PgUp and PgDn move about a
+screen; Home on the oldest loaded message loads older history. The current
+message stays put when new messages arrive, and follows when ZapFast itself
+takes you to a message: the next voice message playing on, a quoted message,
+or a search result. After keyboard navigation it is outlined like any other
+focused control. Shift+F10 opens the current message's menu with
+focus on its first item; Tab, Shift+Tab, Up and Down move through the menu,
+and Escape closes it and returns to the list. Opened from the keyboard, the
+menu also lists a card's buttons, so none of them needs the pointer; the
+right-click menu is unchanged. The Applications key does not work yet: egui
+does not report it. In the list, R replies to the current message and moves
+to the message input, E reacts to it, C copies its text (or a downloaded
+picture), F forwards it, G goes to the message it replies to, and Delete
+(on a Mac, Delete or Fn+Delete) asks to delete it for you; Delete for
+everyone stays in the menu. Space or Enter does what clicking the message
+does: it plays or pauses a voice message or video, opens a photo in the viewer, a
+sticker on its own card or a document (downloading it first when needed, or
+retrying a download that failed, and saying why if that download fails), or
+opens a link, a link preview, a location's map, a shared contact's chat or a
+carousel card's picture, or votes for a poll option. Where clicking does
+nothing, as on a plain text message, Space and Enter do nothing either. On a
+phone number, Space or Enter opens the number's menu (Message, Copy number) with focus on its first
+item, as clicking the number does; Tab, Up and Down move through it, and
+Escape closes it and returns to the list. A message with several of these (a
+file, links, phone numbers, cards, poll options) says how many at the end of
+its label ("1 link and 2 phone numbers"); Left and Right move between the
+message's items, its file, links, phone numbers, cards or poll options, and
+say each one ("Link 2 of 3, example.com", "Phone number 3 of 3, +1 (555)
+010-2040"), and Space or Enter plays or pauses, opens or votes for the selected one.
+An album is one message whose items are its photos and videos, each
+followed by the links and phone numbers in its caption: Space or Enter opens
+the selected one in the viewer, and Shift+F10 and the other keys act on it. A
+call in the chat has only a menu to call back, which Space and Enter open too.
+In a voice message or video, Left and Right instead seek 5 seconds in the clip
+that is playing or paused, or in a voice message that played to its end,
+without starting or stopping it, and announce the position; Ctrl+Left and
+Ctrl+Right (Command on macOS) move between the items of any message. The keyboard's
+message menu also offers what is about the message rather than in it: going
+to the replied message and the sender's info in a group. S cycles the speed
+of a voice message, or of a video that is playing or paused, through 1x,
+1.5x and 2x, and M mutes or unmutes such a video; both say the result.
 
-In the chat view, Tab moves through the message input and its buttons, phone
-numbers in messages, chat search, the chat info panel, the message list, the
-rail, the chat list's header, search and the chat filters, then returns to the
-input. Shift+Tab goes back; hidden controls are skipped. Single messages,
-reactions and chat rows are not stops; Alt+Up/Down switches conversations.
+In the chat view, Tab moves through the message input and its buttons, chat
+search, the chat info panel, the message list, the rail, the chat list's
+header, search and the chat filters, then returns to the input. Shift+Tab goes
+back; hidden controls are skipped. Single messages, their links and phone
+numbers, reactions and chat rows are not stops. The React and Reply buttons
+that appear beside a hovered message are for the pointer only; keyboard and
+screen-reader users reach both from the message menu. Alt+Up/Down switches
+conversations.
