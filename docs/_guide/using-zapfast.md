@@ -498,7 +498,11 @@ you open the locked chats with their code.
 During a call the window shows the length of the call, counted from the moment
 the two sides are connected, and the controls along the bottom: mute, the
 microphone and speaker pickers, and hang up. Mute tells the other side, as on
-the phone. The arrow in the top corner puts the call screen aside: the call
+the phone. Ctrl+Shift+M (Command+Shift+M on macOS) mutes and unmutes the
+microphone from anywhere in the window during a call, also with the call
+screen put aside, and the screen reader says "Microphone muted" or
+"Microphone unmuted" once the call has done it; before the call connects it
+says where the call is instead. The arrow in the top corner puts the call screen aside: the call
 keeps running in a strip at the bottom of the window with **Return to the
 call** and a hang-up button, and you can read and write in any chat meanwhile.
 The strip's two buttons are a toolbar named for the call, such as "Call with

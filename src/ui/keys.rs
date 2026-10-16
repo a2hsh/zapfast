@@ -7,6 +7,10 @@ use crate::model::{Action, Chat, ChatId, Dialog, InfoView, Page, Scroll};
 
 /// Routes keyboard commands to actions, respecting overlays and text focus.
 pub fn handle(app: &mut App, ctx: &egui::Context) {
+    // During a call, wherever the reader is, the call screen up or put aside.
+    if let Some(action) = mute_key(app, ctx) {
+        app.actions.push(action);
+    }
     if app.picture_edit.is_some() {
         editor_keys(app, ctx);
         return;
@@ -1697,6 +1701,32 @@ fn call_keys(app: &mut App, ctx: &egui::Context) {
     app.actions.extend(actions);
 }
 
+/// Takes Ctrl+Shift+M (Command+Shift+M on macOS) during a call, on its
+/// screen or with the screen put aside, and returns what it does: it mutes
+/// or unmutes the microphone, as the screen's Mute button does, and says so
+/// once the call confirms it. Matched exactly, so AltGr, which Windows sends
+/// as Ctrl+Alt, never takes it, nor does a held key's repeat. Before the
+/// call connects, when Mute does not apply yet, it says where the call is.
+fn mute_key(app: &mut App, ctx: &egui::Context) -> Option<Action> {
+    let call = app.call.clone().filter(|call| call.phase.is_live())?;
+    if !ctx.input_mut(|input| {
+        take_matching_exactly(input, Modifiers::COMMAND | Modifiers::SHIFT, Key::M)
+    }) {
+        return None;
+    }
+    if call.phase.is_connected() {
+        app.call_mute_wanted = Some((call.generation, !call.muted));
+        return Some(Action::SetCallMuted(!call.muted));
+    }
+    let text = if call.phase == crate::calls::CallPhase::Incoming {
+        crate::i18n::gettext(app.locale, "Incoming call: Accept or Decline").into_owned()
+    } else {
+        super::call::status(app.locale, &call)
+    };
+    app.announcer.say(crate::announcer::Category::Status, text);
+    None
+}
+
 /// Whether the focused control is one of the call screen's own, as the last
 /// pass drew it.
 fn focus_on_call_screen(ctx: &egui::Context) -> bool {
@@ -1961,6 +1991,10 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     (
         "Escape",
         "Dismiss the current action, return from search, Calls or Starred, or close the chat",
+    ),
+    (
+        "Ctrl+Shift+M",
+        "Mute or unmute the microphone during a call",
     ),
     ("Ctrl+N", "New chat or message yourself"),
     ("Ctrl+E", "Archive or unarchive the open chat"),

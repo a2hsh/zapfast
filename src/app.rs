@@ -909,6 +909,9 @@ pub struct App {
     /// drawn: the call screen was put aside from the keys with nowhere else
     /// to give focus back to.
     pub call_strip_focus: bool,
+    /// The mute state Ctrl+Shift+M asked of a call, by the call's
+    /// generation: said once the call's own update confirms it.
+    pub call_mute_wanted: Option<(u64, bool)>,
     /// The incoming call the desktop was told about, so its notification can
     /// be taken back once it is answered or given up.
     call_notified: Option<u64>,
@@ -1693,6 +1696,7 @@ impl App {
             call_fullscreen: false,
             call_refocus: false,
             call_strip_focus: false,
+            call_mute_wanted: None,
             call_notified: None,
             call_rings: None,
             call_tones: Default::default(),

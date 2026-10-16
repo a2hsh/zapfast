@@ -409,6 +409,21 @@ impl App {
         }
         let before = before.filter(|before| before.generation == call.generation);
         let mut said = Vec::new();
+        // Ctrl+Shift+M's answer, once the call confirms it.
+        match self.call_mute_wanted {
+            Some((generation, wanted)) if generation == call.generation => {
+                if call.muted == wanted {
+                    self.call_mute_wanted = None;
+                    said.push(if wanted {
+                        gettext(locale, "Microphone muted").into_owned()
+                    } else {
+                        gettext(locale, "Microphone unmuted").into_owned()
+                    });
+                }
+            }
+            Some(_) => self.call_mute_wanted = None,
+            None => {}
+        }
         let status = crate::ui::call::spoken_status(locale, &call);
         if status.is_some()
             && status
@@ -1512,6 +1527,95 @@ mod tests {
         );
         app.handle_call_update(call);
         assert!(heard(&mut app).is_empty());
+    }
+
+    /// One frame of the window's keys with `key` pressed with `modifiers`.
+    fn press(app: &mut App, key: egui::Key, modifiers: egui::Modifiers, repeat: bool) {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat,
+                    modifiers,
+                }],
+                ..Default::default()
+            },
+            |ui| crate::ui::keys::handle(app, ui.ctx()),
+        );
+        output.textures_delta.clear();
+    }
+
+    /// Ctrl+Shift+M (Command+Shift+M on macOS) mutes and unmutes a call, on
+    /// its screen or with the screen put aside, and says so once the call
+    /// confirms it. Only that chord does: not with Alt (AltGr on Windows),
+    /// not without Shift, and not a held chord's repeat, which would mute
+    /// and unmute in turn. A call that has not connected yet says where it
+    /// is instead.
+    #[test]
+    fn ctrl_shift_m_mutes_the_call_and_says_so_once_it_is_muted() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _) = app(directory.path());
+        let chord = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
+        app.handle_call_update(update(1, CallPhase::Active));
+        heard(&mut app);
+        for (modifiers, repeat) in [
+            (chord | egui::Modifiers::ALT, false),
+            (egui::Modifiers::COMMAND, false),
+        ] {
+            press(&mut app, egui::Key::M, modifiers, repeat);
+            assert!(
+                app.actions.is_empty(),
+                "{modifiers:?}, repeat {repeat}: {:?}",
+                app.actions
+            );
+        }
+        // Held down, the chord mutes once: egui marks the presses after the
+        // first, with the key still down, as repeats.
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events: vec![egui::Event::Key {
+                        key: egui::Key::M,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: chord,
+                    }],
+                    ..Default::default()
+                },
+                |ui| crate::ui::keys::handle(&mut app, ui.ctx()),
+            );
+            output.textures_delta.clear();
+        }
+        assert_eq!(app.actions, [Action::SetCallMuted(true)]);
+        app.actions.clear();
+        assert!(heard(&mut app).is_empty(), "not muted yet");
+        let mut muted = update(1, CallPhase::Active);
+        muted.muted = true;
+        app.handle_call_update(muted.clone());
+        assert_eq!(heard(&mut app), ["Microphone muted"]);
+        app.handle_call_update(muted);
+        assert!(heard(&mut app).is_empty(), "said once");
+        // Put aside, the key still works.
+        app.call_surface_hidden = true;
+        press(&mut app, egui::Key::M, chord, false);
+        assert_eq!(app.actions, [Action::SetCallMuted(false)]);
+        app.actions.clear();
+        app.handle_call_update(update(1, CallPhase::Active));
+        assert_eq!(heard(&mut app), ["Microphone unmuted"]);
+
+        // A call that rings has no microphone to mute yet.
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _) = self::app(directory.path());
+        app.handle_call_update(update(2, CallPhase::Incoming));
+        heard(&mut app);
+        press(&mut app, egui::Key::M, chord, false);
+        assert!(app.actions.is_empty());
+        assert_eq!(heard(&mut app), ["Incoming call: Accept or Decline"]);
     }
 
     #[test]
