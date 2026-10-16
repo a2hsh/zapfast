@@ -173,6 +173,10 @@ fn header(
                     button.request_focus();
                 }
                 if button.clicked() {
+                    // Dismissed: focus may go back to what opened the panel.
+                    if action == Action::CloseInfo {
+                        app.info_dismissed = true;
+                    }
                     app.actions.push(action);
                 }
                 ui.add_space(6.0);
@@ -185,6 +189,17 @@ fn header(
         ui.cursor().top(),
         Stroke::new(1.0, palette.outline),
     );
+}
+
+/// Whether focus is on one of the panel's controls or lists, as this pass
+/// drew them.
+pub(crate) fn has_focus(ctx: &egui::Context) -> bool {
+    let Some(focused) = ctx.memory(|memory| memory.focused()) else {
+        return false;
+    };
+    super::focus::stops(ctx)
+        .iter()
+        .any(|(stop, id)| *id == focused && matches!(stop, Stop::InfoClose | Stop::InfoControl(_)))
 }
 
 /// Marks a line of text as a heading of `level`, which a screen reader
@@ -294,7 +309,21 @@ fn overview(app: &mut App, ui: &mut egui::Ui, id: &str, overlay: bool) {
     } else {
         (Icon::X, crate::i18n::gettext(app.locale, "Close"))
     };
-    header(app, ui, icon, &close, &title, Action::CloseInfo, false);
+    // Opened from the keys or with a screen reader, the reader starts on
+    // Close.
+    let focus_close = app.info_focus == Some(InfoFocus::Close);
+    if focus_close {
+        app.info_focus = None;
+    }
+    header(
+        app,
+        ui,
+        icon,
+        &close,
+        &title,
+        Action::CloseInfo,
+        focus_close,
+    );
     egui::ScrollArea::vertical()
         .id_salt(("chat-info", id))
         .auto_shrink([false, false])

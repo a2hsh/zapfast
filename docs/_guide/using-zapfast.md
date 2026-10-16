@@ -701,7 +701,12 @@ chat's matches, newest first. Its calendar narrows them to one day.
 
 Click the chat header, or choose **Info** in its menu, to open the info panel
 beside the chat. It shows the picture, the number or the members, and the
-chat's actions. From the keyboard a group's members are one list, the Tab stop
+chat's actions. Opened from the keyboard (Enter on **Chat info** in the chat's
+toolbar, or **Info** in a menu) or with a screen reader running, focus moves
+to the panel's **Close** (**Back** in a narrow window), and Close or Escape
+gives focus back to where you opened the panel; Escape typed in the message
+input closes it and leaves you there. With the mouse, focus stays where it
+was, as before. From the keyboard a group's members are one list, the Tab stop
 after **Media, links and docs**: Up and Down, Home, End, PgUp and PgDn walk
 every member, scrolled out of view or not, the screen reader says where each
 one is in the list ("3 of 40"), and Enter or Space opens a member's own panel,

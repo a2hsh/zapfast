@@ -376,6 +376,9 @@ pub(crate) enum InfoFocus {
     Back,
     /// The media row, after Back returned to the overview.
     MediaRow,
+    /// The overview's Close (Back in a narrow window), after the keys or a
+    /// screen reader opened the panel.
+    Close,
 }
 
 /// The "unread messages" divider of the open chat. It stays until another
@@ -558,6 +561,13 @@ pub struct App {
     /// numbers them, by the key of the row: a member's id, a message's id,
     /// or a link's message and address.
     pub(crate) info_cursor: [Option<String>; 4],
+    /// What had focus when the keys or a screen reader opened the panel,
+    /// and the chat open then: focus goes back there when the panel is
+    /// dismissed the same way, rather than to the message field.
+    info_opener: Option<(egui::Id, Option<ChatId>)>,
+    /// Set by the panel's Close or Back and by Escape as they close the
+    /// panel: only a dismissal gives focus back to the opener.
+    pub(crate) info_dismissed: bool,
     /// Whether the locked-chats folder is open.
     pub locked_folder: bool,
     /// The verifier authenticated for this window session, never the code.
@@ -1544,6 +1554,8 @@ impl App {
             info_members: None,
             info_focus: None,
             info_cursor: Default::default(),
+            info_opener: None,
+            info_dismissed: false,
             chat_search: String::new(),
             chat_search_hits: Vec::new(),
             chat_search_truncated: false,
@@ -5547,9 +5559,27 @@ impl App {
     /// Opens the info panel on a chat's overview, in the search pane's
     /// place. The listing is asked for once per chat shown; opening the
     /// same chat again only returns to the overview.
-    fn open_info(&mut self, chat: ChatId) {
+    ///
+    /// Opened from the keys or with a screen reader attached, focus goes to
+    /// the panel's Close, so the reader is in the panel and hears its name,
+    /// and what had focus is noted, to have it back when the panel is
+    /// dismissed. A member's panel opened from the panel keeps that opener.
+    /// Opened with the pointer, focus stays where it was, as upstream.
+    fn open_info(&mut self, chat: ChatId, ctx: &egui::Context) {
         if self.open_chat.is_none() || !self.chat_view() {
             return;
+        }
+        if crate::ui::overlay::followed(ctx) {
+            if !self.info_visible() {
+                self.info_opener = ctx
+                    .memory(|memory| memory.focused())
+                    .map(|id| (id, self.open_chat.clone()));
+            }
+            self.info_focus = Some(InfoFocus::Close);
+            // The message field a chat opening with the panel asked for
+            // would take focus after the panel, drawn before it, gave it to
+            // Close.
+            self.focus_composer = false;
         }
         self.close_chat_search();
         self.contact_edit = None;
@@ -5594,6 +5624,8 @@ impl App {
         self.info_members = None;
         self.info_focus = None;
         self.info_cursor = Default::default();
+        self.info_opener = None;
+        self.info_dismissed = false;
         self.contact_edit = None;
         self.group_name_edit = None;
     }
@@ -9865,10 +9897,26 @@ impl App {
             }
             Action::Search(text) => self.search_chats(text, Instant::now()),
             Action::OpenChatSearch => self.open_chat_search(),
-            Action::OpenInfo(chat) => self.open_info(chat),
+            Action::OpenInfo(chat) => self.open_info(chat, ctx),
             Action::CloseInfo => {
+                // Dismissed from the keys or by a screen reader while focus
+                // was in the panel: back to what opened it, still drawn in
+                // the chat it was opened over. Otherwise the message field,
+                // as upstream.
+                let dismissed = std::mem::take(&mut self.info_dismissed)
+                    && crate::ui::overlay::followed(ctx)
+                    && crate::ui::info::has_focus(ctx);
+                let opener = self
+                    .info_opener
+                    .take()
+                    .filter(|(_, chat)| dismissed && *chat == self.open_chat)
+                    .map(|(id, _)| id);
                 self.close_info();
-                self.refocus_composer(ctx);
+                match opener {
+                    // Drawn again in the next frame, without the panel.
+                    Some(id) => self.return_focus = Some((id, 3)),
+                    None => self.refocus_composer(ctx),
+                }
             }
             Action::ShowInfo(view) => {
                 if let Some(info) = self.info.as_mut() {

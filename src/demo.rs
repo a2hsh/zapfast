@@ -14786,6 +14786,62 @@ mod tests {
         assert_eq!(title.level(), Some(2));
     }
 
+    /// Opened from the keys, the info panel takes focus on its Close, and
+    /// its Close or Escape gives focus back to what opened it. Escape typed
+    /// in the message field closes the panel and leaves the field focused,
+    /// and a member's panel opened from the members list starts on its own
+    /// Close.
+    #[test]
+    fn opening_the_info_panel_from_the_keys_focuses_close_and_closing_returns() {
+        use crate::ui::focus::Stop;
+        use crate::ui::info::{InfoList, list_id};
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let chat_info = stop_id(&ctx, Stop::ChatActions);
+        // Reached by the keyboard, as Tab does.
+        ctx.memory_mut(|memory| memory.request_focus(chat_info));
+        ctx.data_mut(|data| data.insert_temp(crate::theme::keyboard_focus_id(), true));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert!(app.info_visible(), "Enter on Chat info opens the panel");
+        let close = stop_id(&ctx, Stop::InfoClose);
+        assert_eq!(focused(&ctx), Some(close), "on the panel's Close");
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert!(!app.info_visible(), "Close closes it");
+        assert_eq!(focused(&ctx), Some(chat_info), "back on Chat info");
+        // Escape from the panel does the same.
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(focused(&ctx), Some(close));
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(!app.info_visible(), "Escape closes it");
+        assert_eq!(focused(&ctx), Some(chat_info), "back on Chat info");
+        // Escape in the message field closes the panel and stays there.
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert!(app.info_visible());
+        let composer = egui::Id::new("composer-text");
+        ctx.memory_mut(|memory| memory.request_focus(composer));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(!app.info_visible());
+        assert_eq!(focused(&ctx), Some(composer), "the field keeps focus");
+        // A member's panel, opened from the members list.
+        let (mut app, ctx) = group_info_with_members(0);
+        let members = list_id(InfoList::Members);
+        ctx.memory_mut(|memory| memory.request_focus(members));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Home, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        let group = app.open_chat.clone();
+        assert_ne!(app.info.as_ref().map(|info| info.chat.clone()), group);
+        assert_eq!(
+            focused(&ctx),
+            Some(stop_id(&ctx, Stop::InfoClose)),
+            "on the member's panel's Close"
+        );
+    }
+
     /// The timer line says what WhatsApp says: a duration for a chat with one,
     /// "Off" for a chat the phone turned it off for, and nothing at all for a
     /// chat nobody has mentioned a timer for, which includes a frame where the

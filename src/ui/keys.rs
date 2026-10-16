@@ -398,6 +398,8 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
                 app.info.as_ref().map(|info| info.view),
                 Some(InfoView::Media(_))
             );
+            // Dismissed: focus may go back to what opened the panel.
+            app.info_dismissed = !media;
             actions.push(if media {
                 Action::ShowInfo(InfoView::Overview)
             } else {
