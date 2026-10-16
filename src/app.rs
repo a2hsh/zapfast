@@ -905,6 +905,10 @@ pub struct App {
     /// click on a call's notification brings the window up
     /// (`ui::overlay::settle`).
     pub call_refocus: bool,
+    /// Whether the strip's Return to the call takes focus as it is next
+    /// drawn: the call screen was put aside from the keys with nowhere else
+    /// to give focus back to.
+    pub call_strip_focus: bool,
     /// The incoming call the desktop was told about, so its notification can
     /// be taken back once it is answered or given up.
     call_notified: Option<u64>,
@@ -1688,6 +1692,7 @@ impl App {
             call_surface_hidden: false,
             call_fullscreen: false,
             call_refocus: false,
+            call_strip_focus: false,
             call_notified: None,
             call_rings: None,
             call_tones: Default::default(),

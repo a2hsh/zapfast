@@ -16,6 +16,8 @@ use crate::calls::{CallOutcome, CallPhase, CallUpdate, PeerAudio, SilenceReason}
 use crate::i18n::{Locale, gettext};
 use crate::model::Action;
 use crate::theme::{self, Icon, Palette};
+use crate::ui::focus::Stop;
+use crate::ui::toolbar::{self, ToolbarButton};
 use crate::ui::widgets;
 
 /// The area's id, so the surface keeps its place in the layer order.
@@ -345,8 +347,15 @@ fn heading(app: &mut App, call: &CallUpdate) -> String {
     crate::a11y::call_heading(app.locale, place)
 }
 
+/// The strip's toolbar, Return to the call and Hang up.
+pub(crate) fn strip_id() -> egui::Id {
+    egui::Id::new("call-strip-toolbar")
+}
+
 /// The strip a call keeps at the bottom of the window while the reader is
-/// elsewhere: who is on it, how long it has been up, and the way back.
+/// elsewhere: who is on it, how long it has been up, and the way back. Its
+/// two buttons are one toolbar, the window's first Tab stop and an F6
+/// section of its own.
 pub fn strip(app: &mut App, ui: &mut egui::Ui) {
     let Some(call) = app.call.clone() else {
         return;
@@ -357,6 +366,7 @@ pub fn strip(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     let peer = app.call_name();
     let status = status(app.locale, &call);
+    let label = heading(app, &call);
     egui::Panel::bottom("call-strip")
         .show_separator_line(false)
         .frame(
@@ -373,36 +383,48 @@ pub fn strip(app: &mut App, ui: &mut egui::Ui) {
                 if !call.phase.is_live() {
                     return;
                 }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let locale = app.locale;
-                    let hang_up = gettext(locale, "Hang up").into_owned();
-                    if theme::icon_button(
-                        ui,
-                        Icon::PhoneOff,
-                        16.0,
-                        palette.on_accent,
-                        palette.on_accent,
-                        &hang_up,
-                    )
-                    .clicked()
-                    {
-                        app.actions.push(Action::HangupCall);
-                    }
-                    let back = gettext(locale, "Return to the call").into_owned();
-                    let response = ui.add(
-                        egui::Button::new(
-                            egui::RichText::new(&back)
-                                .font(theme::semibold(13.0))
-                                .color(palette.on_accent),
+                let bar = strip_id();
+                toolbar::toolbar(ui, bar, &label, Stop::CallStrip, |ui| {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let locale = app.locale;
+                        let hang_up = gettext(locale, "Hang up").into_owned();
+                        if theme::icon_button(
+                            ui,
+                            Icon::PhoneOff,
+                            16.0,
+                            palette.on_accent,
+                            palette.on_accent,
+                            &hang_up,
                         )
-                        .frame(false),
-                    );
-                    if response
-                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .in_toolbar(bar)
                         .clicked()
-                    {
-                        app.actions.push(Action::ReturnToCall);
-                    }
+                        {
+                            app.actions.push(Action::HangupCall);
+                        }
+                        let back = gettext(locale, "Return to the call").into_owned();
+                        let response = ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new(&back)
+                                        .font(theme::semibold(13.0))
+                                        .color(palette.on_accent),
+                                )
+                                .frame(false),
+                            )
+                            .in_toolbar(bar);
+                        // The screen was put aside from the keys with nowhere
+                        // to give focus back to: it lands here, on the way
+                        // back.
+                        if std::mem::take(&mut app.call_strip_focus) {
+                            response.request_focus();
+                        }
+                        if response
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            app.actions.push(Action::ReturnToCall);
+                        }
+                    });
                 });
             });
         });

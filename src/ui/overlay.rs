@@ -186,11 +186,12 @@ pub fn settle(app: &mut App, ctx: &egui::Context) {
     if before.as_ref().map(|opened| &opened.overlay) == now.as_ref() {
         return;
     }
-    if let Some(before) = &before
-        && now.is_none()
-        && before.followed
-        && followed(ctx)
-        && before.overlay.returns()
+    let returning = before.as_ref().is_some_and(|before| {
+        now.is_none() && before.followed && followed(ctx) && before.overlay.returns()
+    });
+    let mut returned = false;
+    if returning
+        && let Some(before) = &before
         && before.chat == app.open_chat
         && before.page == app.page
         && let Some(opener) = before.opener
@@ -199,6 +200,17 @@ pub fn settle(app: &mut App, ctx: &egui::Context) {
         app.focus_composer = false;
         ctx.memory_mut(|memory| memory.request_focus(opener));
         ctx.data_mut(|data| data.insert_temp(returned_id(), opener));
+        returned = true;
+    }
+    // The call screen put aside, with no opener to go back to, gives focus
+    // to the strip's way back, the window's first stop.
+    if returning
+        && !returned
+        && before.as_ref().map(|before| &before.overlay) == Some(&Overlay::Call)
+        && app.call_surface_hidden
+        && app.call_live()
+    {
+        app.call_strip_focus = true;
     }
     // The cropper follows focus as it was asked for: a file opens it frames
     // later, once its size is read, with no key or click in that frame.

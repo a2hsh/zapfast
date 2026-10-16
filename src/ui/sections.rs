@@ -1,4 +1,5 @@
-//! The main window's sections: the chat list with the rail beside it, the
+//! The main window's sections: the strip of a call put aside, the chat
+//! list with the rail beside it, the
 //! open conversation, the chat info panel beside it while it is open, and
 //! the conversation's composer. F6 and Shift+F6 move to the next and
 //! previous section drawn now, landing where focus was last in the chat
@@ -20,6 +21,8 @@ use crate::model::Action;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Section {
+    /// The strip of a call put aside.
+    Call,
     Chats,
     Conversation,
     /// The chat info panel, beside the conversation.
@@ -27,8 +30,9 @@ pub enum Section {
     Composer,
 }
 
-/// F6 order.
-const ORDER: [Section; 4] = [
+/// F6 order: a call's strip first, as it is the first stop.
+const ORDER: [Section; 5] = [
+    Section::Call,
     Section::Chats,
     Section::Conversation,
     Section::Info,
@@ -48,6 +52,7 @@ impl Section {
     /// Close button. The composer is always entered on the message field.
     fn entry(self) -> Stop {
         match self {
+            Section::Call => Stop::CallStrip,
             Section::Chats => Stop::ChatList,
             Section::Conversation => Stop::Messages,
             Section::Info => Stop::InfoClose,
@@ -59,6 +64,7 @@ impl Section {
 /// Which section a Stop belongs to.
 pub fn of(stop: Stop) -> Section {
     match stop {
+        Stop::CallStrip => Section::Call,
         // The rail beside the list goes with it: its avatars are the list
         // while the list is hidden.
         Stop::Rail | Stop::ChatListActions | Stop::Search | Stop::Filters | Stop::ChatList => {
@@ -241,6 +247,7 @@ mod tests {
     #[test]
     fn every_stop_has_its_section() {
         for (stop, section) in [
+            (Stop::CallStrip, Section::Call),
             (Stop::Rail, Section::Chats),
             (Stop::ChatListActions, Section::Chats),
             (Stop::Search, Section::Chats),
@@ -327,6 +334,20 @@ mod tests {
                 -1,
                 Some(Info),
             ),
+            // A call's strip, before the chat list.
+            (
+                &[Call, Chats, Conversation, Composer][..],
+                Some(Composer),
+                1,
+                Some(Call),
+            ),
+            (
+                &[Call, Chats, Conversation, Composer][..],
+                Some(Call),
+                -1,
+                Some(Composer),
+            ),
+            (&[Call, Chats][..], Some(Call), 1, Some(Chats)),
             (&[][..], Some(Chats), 1, None),
             (&[][..], None, 1, None),
         ] {

@@ -501,6 +501,9 @@ microphone and speaker pickers, and hang up. Mute tells the other side, as on
 the phone. The arrow in the top corner puts the call screen aside: the call
 keeps running in a strip at the bottom of the window with **Return to the
 call** and a hang-up button, and you can read and write in any chat meanwhile.
+The strip's two buttons are a toolbar named for the call, such as "Call with
+Ada": it is the window's first Tab stop, and F6 reaches it as a section of its
+own.
 Escape does the same, and leaves full screen first; on a call that rings it
 closes nothing and says "Incoming call: Accept or Decline". While the call
 screen is up, the window's shortcuts for chats do not reach the chat beneath
@@ -995,7 +998,8 @@ account switcher with focus on the first account; Up and Down move through the a
 returns to your picture. Choosing an account moves focus to its message
 field, and Add account to the new account's linking screen.
 
-The chat view has four sections: the chat list (the rail, the list's
+The chat view has four sections, and a fifth, the call bar, while a call is
+put aside: the chat list (the rail, the list's
 toolbars, search and the list, or the call history on the Calls page), the
 conversation (Chat actions, the pinned message line, the chat's search pane,
 the message list and, while selecting messages, the selection bar), the chat

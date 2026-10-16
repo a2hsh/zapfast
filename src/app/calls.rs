@@ -544,9 +544,9 @@ impl App {
         );
     }
 
-    /// Per-frame upkeep: the farewell's end, a placing call that never heard
-    /// back, full screen following the surface, the running timer, and the
-    /// call's tone.
+    /// Per-frame upkeep: the farewell's end, the strip's focus once the
+    /// call is over, a placing call that never heard back, full screen
+    /// following the surface, the running timer, and the call's tone.
     pub(super) fn tick_call(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
         if self.call_surface_until.is_some_and(|until| now >= until) {
@@ -554,6 +554,11 @@ impl App {
             self.call = None;
             self.call_account = None;
             self.drop_call_frames();
+        }
+        // A call that went before its strip took focus leaves none for the
+        // strip of a later call to take.
+        if !self.call_live() {
+            self.call_strip_focus = false;
         }
         if let Some(placed) = self.call_placed
             && now.duration_since(placed) >= PLACING_TIMEOUT
@@ -621,7 +626,15 @@ impl App {
             Action::SetCallSpeaker(device) => {
                 self.send_call_command(Command::SetCallSpeaker(device));
             }
-            Action::LeaveCallSurface => self.call_surface_hidden = true,
+            Action::LeaveCallSurface => {
+                self.call_surface_hidden = true;
+                // Focus goes back to where it was, which says nothing of the
+                // call still running.
+                self.announcer.say(
+                    crate::announcer::Category::Status,
+                    crate::i18n::gettext(self.locale, "Call screen hidden"),
+                );
+            }
             // Returning to a locked chat's call cannot lift the lock on its
             // own: it asks for the code instead.
             Action::ReturnToCall if self.call.is_some() => {
@@ -778,6 +791,30 @@ mod tests {
         app.tick_call(&ctx);
         assert!(app.call.is_none(), "and then it goes");
         assert!(app.call_account.is_none());
+    }
+
+    /// The strip's focus, asked for as a call is put aside from the keys,
+    /// goes with the call when it ends before the strip is drawn, by either
+    /// side: a later call's strip must not take focus from where it is.
+    #[test]
+    fn the_strip_focus_of_a_call_that_ended_is_not_kept() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _) = app(directory.path());
+        let ctx = egui::Context::default();
+        app.handle_call_update(update(1, CallPhase::Active));
+        app.call_strip_focus = true;
+        app.apply(Action::HangupCall, &ctx);
+        app.tick_call(&ctx);
+        assert!(!app.call_strip_focus, "hung up here");
+        app.handle_call_update(update(2, CallPhase::Active));
+        app.call_strip_focus = true;
+        app.handle_call_update(ended(2, CallOutcome::Answered));
+        app.tick_call(&ctx);
+        assert!(!app.call_strip_focus, "ended by the other side");
+        app.handle_call_update(update(3, CallPhase::Active));
+        app.call_strip_focus = true;
+        app.tick_call(&ctx);
+        assert!(app.call_strip_focus, "kept while the call is up");
     }
 
     #[test]

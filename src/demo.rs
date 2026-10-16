@@ -27449,6 +27449,55 @@ mod call_surface_tests {
         assert!(focus_on_the_screen(&ctx));
     }
 
+    /// Escape puts the call screen aside and says so; with nowhere else to go
+    /// back to, focus lands on the strip's Return to the call, the window's
+    /// first stop and an F6 section of its own, and Enter there brings the
+    /// screen back with focus on it.
+    #[test]
+    fn escape_on_the_call_screen_lands_on_the_strip() {
+        let (mut app, ctx) = on_a_call();
+        // Nothing beneath had focus when the call came.
+        app.focus_composer = false;
+        ctx.memory_mut(|memory| memory.surrender_focus(egui::Id::new("composer-text")));
+        ctx.enable_accesskit();
+        let tree = settle_with(&mut app, &ctx, Vec::new());
+        assert_eq!(focused_label(&tree).as_deref(), Some("Mute"));
+        let tree = settle_with(&mut app, &ctx, vec![key(egui::Key::Escape)]);
+        assert!(app.call_surface_hidden);
+        assert!(said(&app, "Call screen hidden"));
+        assert_eq!(focused_label(&tree).as_deref(), Some("Return to the call"));
+        let (_, bar) = tree
+            .nodes
+            .iter()
+            .find(|(_, node)| {
+                node.role() == egui::accesskit::Role::Toolbar && {
+                    node.label() == Some("Call with Ada Lovelace")
+                }
+            })
+            .expect("the strip is a toolbar named for the call");
+        assert!(!bar.children().is_empty());
+        assert_eq!(
+            crate::ui::focus::stops(&ctx).first().map(|(stop, _)| *stop),
+            Some(crate::ui::focus::Stop::CallStrip),
+            "the strip is the first Tab stop"
+        );
+        let tree = settle_with(&mut app, &ctx, vec![key(egui::Key::F6)]);
+        assert_ne!(focused_label(&tree).as_deref(), Some("Return to the call"));
+        let tree = settle_with(
+            &mut app,
+            &ctx,
+            vec![chord(egui::Key::F6, egui::Modifiers::SHIFT)],
+        );
+        assert_eq!(
+            focused_label(&tree).as_deref(),
+            Some("Return to the call"),
+            "F6 comes back to the strip"
+        );
+        let tree = settle_with(&mut app, &ctx, vec![key(egui::Key::Enter)]);
+        assert!(app.call_surface_open(), "Enter brings the screen back");
+        assert_eq!(focused_label(&tree).as_deref(), Some("Mute"));
+    }
+
     /// A key typed for the message field just as a call comes up does not
     /// answer or refuse it: focus still lands on Accept, but Enter and Space
     /// there wait a moment after the screen takes focus, and a key held down
