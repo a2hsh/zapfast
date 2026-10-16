@@ -724,7 +724,10 @@ list. Enter or Space on a document goes to its message, and on a link opens
 it; a call link reads as one, such as "Call link, voice call", without its
 address, and joins its call with your microphone muted, as from the message
 list. When the list was cut to the newest items, the list's description says
-so. Press
+so. A screen reader hears the panel as a region named **Contact info**,
+**Group info** or **Channel info**, its title and its sections (Description,
+Members) as headings, and **Media**, **Docs** and **Links** as tabs, the
+one shown selected, each with its count. Press
 Escape to go back to the overview, and again to close the panel. Drag its edge
 to change its width. The conversation narrows beside the panel, and when the
 window is too tight for the chat list as well, the list steps aside until the

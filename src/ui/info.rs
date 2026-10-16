@@ -128,6 +128,14 @@ fn contents(app: &mut App, ui: &mut egui::Ui, overlay: bool) {
         Some(info) => (info.chat.clone(), info.view),
         None => return,
     };
+    // A region named by what the panel is about, whichever view it shows: a
+    // screen reader says it as focus moves in from the conversation, and
+    // not again between the overview and the media view.
+    let region = panel_title(app, &chat);
+    ui.ctx().accesskit_node_builder(ui.unique_id(), |node| {
+        node.set_role(egui::accesskit::Role::Region);
+        node.set_label(region);
+    });
     match view {
         InfoView::Overview => overview(app, ui, &chat, overlay),
         // A locked chat's media is never drawn: the overview shows instead.
@@ -168,7 +176,8 @@ fn header(
                     app.actions.push(action);
                 }
                 ui.add_space(6.0);
-                theme::text(ui, title, theme::semibold(16.0), palette.text);
+                let title = theme::text(ui, title, theme::semibold(16.0), palette.text);
+                heading(ui, &title, 2);
             });
         });
     ui.painter().hline(
@@ -176,6 +185,40 @@ fn header(
         ui.cursor().top(),
         Stroke::new(1.0, palette.outline),
     );
+}
+
+/// Marks a line of text as a heading of `level`, which a screen reader
+/// names as one and can move by: the panel's title, then its sections.
+fn heading(ui: &egui::Ui, response: &egui::Response, level: usize) {
+    ui.ctx().accesskit_node_builder(response.id, |node| {
+        node.set_role(egui::accesskit::Role::Heading);
+        node.set_level(level);
+        // egui gives a label's text as its value; a heading is named by it.
+        if let Some(text) = node.value().map(str::to_owned) {
+            node.set_label(text);
+            node.clear_value();
+        }
+    });
+}
+
+/// The overview's title, which names the panel too: "Group info",
+/// "Channel info" or "Contact info", by the chat it shows.
+fn panel_title(app: &App, id: &str) -> String {
+    let (group, channel) = match app.chat(id) {
+        Some(chat) => (chat.is_group(), chat.is_channel()),
+        None => (
+            crate::model::ChatKind::from_id(id) == crate::model::ChatKind::Group,
+            id.ends_with("@newsletter"),
+        ),
+    };
+    if group {
+        crate::i18n::gettext(app.locale, "Group info")
+    } else if channel {
+        crate::i18n::gettext(app.locale, "Channel info")
+    } else {
+        crate::i18n::gettext(app.locale, "Contact info")
+    }
+    .into_owned()
 }
 
 /// What the overview shows of the chat, read once per frame from the chat
@@ -244,13 +287,7 @@ impl Shown {
 /// The chat's picture, name, details, actions and members.
 fn overview(app: &mut App, ui: &mut egui::Ui, id: &str, overlay: bool) {
     let shown = Shown::of(app, id);
-    let title = if shown.group {
-        crate::i18n::gettext(app.locale, "Group info")
-    } else if shown.channel {
-        crate::i18n::gettext(app.locale, "Channel info")
-    } else {
-        crate::i18n::gettext(app.locale, "Contact info")
-    };
+    let title = panel_title(app, id);
     // As a page of its own, the panel goes back to the chat it covers.
     let (icon, close) = if overlay {
         (Icon::ChevronLeft, crate::i18n::gettext(app.locale, "Back"))
@@ -466,7 +503,7 @@ fn identity(app: &mut App, ui: &mut egui::Ui, shown: &Shown, overlay: bool) {
         }
         if let Some(presence) = app.presence.get(id) {
             let status = if presence.online {
-                "online".to_owned()
+                crate::i18n::gettext(app.locale, "online").into_owned()
             } else if let Some(seen) = presence.last_seen {
                 crate::util::last_seen(app.locale, seen)
             } else {
@@ -480,9 +517,10 @@ fn identity(app: &mut App, ui: &mut egui::Ui, shown: &Shown, overlay: bool) {
             theme::text(
                 ui,
                 if until == 0 {
-                    "Muted".to_owned()
+                    crate::i18n::gettext(app.locale, "Muted").into_owned()
                 } else {
-                    format!("Muted until {}", crate::util::chat_stamp(app.locale, until))
+                    crate::i18n::gettext(app.locale, "Muted until {time}")
+                        .replace("{time}", &crate::util::chat_stamp(app.locale, until))
                 },
                 theme::regular(12.5),
                 palette.secondary,
@@ -526,12 +564,13 @@ fn identity(app: &mut App, ui: &mut egui::Ui, shown: &Shown, overlay: bool) {
     actions(app, ui, shown, mine, editable);
     if let Some(description) = shown.description.as_deref() {
         ui.add_space(8.0);
-        theme::text(
+        let label = theme::text(
             ui,
             crate::i18n::gettext(app.locale, "Description"),
             theme::medium(12.5),
             palette.secondary,
         );
+        heading(ui, &label, 3);
         ui.add_space(4.0);
         // A long description scrolls in place, so the media and the members
         // stay close under it.
@@ -710,12 +749,14 @@ fn members(app: &mut App, ui: &mut egui::Ui, id: &str, window: f32, photo: f32) 
     let Some((_, members)) = app.info_members.take() else {
         return;
     };
-    theme::text(
+    let label = theme::text(
         ui,
-        format!("Members ({})", members.len()),
+        crate::i18n::gettext(app.locale, "Members ({count})")
+            .replace("{count}", &members.len().to_string()),
         theme::medium(12.5),
         palette.secondary,
     );
+    heading(ui, &label, 3);
     ui.add_space(4.0);
     // Limit the visible rows because groups can have thousands of members.
     let row_height = 30.0;
@@ -1134,7 +1175,20 @@ fn media_row(app: &mut App, ui: &mut egui::Ui, chat: &str, overlay: bool) {
     theme::reveal_focus(&response);
     theme::focus_outline(ui, response.id, rect, 6.0);
     let title = media_title(app);
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &title));
+    // A "+" says the lists were cut, so the count is a floor.
+    let count = count.map(|(count, cut)| {
+        if cut {
+            crate::i18n::gettext(app.locale, "{}+").replace("{}", &count.to_string())
+        } else {
+            count.to_string()
+        }
+    });
+    // Named with the count it shows.
+    let spoken = match &count {
+        Some(count) => format!("{title}, {count}"),
+        None => title.clone(),
+    };
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &spoken));
     if ui.is_rect_visible(rect) {
         if response.hovered() {
             // The label sits on the panel's margin, in line with the members
@@ -1154,13 +1208,7 @@ fn media_row(app: &mut App, ui: &mut egui::Ui, chat: &str, overlay: bool) {
             Vec2::splat(18.0),
         );
         theme::paint_icon(ui, Icon::ChevronRight, chevron, 18.0, palette.dim);
-        if let Some((count, cut)) = count {
-            // A "+" says the lists were cut, so the count is a floor.
-            let count = if cut {
-                crate::i18n::gettext(app.locale, "{}+").replace("{}", &count.to_string())
-            } else {
-                count.to_string()
-            };
+        if let Some(count) = count {
             ui.painter().text(
                 pos2(chevron.left() - 2.0, rect.center().y),
                 Align2::RIGHT_CENTER,
@@ -1255,19 +1303,39 @@ fn media_view(app: &mut App, ui: &mut egui::Ui, chat: &str, tab: MediaTab, overl
         .inner_margin(Margin::symmetric(MARGIN as i8, 10))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
+                // The tabs are a tab list, named by the view they switch.
+                let title = media_title(app);
+                ui.ctx().accesskit_node_builder(ui.unique_id(), |node| {
+                    node.set_role(egui::accesskit::Role::TabList);
+                    node.set_label(title);
+                });
                 ui.spacing_mut().item_spacing.x = 6.0;
-                for (index, choice) in [MediaTab::Media, MediaTab::Docs, MediaTab::Links]
-                    .into_iter()
-                    .enumerate()
-                {
+                let tabs = [MediaTab::Media, MediaTab::Docs, MediaTab::Links];
+                for (index, choice) in tabs.into_iter().enumerate() {
                     let count = shown.map_or(0, |media| match choice {
                         MediaTab::Media => media.media.len(),
                         MediaTab::Docs => media.docs.len(),
                         MediaTab::Links => media.links.len(),
                     });
                     let label = tab_label(app, choice);
-                    if widgets::filter_chip(ui, &palette, &label, count, choice == tab)
-                        .tab_stop(Stop::InfoControl(TAB_STOP + index as u8))
+                    let chip = widgets::filter_chip(ui, &palette, &label, count, choice == tab)
+                        .tab_stop(Stop::InfoControl(TAB_STOP + index as u8));
+                    // A tab, selected or not, with the count it shows: a
+                    // filter chip would say "pressed" and call it unread.
+                    let spoken = if count > 0 {
+                        format!("{label}, {count}")
+                    } else {
+                        label.clone()
+                    };
+                    ui.ctx().accesskit_node_builder(chip.id, |node| {
+                        node.set_role(egui::accesskit::Role::Tab);
+                        node.set_label(spoken);
+                        node.clear_toggled();
+                        node.set_selected(choice == tab);
+                        node.set_position_in_set(index);
+                        node.set_size_of_set(tabs.len());
+                    });
+                    if chip
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .clicked()
                     {

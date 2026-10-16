@@ -14699,6 +14699,93 @@ mod tests {
         );
     }
 
+    /// The info panel is a region named by what it is about, around its
+    /// Close button: its title and its sections are headings, the media row
+    /// says the count it shows, and the media view's Media, Docs and Links
+    /// are tabs in a tab list, one selected, never "pressed" or "unread".
+    #[test]
+    fn the_info_panel_is_a_named_region_with_headings() {
+        use crate::ui::focus::Stop;
+        use egui::accesskit::Role;
+        let with = |tree: &egui::accesskit::TreeUpdate, role: Role, label: &str| {
+            tree.nodes
+                .iter()
+                .find(|(_, node)| node.role() == role && node.label() == Some(label))
+                .map(|(id, node)| (*id, node.clone()))
+        };
+        // Every node under `parent`, at any depth.
+        let under = |tree: &egui::accesskit::TreeUpdate, parent: egui::accesskit::NodeId| {
+            let mut found = Vec::new();
+            let mut stack = vec![parent];
+            while let Some(id) = stack.pop() {
+                if let Some(node) = node(tree, id) {
+                    stack.extend_from_slice(node.children());
+                    found.push(id);
+                }
+            }
+            found
+        };
+        let (mut app, ctx) = group_info_with_members(0);
+        let group = app.open_chat.clone().unwrap();
+        let members = app.participant_list(app.chat(&group).unwrap()).len();
+        let tree = tree_after(&mut app, &ctx, None);
+        let (region, _) = with(&tree, Role::Region, "Group info").expect("a named region");
+        let close = stop_id(&ctx, Stop::InfoClose).accesskit_id();
+        assert!(
+            under(&tree, region).contains(&close),
+            "Close is in the region"
+        );
+        let (_, title) = with(&tree, Role::Heading, "Group info").expect("the title");
+        assert_eq!(title.level(), Some(2));
+        let section = format!("Members ({members})");
+        let (_, section) = with(&tree, Role::Heading, &section).expect("the members heading");
+        assert_eq!(section.level(), Some(3));
+        let listing = app.info_media.as_ref().expect("the group is listed");
+        let count = listing.media.len() + listing.docs.len() + listing.links.len();
+        let row = node(
+            &tree,
+            stop_id(&ctx, Stop::InfoControl(crate::ui::info::MEDIA_ROW_STOP)).accesskit_id(),
+        )
+        .expect("the media row");
+        assert_eq!(
+            row.label(),
+            Some(format!("Media, links and docs, {count}").as_str())
+        );
+        // The media view's tabs.
+        let mut app = super::tests::app();
+        apply_flags(&mut app, Some("info-docs"));
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let tree = tree_after(&mut app, &ctx, None);
+        let (region, _) = with(&tree, Role::Region, "Contact info").expect("the same region");
+        let (tabs, list) = with(&tree, Role::TabList, "Media, links and docs").expect("tab list");
+        assert!(under(&tree, region).contains(&tabs));
+        let listing = app.info_media.clone().expect("listed");
+        let tabs: Vec<egui::accesskit::Node> = list
+            .children()
+            .iter()
+            .filter_map(|id| node(&tree, *id))
+            .filter(|node| node.role() == Role::Tab)
+            .collect();
+        let expected = [
+            ("Media", listing.media.len(), false),
+            ("Docs", listing.docs.len(), true),
+            ("Links", listing.links.len(), false),
+        ];
+        assert_eq!(tabs.len(), expected.len(), "{tabs:?}");
+        for (index, (tab, (name, count, selected))) in tabs.iter().zip(expected).enumerate() {
+            assert_eq!(tab.label(), Some(format!("{name}, {count}").as_str()));
+            assert_eq!(tab.is_selected(), Some(selected), "{name}");
+            assert_eq!(tab.toggled(), None, "{name}");
+            assert_eq!(tab.position_in_set(), Some(index));
+            assert_eq!(tab.size_of_set(), Some(3));
+        }
+        let (_, title) =
+            with(&tree, Role::Heading, "Media, links and docs").expect("the view's title");
+        assert_eq!(title.level(), Some(2));
+    }
+
     /// The timer line says what WhatsApp says: a duration for a chat with one,
     /// "Off" for a chat the phone turned it off for, and nothing at all for a
     /// chat nobody has mentioned a timer for, which includes a frame where the
