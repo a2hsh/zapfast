@@ -815,7 +815,9 @@ chat's name never appears in it: its call is "Incoming call - ZapFast" and
 
 The message input is named after the open chat, "Type a message to Ada" or
 "Type a message to group Rust Berlin", so opening a chat from the keyboard
-says whose chat it is.
+says whose chat it is. While a reply is pending, the input's description says what it
+replies to, as the line above it shows: "replying to Ada: see you at five",
+and for a private reply, which group the message is from.
 
 ZapFast announces confirmations, errors, connection changes and history loading
 through the screen reader without moving focus. While the window is focused,

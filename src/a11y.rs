@@ -126,6 +126,52 @@ pub fn composer_label(locale: Locale, title: &str, group: bool) -> String {
     fill(&template, &[("name", &name)])
 }
 
+/// The message field's description while a reply is pending, as the strip
+/// above it shows it: "replying to Ada: see you at five", and for a private
+/// reply to a group's message, where the group's message is from. `name` is
+/// who wrote the quoted message, "You" for our own.
+pub fn reply_description(
+    locale: Locale,
+    name: &str,
+    text: &str,
+    private_from: Option<&str>,
+) -> String {
+    let mut description = fill(
+        &gettext(locale, "replying to {name}: {text}"),
+        &[
+            ("name", &spoken(without_push_marker(name))),
+            ("text", &spoken(text)),
+        ],
+    );
+    if let Some(group) = private_from {
+        description.push_str(&private_reply_from(locale, group));
+    }
+    description
+}
+
+/// The message field's description while a private reply's message is not
+/// loaded, as the strip above it says: "Original group message unavailable",
+/// then where it is from, as `reply_description` says it.
+pub fn unavailable_reply_description(locale: Locale, private_from: Option<&str>) -> String {
+    let mut description = gettext(locale, "Original group message unavailable").into_owned();
+    if let Some(group) = private_from {
+        description.push_str(&private_reply_from(locale, group));
+    }
+    description
+}
+
+/// ", privately, from Family": where a private reply's message is from.
+fn private_reply_from(locale: Locale, group: &str) -> String {
+    let from = fill(
+        // Translators: after "replying to {name}: {text}" or "Original group
+        // message unavailable", on the message field, for a private reply to
+        // a group's message; {group} is the group's name.
+        &gettext(locale, "privately, from {group}"),
+        &[("group", &spoken(without_push_marker(group)))],
+    );
+    format!(", {from}")
+}
+
 /// The chat header's name for a screen reader: the chat's name, then the
 /// line under it when there is one ("online", "last seen today at 10:32",
 /// "typing…", a group's members), as the header shows them.

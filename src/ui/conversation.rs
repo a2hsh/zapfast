@@ -1875,6 +1875,13 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                                     if !captioning {
                                         node.clear_placeholder();
                                     }
+                                    // A pending reply is part of what the
+                                    // field is for, as the strip above it
+                                    // shows: its description.
+                                    match reply_description(app, chat) {
+                                        Some(reply) => node.set_description(reply),
+                                        None => node.clear_description(),
+                                    }
                                 });
                                 if response.changed() {
                                     app.actions.push(Action::Composing {
@@ -2362,13 +2369,50 @@ fn edit_strip(app: &mut App, ui: &mut egui::Ui) {
     strip_gap(ui);
 }
 
-fn reply_strip(app: &mut App, ui: &mut egui::Ui, quoted: &Message) {
-    let palette = app.palette;
-    let who = if quoted.from_me {
-        "You".to_owned()
+/// Who wrote `quoted`, as the reply strip names them: "You" for our own.
+fn quoted_author(app: &App, quoted: &Message) -> String {
+    if quoted.from_me {
+        crate::i18n::gettext(app.locale, "You").into_owned()
     } else {
         app.display_name_or(&quoted.sender, quoted.sender_name.as_deref())
+    }
+}
+
+/// The message field's description while a reply is pending in `chat`: who
+/// wrote the quoted message and its words, as the reply strip shows them,
+/// and for a private reply the group the message is from. None with no
+/// reply shown, as while editing.
+fn reply_description(app: &App, chat: &Chat) -> Option<String> {
+    if app.editing.is_some() {
+        return None;
+    }
+    let target = app.reply_to.as_ref()?;
+    let private_from = target
+        .chat
+        .as_deref()
+        .filter(|source| *source != chat.id)
+        .map(|source| app.chat_title_of(source));
+    let Some(quoted) = app.reply_preview(target, &chat.id) else {
+        // A private reply whose message is not loaded: the strip says it is
+        // unavailable, and so does the field. No strip shows otherwise.
+        target.chat.as_ref()?;
+        return Some(crate::a11y::unavailable_reply_description(
+            app.locale,
+            private_from.as_deref(),
+        ));
     };
+    let summary = markup::plain(&quoted.summary(), &app.mention_list(quoted));
+    Some(crate::a11y::reply_description(
+        app.locale,
+        &quoted_author(app, quoted),
+        &summary,
+        private_from.as_deref(),
+    ))
+}
+
+fn reply_strip(app: &mut App, ui: &mut egui::Ui, quoted: &Message) {
+    let palette = app.palette;
+    let who = quoted_author(app, quoted);
     let summary = markup::plain(&quoted.summary(), &app.mention_list(quoted));
     let strip = widgets::raised(ui, &palette, strip_frame(&palette), |ui| {
         ui.set_width(ui.available_width().max(0.0));
@@ -2380,7 +2424,13 @@ fn reply_strip(app: &mut App, ui: &mut egui::Ui, quoted: &Message) {
                 ui.set_max_width((ui.available_width() - 40.0).max(0.0));
                 widgets::rich_text(
                     ui,
-                    &format!("Replying to {who}"),
+                    &crate::a11y::fill(
+                        // Translators: the line above the message field
+                        // while a reply is pending; {name} is who wrote the
+                        // quoted message, or "You".
+                        &crate::i18n::gettext(app.locale, "Replying to {name}"),
+                        &[("name", &who)],
+                    ),
                     theme::semibold(12.5),
                     palette.accent,
                 );

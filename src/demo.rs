@@ -8564,6 +8564,84 @@ mod tests {
         }
     }
 
+    /// While a reply is pending, the message field's description says what
+    /// it replies to, as the strip above it shows: who wrote it and its
+    /// words, and for a private reply the group the message is from. The
+    /// description goes with the reply.
+    #[test]
+    fn the_message_field_describes_the_reply() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let chat = app.open_chat.clone().unwrap();
+        let quoted = app.conversations[&chat]
+            .messages
+            .iter()
+            .rev()
+            .find(|message| !message.from_me && !message.summary().is_empty())
+            .cloned()
+            .expect("a message to reply to");
+        let composer = egui::Id::new("composer-text");
+        let described = |app: &mut App, ctx: &egui::Context| {
+            let tree = tree_after(app, ctx, None);
+            node(&tree, composer.accesskit_id())
+                .expect("the message field")
+                .description()
+                .map(str::to_owned)
+        };
+        assert_eq!(described(&mut app, &ctx), None, "no reply yet");
+        app.actions
+            .push(crate::model::Action::Reply(quoted.id.clone()));
+        render(&mut app, &ctx);
+        let who = app.display_name_or(&quoted.sender, quoted.sender_name.as_deref());
+        let words = crate::markup::plain(&quoted.summary(), &app.mention_list(&quoted));
+        assert_eq!(
+            described(&mut app, &ctx),
+            Some(format!(
+                "replying to {}: {}",
+                crate::a11y::spoken(crate::a11y::without_push_marker(&who)),
+                crate::a11y::spoken(&words)
+            ))
+        );
+        app.actions.push(crate::model::Action::CancelReply);
+        render(&mut app, &ctx);
+        assert_eq!(described(&mut app, &ctx), None, "the reply is gone");
+        // A private reply to a group's message says where it is from.
+        let group = SAMPLES[1].id;
+        app.actions
+            .push(crate::model::Action::OpenChat(group.into()));
+        render(&mut app, &ctx);
+        assert_eq!(app.open_chat.as_deref(), Some(group));
+        app.actions.push(crate::model::Action::ReplyPrivately {
+            chat: group.into(),
+            message: "group-photo".into(),
+        });
+        render(&mut app, &ctx);
+        assert_ne!(app.open_chat.as_deref(), Some(group), "the sender's chat");
+        let from = crate::a11y::without_push_marker(&app.chat_title_of(group)).to_owned();
+        let description = described(&mut app, &ctx).expect("the private reply");
+        assert!(description.starts_with("replying to "), "{description}");
+        assert!(
+            description.ends_with(&format!(", privately, from {from}")),
+            "{description}"
+        );
+        // Its message no longer loaded, the strip says the group's message is
+        // unavailable, and so does the field, never as who wrote it.
+        if let Some(conversation) = app.conversations.get_mut(group) {
+            conversation
+                .messages
+                .retain(|message| message.id != "group-photo");
+        }
+        render(&mut app, &ctx);
+        assert_eq!(
+            described(&mut app, &ctx),
+            Some(format!(
+                "Original group message unavailable, privately, from {from}"
+            ))
+        );
+    }
+
     #[test]
     fn arrows_move_the_chat_cursor_without_opening() {
         let mut app = app();
