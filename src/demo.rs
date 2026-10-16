@@ -7482,6 +7482,57 @@ mod tests {
         assert!(app.announcer.spoken().iter().all(|said| said.is_empty()));
     }
 
+    /// The chat info panel is a section of its own, after the conversation:
+    /// F6 from the message list enters it on Close, and the next F6 goes on
+    /// to the message field. Shift+F6 comes back to where it was left.
+    #[test]
+    fn f6_stops_at_the_info_panel() {
+        use crate::ui::focus::Stop;
+        let mut app = app();
+        apply_flags(&mut app, Some("info"));
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        assert!(app.info_visible(), "the panel is open");
+        let chat = app.open_chat.clone().unwrap();
+        let messages = crate::ui::conversation::messages_list_id(&chat);
+        let composer = egui::Id::new("composer-text");
+        press_key(&mut app, &ctx, egui::Key::Num2, chats_shortcut());
+        assert_eq!(focused(&ctx), Some(messages));
+        let close = stop_id(&ctx, Stop::InfoClose);
+        press_key(&mut app, &ctx, egui::Key::F6, egui::Modifiers::NONE);
+        assert_eq!(focused(&ctx), Some(close), "the panel's Close");
+        press_key(&mut app, &ctx, egui::Key::F6, egui::Modifiers::NONE);
+        assert_eq!(focused(&ctx), Some(composer));
+        press_key(&mut app, &ctx, egui::Key::F6, egui::Modifiers::SHIFT);
+        assert_eq!(focused(&ctx), Some(close), "back to the panel");
+        press_key(&mut app, &ctx, egui::Key::F6, egui::Modifiers::SHIFT);
+        assert_eq!(focused(&ctx), Some(messages), "back to the conversation");
+    }
+
+    /// On the Calls page the chat list's section holds the call history: F6
+    /// lands on it there, as on any stop, and leaves the page as it is.
+    /// Alt+1 still goes to the chats.
+    #[test]
+    fn f6_on_the_calls_page_lands_on_the_call_history() {
+        let mut app = app();
+        apply_flags(&mut app, Some("calls-chat"));
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        assert_eq!(app.page, crate::model::Page::Calls);
+        let chat = app.open_chat.clone().expect("the chat beside the history");
+        press_key(&mut app, &ctx, egui::Key::Num2, chats_shortcut());
+        assert_eq!(
+            focused(&ctx),
+            Some(crate::ui::conversation::messages_list_id(&chat))
+        );
+        press_key(&mut app, &ctx, egui::Key::F6, egui::Modifiers::SHIFT);
+        assert_eq!(app.page, crate::model::Page::Calls, "the page stays");
+        assert_eq!(focused(&ctx), Some(crate::ui::calls::history_list_id()));
+        assert!(keyboard_shown(&ctx));
+    }
+
     /// The pinned message line is a Tab stop after the chat header's
     /// toolbar, read as it shows: plain text with mentions by name, never
     /// the markup or a mention's number. Enter goes to the pin, whose

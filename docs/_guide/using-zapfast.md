@@ -887,14 +887,16 @@ account switcher with focus on the first account; Up and Down move through the a
 returns to your picture. Choosing an account moves focus to its message
 field, and Add account to the new account's linking screen.
 
-The chat view has three sections: the chat list (the rail, the list's
-toolbars, search and the list), the conversation (Chat actions, the chat's
-search pane, the chat info panel and the message list) and the composer (the
-message input and Message actions). F6 moves to the next section and
-Shift+F6 to the previous one, skipping sections that are not shown: with no
-chat open only the chat list is left, and a read-only chat has no composer.
-The chat list and the conversation are entered where you left them, or on
-their list the first time; the composer is always entered on the message
+The chat view has four sections: the chat list (the rail, the list's
+toolbars, search and the list, or the call history on the Calls page), the
+conversation (Chat actions, the pinned message line, the chat's search pane
+and the message list), the chat info panel while it is open, and the
+composer (the message input and Message actions). F6 moves to the next
+section and Shift+F6 to the previous one, skipping sections that are not
+shown: with no chat open only the chat list is left, and a read-only chat
+has no composer. The chat list, the conversation and the info panel are
+entered where you left them, or on their list (the info panel on its Close
+button) the first time; the composer is always entered on the message
 input. Alt+3 (Control+3 on macOS) moves to the open chat's first unread
 message, the one read as "Unread", in the message list. When that message is
 older than what is loaded, the screen reader says "Loading unread messages"

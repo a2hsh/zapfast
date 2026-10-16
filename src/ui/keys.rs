@@ -1471,7 +1471,7 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+L", "Focus the message input"),
     (
         "F6 / Shift+F6",
-        "Next / previous section: chat list, conversation, message input",
+        "Next / previous section: chat list, conversation, chat info, message input",
     ),
     ("Alt+↑ / Alt+↓", "Previous / next chat"),
     ("Ctrl+Shift+[ / ]", "Previous / next chat, as in WhatsApp"),

@@ -1,7 +1,10 @@
-//! The main window's three sections: the chat list with the rail beside it,
-//! the open conversation and its composer. F6 and Shift+F6 move to the next and previous section
-//! drawn now, landing where focus was last in the chat list and the
-//! conversation, and on the message field in the composer. Alt+1, Alt+2
+//! The main window's sections: the chat list with the rail beside it, the
+//! open conversation, the chat info panel beside it while it is open, and
+//! the conversation's composer. F6 and Shift+F6 move to the next and
+//! previous section drawn now, landing where focus was last in the chat
+//! list, the conversation and the info panel, and on the message field in
+//! the composer. On the Calls page the chat list's place holds the call
+//! history or the new-call list. Alt+1, Alt+2
 //! and Alt+3 (Control on macOS, see `keys.rs`) go straight to the chat
 //! list, the message list and the open chat's first unread message.
 //!
@@ -19,11 +22,18 @@ use crate::model::Action;
 pub enum Section {
     Chats,
     Conversation,
+    /// The chat info panel, beside the conversation.
+    Info,
     Composer,
 }
 
 /// F6 order.
-const ORDER: [Section; 3] = [Section::Chats, Section::Conversation, Section::Composer];
+const ORDER: [Section; 4] = [
+    Section::Chats,
+    Section::Conversation,
+    Section::Info,
+    Section::Composer,
+];
 
 impl Section {
     fn index(self) -> usize {
@@ -33,12 +43,14 @@ impl Section {
             .unwrap_or_default()
     }
 
-    /// Where the section is entered when nothing in it was focused yet: its
-    /// list. The composer is always entered on the message field.
+    /// Where the section is entered when nothing in it was focused yet: the
+    /// chat list and the conversation on their list, the info panel on its
+    /// Close button. The composer is always entered on the message field.
     fn entry(self) -> Stop {
         match self {
             Section::Chats => Stop::ChatList,
             Section::Conversation => Stop::Messages,
+            Section::Info => Stop::InfoClose,
             Section::Composer => Stop::Composer,
         }
     }
@@ -59,9 +71,8 @@ pub fn of(stop: Stop) -> Section {
         | Stop::ChatSearchDate
         | Stop::ChatSearchField
         | Stop::ChatSearchDay
-        | Stop::InfoClose
-        | Stop::InfoControl(_)
         | Stop::Messages => Section::Conversation,
+        Stop::InfoClose | Stop::InfoControl(_) => Section::Info,
         Stop::Composer | Stop::MessageActions => Section::Composer,
     }
 }
@@ -77,7 +88,7 @@ pub fn present(stops: &[(Stop, Id)]) -> Vec<Section> {
 #[derive(Clone, Copy, Default)]
 struct Memory {
     /// The stop focused last in each section, by `Section::index`.
-    stops: [Option<Stop>; 3],
+    stops: [Option<Stop>; ORDER.len()],
     /// The section focus was in last, for F6 from a control that is not a
     /// stop, or from nothing at all.
     section: Option<Section>,
@@ -173,10 +184,13 @@ fn next(present: &[Section], current: Option<Section>, steps: i32) -> Option<Sec
 /// Moves focus into `section`: to its stop focused last, else its entry,
 /// else its first stop drawn. The composer is always entered on its entry.
 fn land(app: &mut App, ctx: &Context, section: Section, stops: &[(Stop, Id)]) {
+    // On the Calls page the list's place holds the call history or the
+    // new-call list, which take focus as any stop does.
+    let calls = app.page == crate::model::Page::Calls;
     // An empty chat list has no chat to stand on; Alt+1 only says so.
     let usable = |stop: &Stop| {
         stops.iter().any(|(drawn, _)| drawn == stop)
-            && (*stop != Stop::ChatList || app.current_list_chat().is_some())
+            && (*stop != Stop::ChatList || calls || app.current_list_chat().is_some())
     };
     // F6 to the composer is a way back to typing: the message field, not a
     // button of Message actions left there before.
@@ -200,8 +214,9 @@ fn land(app: &mut App, ctx: &Context, section: Section, stops: &[(Stop, Id)]) {
     remember(ctx, stop);
     match stop {
         // The lists take focus the way Alt+1 and Alt+2 give it, when they
-        // are drawn, never on a row.
-        Stop::ChatList => app.actions.push(Action::FocusChats),
+        // are drawn, never on a row. Alt+1 leaves the Calls page for the
+        // chats: there F6 stays, on the list drawn in that place.
+        Stop::ChatList if !calls => app.actions.push(Action::FocusChats),
         Stop::Messages => app.actions.push(Action::FocusMessages),
         _ => {
             if let Some((_, id)) = stops.iter().find(|(drawn, _)| *drawn == stop) {
@@ -226,8 +241,8 @@ mod tests {
             (Stop::ChatActions, Section::Conversation),
             (Stop::ChatSearchField, Section::Conversation),
             (Stop::PinBanner, Section::Conversation),
-            (Stop::InfoClose, Section::Conversation),
-            (Stop::InfoControl(0), Section::Conversation),
+            (Stop::InfoClose, Section::Info),
+            (Stop::InfoControl(0), Section::Info),
             (Stop::Messages, Section::Conversation),
             (Stop::Composer, Section::Composer),
             (Stop::MessageActions, Section::Composer),
@@ -281,6 +296,25 @@ mod tests {
             ),
             (&[Chats][..], Some(Chats), 1, Some(Chats)),
             (&[Chats][..], Some(Chats), -1, Some(Chats)),
+            // The info panel, between the conversation and the composer.
+            (
+                &[Chats, Conversation, Info, Composer][..],
+                Some(Conversation),
+                1,
+                Some(Info),
+            ),
+            (
+                &[Chats, Conversation, Info, Composer][..],
+                Some(Info),
+                1,
+                Some(Composer),
+            ),
+            (
+                &[Chats, Conversation, Info, Composer][..],
+                Some(Composer),
+                -1,
+                Some(Info),
+            ),
             (&[][..], Some(Chats), 1, None),
             (&[][..], None, 1, None),
         ] {
