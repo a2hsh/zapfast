@@ -3348,6 +3348,7 @@ impl Worker {
                         presence.state,
                         ChatActivity::Typing | ChatActivity::RecordingAudio
                     ),
+                    recording: matches!(presence.state, ChatActivity::RecordingAudio),
                 });
             }
             E::Presence(presence) => {
@@ -18363,6 +18364,43 @@ mod receipt_tests {
             })
             .collect();
         assert_eq!(senders, [PEER, PEER, PEER]);
+    }
+
+    /// A contact recording a voice message reaches the app as typing that
+    /// is recording, so the announcer can say "Ada is recording audio";
+    /// typing text is not recording, and idle is neither.
+    #[tokio::test]
+    async fn recording_audio_reaches_the_app_as_recording() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        for state in [
+            ChatActivity::Typing,
+            ChatActivity::RecordingAudio,
+            ChatActivity::Idle,
+        ] {
+            let presence = wa_events::ChatPresenceUpdate::builder()
+                .source(MessageSource {
+                    chat: PEER.parse().unwrap(),
+                    sender: PEER.parse().unwrap(),
+                    ..Default::default()
+                })
+                .state(state)
+                .build();
+            worker
+                .handle_wa_event(Arc::new(wa_events::Event::ChatPresence(presence)))
+                .await;
+        }
+        let typing: Vec<_> = events
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::Typing {
+                    composing,
+                    recording,
+                    ..
+                } => Some((composing, recording)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(typing, [(true, false), (true, true), (false, false)]);
     }
 
     #[test]
