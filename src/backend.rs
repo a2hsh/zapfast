@@ -1035,6 +1035,15 @@ pub enum Event {
         /// the pane can say so instead of dropping them silently.
         truncated: bool,
     },
+    /// The search in one chat the archive could not run, echoing what was
+    /// asked as [`Event::ChatHits`] does. It comes in place of the hits,
+    /// before the [`Event::Error`] that says why.
+    ChatSearchFailed {
+        chat: ChatId,
+        query: String,
+        from: Option<i64>,
+        until: Option<i64>,
+    },
     /// One chat's media, documents and links, newest first, for the info
     /// panel, or why they could not be listed.
     ChatShared {
@@ -1105,6 +1114,12 @@ pub enum Event {
     SearchHits {
         query: String,
         messages: Vec<Message>,
+    },
+    /// The message search for `query` the archive could not run. It comes
+    /// in place of its [`Event::SearchHits`], before the [`Event::Error`]
+    /// that says why, so its count is waited for no longer.
+    SearchFailed {
+        query: String,
     },
     Typing {
         chat: ChatId,

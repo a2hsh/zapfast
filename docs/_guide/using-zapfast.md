@@ -44,6 +44,12 @@ several, **Review recipients** lists them for you to confirm, and **Back**
 returns to the picker without losing the selection. If a destination becomes
 locked or read-only, ZapFast returns to selection instead of sending a partial
 batch. Switching accounts discards the open forwarding selection.
+From the keyboard the chats are one list: Down in the search field moves
+into it, the arrows move through it, and Space or Enter ticks or unticks the
+current chat, after which the screen reader says how many are selected, or
+why a chat cannot be added. Tab goes on to **Forward** or **Review
+recipients**. Review starts on **Back**, and Back returns to the chat you
+were on.
 
 Right-click a group message and choose **Reply privately** to open a direct
 conversation with its sender while quoting the group message. The quote
@@ -121,6 +127,14 @@ document, or voice message shows the same label the chat list uses. Clicking a
 row opens the chat at that message, and right-clicking it offers the chat's own
 menu, including **Unstar**. Messages from locked chats stay out of the list.
 Click **Chats** in the rail, or press Escape, to go back to the chats.
+From the keyboard the list is one list in the chat list's place, which Tab
+and Alt+1 (Control+1 on macOS) reach, and the screen reader says how many
+messages it holds as it opens. Each row reads as a message: the chat, who
+wrote it, its words and when, then when it was starred. Up, Down, Home, End,
+PgUp and PgDn move through it; Enter opens the message in its chat, and with
+a screen reader moves to it in the message list; Shift+F10 opens the row's
+menu. Escape in the list goes back to the chats with focus on **Starred** in
+the rail.
 
 ## Pinned messages
 
@@ -529,7 +543,9 @@ went (a missed call's name is red), when, and how it went, and its phone or
 camera button calls back the same way. The search field finds calls by name or
 number. The chips under it show **All** calls or only the **Missed** ones (calls
 to you that nobody answered, group calls included); a search looks among the
-calls the chip shows, and ZapFast remembers the chip for each number. The chat
+calls the chip shows, and ZapFast remembers the chip for each number. A
+screen reader hears how many calls are listed once you stop typing a search,
+and as soon as you pick a chip. The chat
 you had open stays beside the list; clicking a row opens that
 person's chat there instead, at the call, with the voice and video buttons in
 its header. With no chat open, the pane beside the list offers **Start call**.
@@ -849,7 +865,8 @@ The chats form one list too, named Chats, or Archived chats, Locked chats
 or Search results for what it shows; the open chat is its selected item.
 The list is a single Tab stop: Alt+1 (Control+1 on macOS) also moves there,
 and to the chats' avatars in the rail while the list is hidden. From the
-Calls tab, Settings or Starred it goes back to the chats first. In a narrow
+Calls tab or Settings it goes back to the chats first; with Starred open it
+moves into the Starred list in the same place. In a narrow
 window, where an open chat takes the list's place, Alt+1 goes back to the
 list as Back does; where the chat info panel leaves no room for the list
 beside the chat, it closes the panel. In the list, Up and Down move one chat
@@ -859,7 +876,26 @@ chat and moves to its message input, or to its message list when it has
 none. Shift+F10 opens the chat's menu with focus on its first item, and
 Escape returns to the list. In the search field, Down moves into the search
 results on the first one, Up from the first returns to the field, and Enter
-in either opens a chat, as before.
+in either opens a chat, as before. Once you pause typing, the search says
+how many results it shows, chats, messages and contacts together, such as
+"5 results" or "No results".
+
+The chat's search pane (Ctrl+F) has a search field named for the chat,
+such as "Search messages with Ahmed", and lists its matches as a list
+named Search results; each reads who wrote it, the line that matched and
+when, with its position in the list. In the search field, Up and Down move
+the current result, which the screen reader reads while typing stays in
+the field, and Enter jumps to it; the message list's current message
+follows. Tab from the field reaches the list itself, where Up, Down, Home,
+End, PgUp and PgDn move and Enter jumps. Once you pause typing, the pane
+says how many matches it lists, or that it shows only the newest of more.
+The calendar button (Filter by date) opens the day filter with focus on the
+picked day or today when pressed with Enter or Space, or in any way while a
+screen reader runs: its days are buttons named
+by their date, Left and Right move a day and Up and Down a week, Enter
+picks one, and Escape closes it; either way focus returns to the button.
+Escape in a non-empty search field, in the chat list, the pane or
+Settings, empties it and says "Search cleared".
 
 On the Calls tab the call history is a list in the same place, named Calls,
 or Missed calls under the Missed chip, and the New call list is another, named

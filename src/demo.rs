@@ -7473,20 +7473,47 @@ mod tests {
         assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
     }
 
-    /// Starred messages stand in the chat list's place: Alt+1 brings the
-    /// chats back, as the rail's Chats does, and moves into their list.
+    /// The Starred list stands in the chat list's place: Alt+1 moves into
+    /// it, as into the chat list, and Starred stays open.
     #[test]
-    fn alt_1_from_the_starred_messages_focuses_the_chat_list() {
+    fn alt_1_on_the_starred_messages_focuses_their_list() {
         let mut app = app();
         let ctx = egui::Context::default();
         app.attach(&ctx);
         app.show_starred = true;
         render(&mut app, &ctx);
         press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
-        assert!(!app.show_starred);
+        assert!(app.show_starred);
         assert_eq!(
             ctx.memory(|memory| memory.focused()),
-            Some(crate::ui::chats::chats_list_id())
+            Some(crate::ui::chats::starred_list_id())
+        );
+    }
+
+    /// The Starred list takes Alt+1 even when the chat filter beneath it
+    /// leaves no chat: Alt+1 is not refused with "No chats".
+    #[test]
+    fn alt_1_reaches_the_starred_list_with_no_chat_in_the_filter() {
+        let mut app = app();
+        apply_flags(&mut app, Some("starred"));
+        app.account_mut().chat_filter = crate::model::ChatFilter::Favorites;
+        for chat in &mut app.chats {
+            chat.favorite = false;
+        }
+        assert!(app.current_list_chat().is_none(), "no chat in the filter");
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        assert!(app.show_starred);
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::chats::starred_list_id())
+        );
+        assert!(
+            !app.announcer.spoken().contains(&"No chats"),
+            "{:?}",
+            app.announcer.spoken()
         );
     }
 
@@ -8091,6 +8118,316 @@ mod tests {
             Some(crate::ui::conversation::messages_list_id(&channel))
         );
         assert_eq!(app.message_cursor.get(&channel), Some(&newest));
+    }
+
+    /// The Starred list is one list in the chat list's place, reached with
+    /// Alt+1, whose rows read as messages: the chat, who wrote it, its words
+    /// and when, then when it was starred. The arrows walk it, Shift+F10
+    /// opens a row's menu and Escape there comes back to the list; Enter
+    /// opens the message in its chat and takes a reader to it. Escape leaves
+    /// Starred for the rail's Starred.
+    #[test]
+    fn starred_messages_are_one_list_read_like_messages() {
+        let mut app = app();
+        apply_flags(&mut app, Some("starred"));
+        // A second starred message, in another chat.
+        let other = app.conversations[SAMPLES[2].id]
+            .messages
+            .last()
+            .cloned()
+            .expect("a sample message");
+        app.starred.push(crate::archive::Starred {
+            message: other,
+            starred_at: crate::util::now() - 60,
+        });
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        assert!(app.show_starred);
+        let list = crate::ui::chats::starred_list_id();
+        let shown: Vec<Message> = crate::ui::chats::starred_shown(&app)
+            .into_iter()
+            .map(|entry| entry.message.clone())
+            .collect();
+        assert!(shown.len() >= 2, "{}", shown.len());
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        let tree = tree_after(&mut app, &ctx, None);
+        let (node_of_list, active) = list_nodes(&tree, list);
+        assert_eq!(node_of_list.role(), egui::accesskit::Role::ListBox);
+        assert_eq!(node_of_list.label(), Some("Starred messages"));
+        assert_eq!(node_of_list.size_of_set(), Some(shown.len()));
+        let active = active.expect("the first is current");
+        assert_eq!(active.role(), egui::accesskit::Role::ListBoxOption);
+        assert_eq!(active.position_in_set(), Some(0));
+        let first = &shown[0];
+        let label = active.label().unwrap_or_default().to_owned();
+        let title = app.chat_title_of(&first.chat);
+        let sender = if first.from_me {
+            "You".to_owned()
+        } else {
+            app.display_name_or(&first.sender, first.sender_name.as_deref())
+        };
+        assert!(
+            label.starts_with(&format!("{title}, {sender}, ")),
+            "{label}"
+        );
+        assert!(label.contains(", starred "), "{label}");
+        let tree = tree_after(&mut app, &ctx, Some(egui::Key::ArrowDown));
+        let active = list_nodes(&tree, list).1.expect("the second is current");
+        assert_eq!(active.position_in_set(), Some(1));
+        let second = shown[1].clone();
+        // Its menu, from the keys, and back.
+        press_key(&mut app, &ctx, egui::Key::F10, egui::Modifiers::SHIFT);
+        let row = crate::ui::chats::list_row_id(&second.chat, &second.id);
+        let popup =
+            egui::Popup::default_response_id(&ctx.read_response(row).expect("the row is drawn"));
+        assert!(egui::Popup::is_id_open(&ctx, popup), "the row's menu");
+        assert_eq!(focused_layer(&ctx).map(|layer| layer.id), Some(popup));
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(!egui::Popup::is_id_open(&ctx, popup));
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        assert!(app.show_starred, "Escape closed the menu only");
+        // Enter, with a screen reader: the message in its chat.
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        render(&mut app, &ctx);
+        assert_eq!(app.open_chat.as_ref(), Some(&second.chat));
+        assert_eq!(app.message_cursor.get(&second.chat), Some(&second.id));
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::conversation::messages_list_id(&second.chat))
+        );
+        // Back in the list, Escape leaves Starred for the rail's Starred.
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(!app.show_starred);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::rail::destination_id(
+                crate::ui::rail::Destination::Starred
+            ))
+        );
+    }
+
+    /// With nothing starred the list is still drawn, empty: Alt+1 lands on
+    /// it, and a reader in it keeps focus there.
+    #[test]
+    fn an_empty_starred_list_still_takes_focus() {
+        let mut app = app();
+        apply_flags(&mut app, Some("starred"));
+        app.starred.clear();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        assert!(app.show_starred);
+        let list = crate::ui::chats::starred_list_id();
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        let tree = tree_after(&mut app, &ctx, None);
+        let (node_of_list, active) = list_nodes(&tree, list);
+        assert_eq!(node_of_list.label(), Some("Starred messages"));
+        assert_eq!(node_of_list.size_of_set(), Some(0));
+        assert!(active.is_none());
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+    }
+
+    /// Starred messages all in locked chats, which the list keeps out: the
+    /// list says it has none, without a word about the locked ones.
+    #[test]
+    fn a_starred_list_whose_messages_are_all_locked_says_it_has_none() {
+        let mut app = app();
+        apply_flags(&mut app, Some("starred"));
+        assert!(!app.starred.is_empty());
+        let starred: Vec<String> = app
+            .starred
+            .iter()
+            .map(|entry| entry.message.chat.clone())
+            .collect();
+        for chat in &mut app.chats {
+            chat.locked |= starred.contains(&chat.id);
+        }
+        assert!(crate::ui::chats::starred_shown(&app).is_empty());
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let list = crate::ui::chats::starred_list_id();
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        let tree = tree_after(&mut app, &ctx, None);
+        let (node_of_list, active) = list_nodes(&tree, list);
+        assert_eq!(node_of_list.label(), Some("Starred messages"));
+        assert_eq!(node_of_list.size_of_set(), Some(0));
+        assert_eq!(node_of_list.description(), Some("No starred messages"));
+        assert!(active.is_none());
+    }
+
+    /// Shift+F10 on the current row, scrolled out of view with the wheel,
+    /// brings the row back into view and opens its menu.
+    #[test]
+    fn shift_f10_on_a_starred_row_out_of_view_opens_its_menu() {
+        let mut app = app();
+        apply_flags(&mut app, Some("starred"));
+        // Enough starred messages for the list to scroll.
+        let first = app.starred[0].clone();
+        for index in 0..30 {
+            let mut more = first.clone();
+            more.message.id = format!("more-{index}");
+            more.starred_at -= 1 + index;
+            app.starred.push(more);
+        }
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let list = crate::ui::chats::starred_list_id();
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        let current = crate::ui::chats::starred_shown(&app)[0].message.clone();
+        let row = crate::ui::chats::list_row_id(&current.chat, &current.id);
+        let area = ctx.read_response(list).expect("the list").rect;
+        frame_with(
+            &mut app,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(area.center()),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -3000.0),
+                    modifiers: egui::Modifiers::NONE,
+                    phase: egui::TouchPhase::Move,
+                },
+            ],
+        );
+        for _ in 0..10 {
+            frame_with(&mut app, &ctx, Vec::new());
+        }
+        let scrolled = ctx.read_response(row).expect("the row").rect;
+        assert!(
+            scrolled.bottom() < area.top(),
+            "{scrolled:?} above {area:?}"
+        );
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        press_key(&mut app, &ctx, egui::Key::F10, egui::Modifiers::SHIFT);
+        render(&mut app, &ctx);
+        let popup =
+            egui::Popup::default_response_id(&ctx.read_response(row).expect("the row is drawn"));
+        assert!(egui::Popup::is_id_open(&ctx, popup), "the row's menu");
+        assert_eq!(focused_layer(&ctx).map(|layer| layer.id), Some(popup));
+        let shown = ctx.read_response(row).expect("the row").rect;
+        assert!(area.intersects(shown), "the row is back in view");
+    }
+
+    /// The forwarding dialog's chats are one list, a single stop entered
+    /// with Down from the search field: one node per chat, checked or not,
+    /// its checkbox drawn for the pointer only. Space ticks the current
+    /// chat and says how many are picked; Tab goes on to Review recipients
+    /// and Shift+Tab comes back. Review moves focus to Back, and Back to the
+    /// list on the chat it was on.
+    #[test]
+    fn the_forward_list_is_one_stop_and_says_the_count() {
+        use crate::ui::dialogs::forward_list_id;
+        let mut app = app();
+        apply_flags(&mut app, Some("forward"));
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let field = egui::Id::new("forward-search");
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(field));
+        let list = forward_list_id();
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        let tree = tree_after(&mut app, &ctx, None);
+        let (node_of_list, active) = list_nodes(&tree, list);
+        assert_eq!(node_of_list.role(), egui::accesskit::Role::ListBox);
+        assert_eq!(node_of_list.label(), Some("Chats"));
+        assert!(node_of_list.is_multiselectable());
+        let len = node_of_list.size_of_set().expect("a counted list");
+        assert!(len >= 2, "{len}");
+        let active = active.expect("the first chat is current");
+        assert_eq!(active.position_in_set(), Some(0));
+        assert_eq!(active.toggled(), Some(egui::accesskit::Toggled::False));
+        let name = active.label().expect("a name").to_owned();
+        let named: Vec<_> = tree
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.label() == Some(name.as_str()) && !node.is_hidden())
+            .collect();
+        assert_eq!(named.len(), 1, "one node per chat: {named:?}");
+        press_key(&mut app, &ctx, egui::Key::Space, egui::Modifiers::NONE);
+        assert_eq!(app.forward_recipients.len(), 1);
+        assert!(
+            said_last(&app, "1 recipient selected"),
+            "{:?}",
+            app.announcer.spoken()
+        );
+        let tree = tree_after(&mut app, &ctx, None);
+        let active = list_nodes(&tree, list).1.expect("still current");
+        assert_eq!(active.toggled(), Some(egui::accesskit::Toggled::True));
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::Space, egui::Modifiers::NONE);
+        assert_eq!(app.forward_recipients.len(), 2);
+        assert!(
+            said_last(&app, "2 recipients selected"),
+            "{:?}",
+            app.announcer.spoken()
+        );
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        // Tab goes on to Review recipients, past the rows' checkboxes.
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        assert_eq!(
+            focused_label(&mut app, &ctx).as_deref(),
+            Some("Review recipients")
+        );
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::SHIFT);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        render(&mut app, &ctx);
+        assert!(app.forward_reviewing);
+        assert_eq!(focused_label(&mut app, &ctx).as_deref(), Some("Back"));
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        render(&mut app, &ctx);
+        assert!(!app.forward_reviewing);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        let tree = tree_after(&mut app, &ctx, None);
+        let active = list_nodes(&tree, list).1.expect("the chat it was on");
+        assert_eq!(active.position_in_set(), Some(1));
+        assert_eq!(active.toggled(), Some(egui::accesskit::Toggled::True));
+    }
+
+    /// A full forwarding list keeps its other chats out: each is unavailable
+    /// and says why, and Space on one says it too.
+    #[test]
+    fn a_full_forward_list_says_why_a_chat_is_out() {
+        use crate::ui::dialogs::forward_list_id;
+        let mut app = app();
+        apply_flags(&mut app, Some("forward-full"));
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let list = forward_list_id();
+        let out = app
+            .chats
+            .iter()
+            .filter(|chat| chat.can_send())
+            .map(|chat| chat.id.clone())
+            .find(|chat| !app.forward_recipients.contains(chat))
+            .expect("a chat left out");
+        app.forward_cursor = Some(out.clone());
+        ctx.memory_mut(|memory| memory.request_focus(list));
+        render(&mut app, &ctx);
+        let tree = tree_after(&mut app, &ctx, None);
+        let active = list_nodes(&tree, list).1.expect("the chat left out");
+        let why = format!(
+            "You can forward to up to {} chats",
+            crate::model::FORWARD_LIMIT
+        );
+        assert!(active.is_disabled());
+        assert_eq!(active.description(), Some(why.as_str()));
+        let before = app.forward_recipients.clone();
+        press_key(&mut app, &ctx, egui::Key::Space, egui::Modifiers::NONE);
+        assert_eq!(app.forward_recipients, before);
+        assert!(said_last(&app, &why), "{:?}", app.announcer.spoken());
     }
 
     #[test]
@@ -13007,6 +13344,43 @@ mod tests {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
         // The new contact's sample number says how to write it.
         assert!(kept.iter().any(|kept| kept == "15551234567"), "{kept:?}");
+    }
+
+    /// The chat list's search and the open chat's search say what each
+    /// searches, while both still show "Search".
+    #[test]
+    fn the_two_search_fields_say_what_they_search() {
+        use egui::accesskit::Role;
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let field = |tree: &egui::accesskit::TreeUpdate, id: egui::Id| {
+            tree.nodes
+                .iter()
+                .find(|(node, _)| *node == id.accesskit_id())
+                .map(|(_, node)| node.clone())
+                .expect("the search field is in the tree")
+        };
+        let list = field(&page_tree(&ctx, "chat"), egui::Id::new("chat-search"));
+        assert_eq!(list.label(), Some("Search chats"));
+        assert_eq!(list.placeholder(), None);
+        assert_ne!(list.role(), Role::Unknown);
+        let mut app = self::app();
+        app.attach(&ctx);
+        apply_flags(&mut app, Some("chat-search"));
+        // Empty, so the pane shows the line the name repeats.
+        app.chat_search.clear();
+        render(&mut app, &ctx);
+        let tree = settings_access_tests::tree(&mut app, &ctx);
+        let title = app
+            .current_chat()
+            .map(|chat| app.chat_title(chat))
+            .expect("a chat is open");
+        let chat = field(&tree, crate::ui::pane::field_id());
+        assert_eq!(
+            chat.label(),
+            Some(format!("Search messages with {title}").as_str())
+        );
+        assert_eq!(chat.placeholder(), None);
     }
 
     /// Menus opened from the keyboard name every control too: the message
@@ -27187,7 +27561,7 @@ mod settings_access_tests {
     }
 
     /// One frame with `events`, leaving AccessKit as it is.
-    fn input_frame(
+    pub(super) fn input_frame(
         app: &mut App,
         ctx: &egui::Context,
         events: Vec<egui::Event>,
@@ -27222,7 +27596,7 @@ mod settings_access_tests {
             .map(|(id, node)| (*id, node.clone()))
     }
 
-    fn node(tree: &TreeUpdate, id: NodeId) -> Node {
+    pub(super) fn node(tree: &TreeUpdate, id: NodeId) -> Node {
         tree.nodes
             .iter()
             .find(|(found, _)| *found == id)
@@ -27230,7 +27604,7 @@ mod settings_access_tests {
             .expect("the node is in the tree")
     }
 
-    fn focused(tree: &TreeUpdate) -> Node {
+    pub(super) fn focused(tree: &TreeUpdate) -> Node {
         node(tree, tree.focus)
     }
 
@@ -27271,7 +27645,7 @@ mod settings_access_tests {
         }
     }
 
-    fn settings(flag: &str) -> (App, egui::Context) {
+    pub(super) fn settings(flag: &str) -> (App, egui::Context) {
         let mut app = app();
         let ctx = egui::Context::default();
         app.attach(&ctx);
@@ -27280,7 +27654,7 @@ mod settings_access_tests {
         (app, ctx)
     }
 
-    fn spoke(app: &App, text: &str) -> bool {
+    pub(super) fn spoke(app: &App, text: &str) -> bool {
         app.announcer
             .spoken()
             .iter()
@@ -28106,5 +28480,282 @@ mod settings_access_tests {
         assert_eq!(app.page, crate::model::Page::Chats);
         let tree = tree(&mut app, &ctx);
         assert_eq!(tree.focus, gear, "focus is back on the gear");
+    }
+}
+
+/// Search with a screen reader and the keyboard: the search pane's results
+/// list, its keys, its day filter, and Escape in its field.
+#[cfg(test)]
+mod search_access_tests {
+    use super::settings_access_tests::{focused, node, settings, spoke, tree};
+    use super::tests::{press_key, render};
+    use super::*;
+    use crate::ui::pane;
+    use egui::accesskit::{Node, NodeId, Role, TreeUpdate};
+
+    fn focus_field(app: &mut App, ctx: &egui::Context) {
+        ctx.memory_mut(|memory| memory.request_focus(pane::field_id()));
+        render(app, ctx);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(pane::field_id())
+        );
+    }
+
+    /// The pane's results list and its items, by position.
+    fn results(tree: &TreeUpdate) -> (Node, Vec<(NodeId, Node)>) {
+        let list = node(tree, pane::results_list_id().accesskit_id());
+        let len = list.size_of_set().expect("the list has a size");
+        let mut items: Vec<(NodeId, Node)> = tree
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.role() == Role::ListBoxOption)
+            .filter(|(_, node)| node.size_of_set() == Some(len))
+            .map(|(id, node)| (*id, node.clone()))
+            .collect();
+        items.sort_by_key(|(_, node)| node.position_in_set());
+        (list, items)
+    }
+
+    /// What the item for `hit` is expected to read.
+    fn expected_label(app: &App, hit: &crate::model::Message) -> String {
+        let sender = if hit.from_me {
+            "You".to_owned()
+        } else {
+            app.display_name_or(&hit.sender, hit.sender_name.as_deref())
+        };
+        let line = hit.text_matching("engine").expect("a matching line");
+        let line = app.preview_line(&line, hit);
+        let time = crate::util::chat_stamp(app.locale, hit.timestamp);
+        crate::a11y::search_hit_label(&sender, &line, &time)
+    }
+
+    #[test]
+    fn the_search_pane_lists_its_results_as_a_listbox() {
+        let (mut app, ctx) = settings("chat-search");
+        let hits = app.chat_search_hits.clone();
+        assert!(hits.len() > 2, "the sample has several matches");
+        let tree = tree(&mut app, &ctx);
+        let (list, items) = results(&tree);
+        assert_eq!(list.role(), Role::ListBox);
+        assert_eq!(list.label(), Some("Search results"));
+        assert_eq!(list.size_of_set(), Some(hits.len()));
+        assert_eq!(items.len(), hits.len(), "every result is an item");
+        for (index, ((_, item), hit)) in items.iter().zip(&hits).enumerate() {
+            assert_eq!(item.position_in_set(), Some(index));
+            assert_eq!(item.label(), Some(expected_label(&app, hit).as_str()));
+            assert!(
+                item.label()
+                    .is_some_and(|label| label.to_lowercase().contains("engine"))
+            );
+            // A result is never selected, nor a toggle.
+            assert_eq!(item.is_selected(), None);
+            assert_eq!(item.toggled(), None);
+        }
+    }
+
+    /// From the field the arrows move the current result, which the field
+    /// and the list both name as their active descendant, so a screen reader
+    /// reads it while typing stays in the field. Enter jumps to it, and the
+    /// message list's cursor follows.
+    #[test]
+    fn the_arrows_in_the_field_name_the_current_result_and_enter_jumps() {
+        let (mut app, ctx) = settings("chat-search");
+        let chat = app.open_chat.clone().unwrap();
+        let hits = app.chat_search_hits.clone();
+        focus_field(&mut app, &ctx);
+        let tree_before = tree(&mut app, &ctx);
+        assert_eq!(
+            node(&tree_before, pane::field_id().accesskit_id()).active_descendant(),
+            None,
+            "nothing is current before an arrow"
+        );
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        assert_eq!(app.chat_search_selected, Some(1));
+        let tree = tree(&mut app, &ctx);
+        let (list, items) = results(&tree);
+        assert_eq!(tree.focus, pane::field_id().accesskit_id(), "typing stays");
+        assert_eq!(list.active_descendant(), Some(items[1].0));
+        assert_eq!(
+            node(&tree, tree.focus).active_descendant(),
+            Some(items[1].0)
+        );
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(app.message_cursor.get(&chat), Some(&hits[1].id));
+    }
+
+    /// Tab from the field reaches the list itself, where the arrows, Home,
+    /// End and Enter work as in any list.
+    #[test]
+    fn tab_reaches_the_results_list_where_the_arrows_walk_it() {
+        let (mut app, ctx) = settings("chat-search");
+        let chat = app.open_chat.clone().unwrap();
+        let hits = app.chat_search_hits.clone();
+        focus_field(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(pane::results_list_id())
+        );
+        let tree_in = tree(&mut app, &ctx);
+        let (list, items) = results(&tree_in);
+        assert_eq!(tree_in.focus, pane::results_list_id().accesskit_id());
+        assert_eq!(
+            list.active_descendant(),
+            Some(items[0].0),
+            "the newest result is current"
+        );
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        assert_eq!(app.chat_search_selected, Some(1));
+        press_key(&mut app, &ctx, egui::Key::End, egui::Modifiers::NONE);
+        let last = hits.len() - 1;
+        assert_eq!(app.chat_search_selected, Some(last));
+        let (list, items) = results(&tree(&mut app, &ctx));
+        assert_eq!(list.active_descendant(), Some(items[last].0));
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(app.message_cursor.get(&chat), Some(&hits[last].id));
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(pane::results_list_id()),
+            "the list keeps focus beside the conversation"
+        );
+    }
+
+    #[test]
+    fn escape_clears_the_pane_field_says_so_then_closes_the_pane() {
+        let (mut app, ctx) = settings("chat-search");
+        focus_field(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        render(&mut app, &ctx);
+        assert!(app.chat_search.is_empty());
+        assert!(app.chat_search_visible(), "the pane stays");
+        assert!(
+            spoke(&app, "Search cleared"),
+            "{:?}",
+            app.announcer.spoken()
+        );
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(pane::field_id())
+        );
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(!app.chat_search_visible());
+    }
+
+    #[test]
+    fn escape_clearing_the_chat_list_search_says_so() {
+        let (mut app, ctx) = settings("chat");
+        press_key(&mut app, &ctx, egui::Key::K, egui::Modifiers::COMMAND);
+        app.actions.push(crate::model::Action::Search("a".into()));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(app.search.is_empty());
+        assert!(
+            spoke(&app, "Search cleared"),
+            "{:?}",
+            app.announcer.spoken()
+        );
+    }
+
+    /// The calendar button, as the pane drew it last.
+    fn calendar_button(ctx: &egui::Context) -> egui::Id {
+        crate::ui::focus::control(ctx, crate::ui::focus::Stop::ChatSearchDate)
+            .expect("the calendar button is drawn")
+    }
+
+    fn day_label(app: &App, date: jiff::civil::Date) -> String {
+        crate::util::long_date(app.locale, date)
+    }
+
+    /// Opened from the keys, the day filter takes focus on today; its days
+    /// are labelled buttons the arrows walk, a week at a time up and down,
+    /// never into the future; Escape closes it and returns focus to the
+    /// button that opened it, and Enter picks a day and does the same.
+    #[test]
+    fn the_day_filter_opens_on_today_and_the_arrows_walk_its_days() {
+        let (mut app, ctx) = settings("chat-search");
+        let today = crate::util::today();
+        let days = |n: i64| {
+            today
+                .checked_add(jiff::Span::new().days(n))
+                .expect("a date")
+        };
+        render(&mut app, &ctx);
+        let button = calendar_button(&ctx);
+        ctx.memory_mut(|memory| memory.request_focus(button));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert!(app.chat_search_calendar);
+        let open = tree(&mut app, &ctx);
+        let day = focused(&open);
+        assert_eq!(day.role(), Role::Button);
+        assert_eq!(day.label(), Some(day_label(&app, today).as_str()));
+        // Nothing has been said tomorrow.
+        press_key(&mut app, &ctx, egui::Key::ArrowRight, egui::Modifiers::NONE);
+        assert_eq!(
+            focused(&tree(&mut app, &ctx)).label(),
+            Some(day_label(&app, today).as_str())
+        );
+        press_key(&mut app, &ctx, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+        assert_eq!(
+            focused(&tree(&mut app, &ctx)).label(),
+            Some(day_label(&app, days(-1)).as_str())
+        );
+        // A week back, across the month's start when it comes to that.
+        press_key(&mut app, &ctx, egui::Key::ArrowUp, egui::Modifiers::NONE);
+        assert_eq!(
+            focused(&tree(&mut app, &ctx)).label(),
+            Some(day_label(&app, days(-8)).as_str())
+        );
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        assert_eq!(
+            focused(&tree(&mut app, &ctx)).label(),
+            Some(day_label(&app, days(-1)).as_str())
+        );
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(!app.chat_search_calendar);
+        assert!(app.chat_search_visible(), "only the day filter closes");
+        assert_eq!(tree(&mut app, &ctx).focus, button.accesskit_id());
+
+        // Opened again, Enter picks the day reached and returns focus too.
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert!(app.chat_search_calendar);
+        press_key(&mut app, &ctx, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(app.chat_search_day, Some(days(-1)));
+        assert!(!app.chat_search_calendar);
+        assert_eq!(tree(&mut app, &ctx).focus, button.accesskit_id());
+    }
+
+    /// A pointer click on the calendar button, without a screen reader,
+    /// opens the day filter and moves no focus into it.
+    #[test]
+    fn the_day_filter_opened_with_the_pointer_takes_no_focus() {
+        let (mut app, ctx) = settings("chat-search");
+        ctx.disable_accesskit();
+        render(&mut app, &ctx);
+        let button = calendar_button(&ctx);
+        let centre = ctx.read_response(button).expect("drawn").rect.center();
+        let press = |pressed| egui::Event::PointerButton {
+            pos: centre,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let before = ctx.memory(|memory| memory.focused());
+        super::settings_access_tests::input_frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(centre), press(true)],
+        );
+        super::settings_access_tests::input_frame(&mut app, &ctx, vec![press(false)]);
+        render(&mut app, &ctx);
+        assert!(app.chat_search_calendar);
+        let focused = ctx.memory(|memory| memory.focused());
+        assert!(
+            focused.is_none_or(|id| focused == before || id == button),
+            "focus moved into the calendar: {focused:?}"
+        );
     }
 }

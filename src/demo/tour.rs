@@ -986,6 +986,12 @@ mod tests {
             "and the field keeps the keyboard for the next one"
         );
         assert!(app.chat_search_open);
+        // Escape in the field first empties the query, then closes the pane.
+        frame(&mut app, &mut tour, &ctx, vec![key(egui::Key::Escape)]);
+        frame(&mut app, &mut tour, &ctx, Vec::new());
+        assert!(app.chat_search_open, "the first Escape clears the field");
+        assert!(app.chat_search.is_empty());
+        assert!(ctx.memory(|memory| memory.has_focus(field)));
         frame(&mut app, &mut tour, &ctx, vec![key(egui::Key::Escape)]);
         frame(&mut app, &mut tour, &ctx, Vec::new());
         assert!(!app.chat_search_open, "Escape closes the pane");

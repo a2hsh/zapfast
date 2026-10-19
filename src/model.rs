@@ -2333,6 +2333,9 @@ pub enum Action {
     CloseContactEdit,
     /// Replaces the query of the open chat's search.
     ChatSearch(String),
+    /// Escape in the pane's field with a query: empties it, says so, and
+    /// leaves focus in the field.
+    ClearChatSearch,
     /// Restricts the in-chat search to a local calendar day.
     SetChatSearchDay(Option<jiff::civil::Date>),
     CloseChat,

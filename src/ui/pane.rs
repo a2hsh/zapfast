@@ -33,8 +33,79 @@ const ROW_HEIGHT: f32 = 60.0;
 /// Characters of context kept before a match deep in a long line.
 const LEAD: usize = 18;
 
-fn field_id() -> egui::Id {
+pub fn field_id() -> egui::Id {
     egui::Id::new("chat-message-search")
+}
+
+/// The results list's focusable container: one Tab stop whose node is the
+/// "Search results" ListBox.
+pub fn results_list_id() -> egui::Id {
+    egui::Id::new("chat-search-results")
+}
+
+fn field_focus_frame_id() -> egui::Id {
+    field_id().with("focused-frame")
+}
+
+/// Records that the field has focus in this frame's pass.
+pub fn mark_field_focused(ctx: &egui::Context) {
+    let frame = ctx.cumulative_frame_nr();
+    ctx.data_mut(|data| data.insert_temp(field_focus_frame_id(), frame));
+}
+
+/// Whether the field had focus at the end of the last frame. egui drops
+/// focus on Escape before the keys are read, so this is how Escape knows it
+/// was pressed in the field.
+pub fn field_had_focus(ctx: &egui::Context) -> bool {
+    let frame = ctx.cumulative_frame_nr();
+    ctx.data(|data| data.get_temp::<u64>(field_focus_frame_id()))
+        .is_some_and(|marked| marked + 1 >= frame)
+}
+
+/// About a screen of results, as PgUp and PgDn move in the list.
+fn page_rows(ctx: &egui::Context) -> usize {
+    ctx.data(|data| data.get_temp::<usize>(results_list_id().with("page")))
+        .unwrap_or(8)
+}
+
+/// One day's button in the day filter.
+fn day_id(date: Date) -> egui::Id {
+    egui::Id::new(("chat-search-day", date.year(), date.month(), date.day()))
+}
+
+/// The control that opened the day filter from the keys, to have focus
+/// again once the keys close it.
+fn calendar_opener_id() -> egui::Id {
+    egui::Id::new("chat-search-calendar-opener")
+}
+
+/// The day that takes focus once the day filter draws it.
+fn calendar_focus_id() -> egui::Id {
+    egui::Id::new("chat-search-calendar-focus")
+}
+
+/// The day filter just opened from `opener` on `day`. Opened from the keys
+/// (Enter or Space) or with a screen reader running, focus moves to that
+/// day, and comes back to `opener` when the filter closes; a pointer click
+/// alone moves no focus, so a mouse user sees the filter as before.
+fn calendar_opened(ctx: &egui::Context, opener: egui::Id, day: Date) {
+    let clicked = ctx.input(|input| input.pointer.any_click());
+    if clicked && !crate::a11y::screen_reader_active(ctx, egui::accesskit_root_id()) {
+        forget_calendar_focus(ctx);
+        return;
+    }
+    ctx.data_mut(|data| {
+        data.insert_temp(calendar_opener_id(), opener);
+        data.insert_temp(calendar_focus_id(), day);
+    });
+}
+
+/// Focus stays where the pointer or a closed pane left it.
+fn forget_calendar_focus(ctx: &egui::Context) {
+    ctx.data_mut(|data| {
+        data.remove::<egui::Id>(calendar_opener_id());
+        data.remove::<Date>(calendar_focus_id());
+    });
 }
 
 /// Docks the pane when there is room, before the conversation is laid out.
@@ -42,6 +113,8 @@ fn field_id() -> egui::Id {
 /// after the conversation so it lies on top.
 pub fn show(app: &mut App, ui: &mut egui::Ui) -> Option<Rect> {
     if !app.chat_search_visible() {
+        // A pane closed with its day filter open gives no focus back later.
+        forget_calendar_focus(ui.ctx());
         return None;
     }
     let wanted = app.settings.search_pane_width;
@@ -211,6 +284,7 @@ fn search(app: &mut App, ui: &mut egui::Ui, overlay: bool) {
     let palette = app.palette;
     let (scroll_to, mut picked) = keyboard(app, ui);
     let mut calendar_button = Rect::NOTHING;
+    let mut calendar_id = None;
     Frame::new()
         .inner_margin(Margin::symmetric(14, 10))
         .show(ui, |ui| {
@@ -250,10 +324,15 @@ fn search(app: &mut App, ui: &mut egui::Ui, overlay: bool) {
                 )
                 .tab_stop(Stop::ChatSearchDate);
                 calendar_button = calendar.rect;
+                calendar_id = Some(calendar.id);
                 if calendar.clicked() {
                     app.chat_search_calendar = !app.chat_search_calendar;
                     if app.chat_search_calendar {
                         app.chat_search_month = app.chat_search_day.unwrap_or_else(util::today);
+                        calendar_opened(ui.ctx(), calendar.id, app.chat_search_month);
+                    } else {
+                        // Closed by its own button, which keeps focus.
+                        forget_calendar_focus(ui.ctx());
                     }
                 }
                 ui.add_space(6.0);
@@ -268,6 +347,16 @@ fn search(app: &mut App, ui: &mut egui::Ui, overlay: bool) {
                     width,
                 )
                 .tab_stop(Stop::ChatSearchField);
+                // Named for whose messages it searches, as the empty pane
+                // says below it, apart from the chat list's search. Built
+                // only while a screen reader is attached.
+                ui.ctx().accesskit_node_builder(response.id, |node| {
+                    let title = app
+                        .current_chat()
+                        .map(|chat| app.chat_title(chat))
+                        .unwrap_or_default();
+                    node.set_label(crate::a11y::chat_search_label(app.locale, &title));
+                });
                 if text != app.chat_search {
                     app.actions.push(Action::ChatSearch(text));
                 }
@@ -275,12 +364,32 @@ fn search(app: &mut App, ui: &mut egui::Ui, overlay: bool) {
                     app.focus_chat_search = false;
                     response.request_focus();
                 }
+                if response.has_focus() {
+                    mark_field_focused(ui.ctx());
+                }
             });
             if let Some(day) = app.chat_search_day {
                 ui.add_space(8.0);
                 day_chip(app, ui, &palette, day);
             }
         });
+    // The day filter closed from the keys (Escape, or a day picked with
+    // Enter): focus goes back to what opened it, drawn above in this pass,
+    // or to the calendar button when that was the day's chip and the day
+    // was just cleared.
+    if !app.chat_search_calendar
+        && let Some(opener) = ui
+            .ctx()
+            .data(|data| data.get_temp::<egui::Id>(calendar_opener_id()))
+    {
+        forget_calendar_focus(ui.ctx());
+        let drawn = ui
+            .ctx()
+            .viewport(|viewport| viewport.this_pass.widgets.contains(opener));
+        if let Some(target) = drawn.then_some(opener).or(calendar_id) {
+            ui.memory_mut(|memory| memory.request_focus(target));
+        }
+    }
     if app.chat_search_calendar {
         calendar_popup(app, ui, &palette, calendar_button);
     }
@@ -313,7 +422,14 @@ fn search(app: &mut App, ui: &mut egui::Ui, overlay: bool) {
         });
         return;
     }
+    // Asked for only while a screen reader is attached.
+    let locale = app.locale;
+    let label = move || crate::i18n::gettext(locale, "Search results").into_owned();
     if app.chat_search_hits.is_empty() {
+        // Still the list, with no items, so a reader in it keeps focus.
+        let region = ui.available_rect_before_wrap();
+        super::list_nav::container(ui, results_list_id(), region, label, 0)
+            .tab_stop(Stop::ChatSearchResults);
         if app.chat_search_pending {
             ui.add_space(32.0);
             ui.vertical_centered(|ui| theme::spinner(ui, 22.0, palette.secondary));
@@ -331,13 +447,63 @@ fn search(app: &mut App, ui: &mut egui::Ui, overlay: bool) {
     // Taken for the frame rather than cloned: the rows only push actions.
     let hits = std::mem::take(&mut app.chat_search_hits);
     let query = app.chat_search.trim().to_owned();
+    // The results are one ListBox, created before its rows so their nodes
+    // hang from it. It senses focus only, so the pointer sees the rows as
+    // before; Tab reaches it after the field.
+    let list = results_list_id();
+    let region = ui.available_rect_before_wrap();
+    let container = super::list_nav::container(ui, list, region, label, hits.len())
+        .tab_stop(Stop::ChatSearchResults);
+    let list_focused = container.has_focus();
+    let rows = (region.height() / ROW_HEIGHT).floor().max(1.0) as usize;
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(list.with("page"), rows));
+    // The current result: the one the arrows reached, else the newest, as
+    // the list's own keys start from it.
+    let current = app
+        .chat_search_selected
+        .map(|index| index.min(hits.len() - 1))
+        .unwrap_or(0);
+    let mut active = None;
     egui::ScrollArea::vertical()
         .id_salt("chat-search-hits")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for (index, hit) in hits.iter().enumerate() {
                 let selected = app.chat_search_selected == Some(index);
-                if hit_row(app, ui, hit, &query, selected, scroll_to == Some(index)) {
+                let row = ui
+                    .scope_builder(
+                        egui::UiBuilder::new()
+                            .id_salt(("hit", &hit.id))
+                            .accessibility_parent(list),
+                        |ui| {
+                            hit_row(
+                                app,
+                                ui,
+                                hit,
+                                &query,
+                                selected,
+                                scroll_to == Some(index),
+                                (index, hits.len()),
+                            )
+                        },
+                    )
+                    .inner;
+                if index == current {
+                    // Ringed only while the list itself has focus, and then
+                    // only after keyboard navigation, as any focused control.
+                    if list_focused {
+                        theme::focus_outline(ui, list, row.rect.shrink(2.0), 6.0);
+                    }
+                    // Laid out in this pass, so its node is in this pass's
+                    // tree and may be named as the active descendant.
+                    active = Some(row.id);
+                }
+                if row.clicked() {
+                    app.actions.push(Action::OpenMessage {
+                        chat: hit.chat.clone(),
+                        message: hit.id.clone(),
+                    });
                     app.chat_search_selected = Some(index);
                     picked = true;
                 }
@@ -367,6 +533,20 @@ fn search(app: &mut App, ui: &mut egui::Ui, overlay: bool) {
             }
             ui.add_space(8.0);
         });
+    super::list_nav::set_active(ui.ctx(), list, active);
+    // While the field has focus and the arrows have reached a result, the
+    // field names it too, as a combo box's text field names its list's
+    // current option: a screen reader reads the result while typing stays
+    // in the field. AccessKit speaks only the focused node's active
+    // descendant, never the unfocused list's.
+    if app.chat_search_selected.is_some()
+        && ui.memory(|memory| memory.has_focus(field_id()))
+        && let Some(row) = active
+    {
+        ui.ctx().accesskit_node_builder(field_id(), |node| {
+            node.set_active_descendant(row.accesskit_id());
+        });
+    }
     app.chat_search_hits = hits;
     if picked && overlay {
         // Folded, not closed: the query, day and results wait for the
@@ -377,11 +557,18 @@ fn search(app: &mut App, ui: &mut egui::Ui, overlay: bool) {
 }
 
 /// Walks the results from the search field: the arrows move through them
-/// and Enter opens the one reached, or the newest. Returns the row to bring
-/// into view, and whether one was opened.
+/// and Enter opens the one reached, or the newest. The results list, once
+/// focused, takes the keys any list does. Returns the row to bring into
+/// view, and whether one was opened.
 fn keyboard(app: &mut App, ui: &egui::Ui) -> (Option<usize>, bool) {
+    if app.chat_search_calendar {
+        return (None, false);
+    }
+    if ui.memory(|memory| memory.has_focus(results_list_id())) {
+        return list_keyboard(app, ui.ctx());
+    }
     let focused = ui.memory(|memory| memory.has_focus(field_id()));
-    if !focused || app.chat_search_calendar {
+    if !focused {
         return (None, false);
     }
     // Taken before the field sees them: a single-line field would give up
@@ -418,6 +605,37 @@ fn keyboard(app: &mut App, ui: &egui::Ui) -> (Option<usize>, bool) {
     (selected.filter(|_| selected != before), enter)
 }
 
+/// The focused results list's keys: Up and Down move one result, Home and
+/// End go to the newest and the oldest, PgUp and PgDn move about a screen,
+/// and Enter opens the current result. The list keeps focus, as the field
+/// does.
+fn list_keyboard(app: &mut App, ctx: &egui::Context) -> (Option<usize>, bool) {
+    let step = super::list_nav::take_step(ctx, || page_rows(ctx));
+    let enter = ctx.input_mut(|input| super::keys::take_plain(input, Key::Enter));
+    let count = app.chat_search_hits.len();
+    if count == 0 {
+        return (None, false);
+    }
+    let before = app.chat_search_selected;
+    // Before any key the newest result is current, as the list shows it.
+    let current = before.map_or(0, |index| index.min(count - 1));
+    let mut selected = before;
+    if let Some(step) = step {
+        selected = super::list_nav::step(Some(current), count, step);
+    }
+    if enter {
+        let index = selected.unwrap_or(current);
+        selected = Some(index);
+        let hit = &app.chat_search_hits[index];
+        app.actions.push(Action::OpenMessage {
+            chat: hit.chat.clone(),
+            message: hit.id.clone(),
+        });
+    }
+    app.chat_search_selected = selected;
+    (selected.filter(|_| selected != before), enter)
+}
+
 /// The picked day: clicking it opens the calendar on it, and the cross
 /// beside it clears it.
 fn day_chip(app: &mut App, ui: &mut egui::Ui, palette: &Palette, day: Date) {
@@ -432,12 +650,14 @@ fn day_chip(app: &mut App, ui: &mut egui::Ui, palette: &Palette, day: Date) {
                 format!("{change}: {}", util::long_date(app.locale, day)),
             )
         });
+        let opener = chip.id;
         if chip
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .clicked()
         {
             app.chat_search_month = day;
             app.chat_search_calendar = true;
+            calendar_opened(ui.ctx(), opener, day);
         }
         let clear = crate::i18n::gettext(app.locale, "Clear the day filter");
         if theme::icon_button(ui, Icon::X, 14.0, palette.secondary, palette.text, &clear)
@@ -451,6 +671,9 @@ fn day_chip(app: &mut App, ui: &mut egui::Ui, palette: &Palette, day: Date) {
 
 /// The day filter floats under its icon and closes on a click elsewhere.
 fn calendar_popup(app: &mut App, ui: &egui::Ui, palette: &Palette, button: Rect) {
+    // Before the month's heading is drawn: an arrow can move to another
+    // month.
+    calendar_keys(app, ui.ctx());
     let id = egui::Id::new("chat-search-calendar");
     let width = CELL * 7.0 + 24.0;
     let screen = ui.ctx().content_rect();
@@ -483,7 +706,50 @@ fn calendar_popup(app: &mut App, ui: &egui::Ui, palette: &Palette, button: Rect)
     });
     if clicked_outside {
         app.chat_search_calendar = false;
+        forget_calendar_focus(ui.ctx());
     }
+}
+
+/// The arrows on a focused day: Left and Right move a day, Up and Down a
+/// week, into the month before or after when they cross its edge, and never
+/// past today, as nothing has been said in the future. The day reached takes
+/// focus when the grid draws it in this pass.
+fn calendar_keys(app: &mut App, ctx: &egui::Context) {
+    let first = app.chat_search_month.first_of_month();
+    let focused = (1..=first.days_in_month()).find_map(|day| {
+        let date = Date::new(first.year(), first.month(), day).ok()?;
+        ctx.memory(|memory| memory.has_focus(day_id(date)))
+            .then_some(date)
+    });
+    let Some(focused) = focused else {
+        return;
+    };
+    let days = ctx.input_mut(|input| {
+        [
+            (Key::ArrowLeft, -1),
+            (Key::ArrowRight, 1),
+            (Key::ArrowUp, -7),
+            (Key::ArrowDown, 7),
+        ]
+        .into_iter()
+        .find(|(key, _)| super::keys::take_plain(input, *key))
+        .map(|(_, days)| days)
+    });
+    let Some(days) = days else {
+        return;
+    };
+    // egui read the arrow as a spatial focus move at the start of the
+    // frame, which could leave the grid.
+    ctx.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
+    // Moving between days from the keyboard is keyboard navigation, as Tab
+    // is: the day reached is outlined.
+    ctx.data_mut(|data| data.insert_temp(theme::keyboard_focus_id(), true));
+    let target = focused
+        .checked_add(jiff::Span::new().days(days))
+        .unwrap_or(focused)
+        .min(util::today());
+    app.chat_search_month = target;
+    ctx.data_mut(|data| data.insert_temp(calendar_focus_id(), target));
 }
 
 fn month_header(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
@@ -566,13 +832,27 @@ fn month_grid(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
         let future = date > today;
         let response = ui.interact(
             cell,
-            egui::Id::new(("chat-search-day", month.year(), month.month(), day)),
+            day_id(date),
             if future {
                 Sense::hover()
             } else {
                 Sense::click()
             },
         );
+        // The day the keys opened the filter on, or moved to, takes focus
+        // in the pass that draws it, once that pass shows it: the filter's
+        // first pass only measures it, hidden, and gives no widget focus.
+        if !future
+            && response.visible()
+            && ui
+                .ctx()
+                .data(|data| data.get_temp::<Date>(calendar_focus_id()))
+                == Some(date)
+        {
+            ui.ctx()
+                .data_mut(|data| data.remove::<Date>(calendar_focus_id()));
+            response.request_focus();
+        }
         let selected = app.chat_search_day == Some(date);
         // Reachable and announced like every other button: the keyboard walks
         // to each day and a screen reader reads the date it picks.
@@ -611,6 +891,11 @@ fn month_grid(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             colour,
         );
         if response.clicked() {
+            // Picked with the pointer, focus stays where the pointer left
+            // it; picked with Enter or Space, it goes back to the opener.
+            if ui.input(|input| input.pointer.any_click()) {
+                forget_calendar_focus(ui.ctx());
+            }
             // A second click on the picked day clears it.
             let next = if selected { None } else { Some(date) };
             app.actions.push(Action::SetChatSearchDay(next));
@@ -637,7 +922,8 @@ fn month_step(month: Date, direction: i32) -> Date {
 }
 
 /// One result: when it was said, and the line that matched, with who said
-/// it in a group. Returns whether it was clicked.
+/// it in a group. It is item `index` of `len` in the results list, whose
+/// node it hangs from; the caller acts on a click.
 fn hit_row(
     app: &mut App,
     ui: &mut egui::Ui,
@@ -645,15 +931,16 @@ fn hit_row(
     query: &str,
     selected: bool,
     scroll_to: bool,
-) -> bool {
+    (index, len): (usize, usize),
+) -> egui::Response {
     let palette = app.palette;
+    // Clicks only, never focus: the keyboard reaches results through the
+    // field's arrows or the list's one Tab stop.
     let (rect, response) =
-        ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
+        ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::CLICK);
     if scroll_to {
         response.scroll_to_me(None);
     }
-    theme::reveal_focus(&response);
-    theme::focus_outline(ui, response.id, rect.shrink(2.0), 6.0);
     let stamp = util::chat_stamp(app.locale, hit.timestamp);
     // The preview comes from the line the query matched: the archive searches
     // the whole text, so a hit on a later line would otherwise preview a first
@@ -675,13 +962,26 @@ fn hit_row(
     } else {
         None
     };
-    response.widget_info(|| {
-        let text = match &who {
-            Some(who) => format!("{stamp}, {who}: {line}"),
-            None => format!("{stamp}, {line}"),
+    // Built only while a screen reader is attached. Read as a message is:
+    // who wrote it (the whole name, or "You"), the line that matched, and
+    // when. The arrows' current result is the list's active descendant,
+    // never a selection.
+    if crate::a11y::screen_reader_active(ui.ctx(), response.id) {
+        let sender = if hit.from_me {
+            crate::i18n::gettext(app.locale, "You").into_owned()
+        } else {
+            app.display_name_or(&hit.sender, hit.sender_name.as_deref())
         };
-        egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, text)
-    });
+        super::list_nav::mark_row(
+            ui.ctx(),
+            response.id,
+            crate::a11y::search_hit_label(&sender, &line, &stamp),
+            index,
+            len,
+            rect,
+            false,
+        );
+    }
     if ui.is_rect_visible(rect) {
         // Highlighted like a chat-list row; the cards keep hits apart, so
         // no rule runs between them.
@@ -726,15 +1026,7 @@ fn hit_row(
             &palette,
         );
     }
-    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-    if response.clicked() {
-        app.actions.push(Action::OpenMessage {
-            chat: hit.chat.clone(),
-            message: hit.id.clone(),
-        });
-        return true;
-    }
-    false
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// The part of `line` a one-line preview shows, and where `query` sits in

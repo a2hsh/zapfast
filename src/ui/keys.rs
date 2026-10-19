@@ -201,6 +201,19 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
             actions.extend(chat_list_keys(app, ctx, chat));
         }
     }
+    // The focused Starred list, in the chat list's place: the same keys
+    // move its current message, Enter opens it and Shift+F10 its menu.
+    if app.show_starred
+        && app.dialog.is_none()
+        && !app.show_update
+        && app.picker.is_none()
+        && app.reaction_target.is_none()
+        && app.recording.is_none()
+        && !menu_open
+        && ctx.memory(|memory| memory.has_focus(crate::ui::chats::starred_list_id()))
+    {
+        actions.extend(crate::ui::chats::starred_keys(app, ctx));
+    }
     // The Calls page's focused call history or new-call list: the same keys
     // move its current row, Enter and Shift+F10 act on it.
     if app.page == Page::Calls
@@ -257,6 +270,9 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
         && app.picker.is_none()
         && app.reaction_target.is_none()
         && !menu_open
+        // The search pane's focused results list moves through its results
+        // with the same keys (`pane::list_keyboard`).
+        && !ctx.memory(|memory| memory.has_focus(crate::ui::pane::results_list_id()))
     {
         let home_end_allowed = !editing_text || (composer_focused && app.composer.is_empty());
         ctx.input_mut(|input| {
@@ -293,9 +309,28 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
             actions.push(Action::CancelSelection);
         } else if app.show_starred {
             actions.push(Action::ToggleStarred);
+            // From the list, back to the rail's Starred that opened it: the
+            // list is gone once it closes.
+            if escape_keeps_focus(ctx)
+                && focus_before_escape(ctx) == Some(crate::ui::chats::starred_list_id())
+            {
+                let starred =
+                    crate::ui::rail::destination_id(crate::ui::rail::Destination::Starred);
+                ctx.memory_mut(|memory| memory.request_focus(starred));
+            }
         } else if app.chat_search_visible() && app.chat_search_calendar {
             // The day filter first, then the pane it hangs from.
             app.chat_search_calendar = false;
+        } else if app.chat_search_visible()
+            && !app.chat_search.is_empty()
+            && crate::ui::pane::field_had_focus(ctx)
+        {
+            // A query typed in the pane's field goes first; the next Escape
+            // closes the pane. egui dropped the field's focus on this Escape
+            // already: it comes back in this pass, which draws the field, so
+            // a screen reader never hears focus leave it.
+            ctx.memory_mut(|memory| memory.request_focus(crate::ui::pane::field_id()));
+            actions.push(Action::ClearChatSearch);
         } else if app.chat_search_visible() && !composer_focused {
             actions.push(Action::CloseChatSearch);
         } else if app.emoji_start.is_some() {
@@ -348,6 +383,7 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
         } else if search_focused || !app.search.is_empty() {
             if !app.search.is_empty() {
                 actions.push(Action::Search(String::new()));
+                app.announce_search_cleared();
             }
             if app.open_chat.is_some() {
                 actions.push(Action::FocusComposer);
@@ -3081,6 +3117,14 @@ mod tests {
         assert_eq!(enter(&mut app, under), [Action::ApplyPictureEdit]);
     }
 
+    /// A frame that draws the search pane's field with focus.
+    fn field_focused_frame(ctx: &egui::Context) {
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            crate::ui::pane::mark_field_focused(ui.ctx());
+        });
+        output.textures_delta.clear();
+    }
+
     fn escape(app: &mut App, ctx: &egui::Context) {
         let mut output = ctx.run_ui(
             egui::RawInput {
@@ -3289,6 +3333,13 @@ mod tests {
         assert!(
             matches!(app.actions.as_slice(), [Action::Search(text), Action::FocusComposer] if text.is_empty())
         );
+        // Spoken by the next frame's announcer.
+        app.announcer.show(&egui::Context::default(), true);
+        assert!(
+            app.announcer.spoken().contains(&"Search cleared"),
+            "{:?}",
+            app.announcer.spoken()
+        );
         app.actions.clear();
         app.search.clear();
         escape(&mut app, &ctx);
@@ -3302,6 +3353,39 @@ mod tests {
             app.actions.as_slice(),
             [Action::CloseChat, Action::FocusChats]
         ));
+    }
+
+    /// In the search pane's field, Escape first empties a typed query; the
+    /// next one closes the pane, as it did. Elsewhere in the pane it closes
+    /// the pane at once.
+    #[test]
+    fn escape_clears_the_chat_search_field_before_closing_the_pane() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = App::headless(
+            crate::paths::AppDirs::under(root.path()),
+            crate::settings::Settings::default(),
+        )
+        .0;
+        app.page = Page::Chats;
+        app.open_chat = Some("fixture".into());
+        app.chat_search_open = true;
+        app.chat_search = "engine".into();
+        let ctx = egui::Context::default();
+        // The field had focus at the end of the last frame: egui drops it on
+        // Escape before the keys are read.
+        field_focused_frame(&ctx);
+        escape(&mut app, &ctx);
+        assert!(matches!(app.actions.as_slice(), [Action::ClearChatSearch]));
+        app.actions.clear();
+        app.chat_search.clear();
+        field_focused_frame(&ctx);
+        escape(&mut app, &ctx);
+        assert!(matches!(app.actions.as_slice(), [Action::CloseChatSearch]));
+        app.actions.clear();
+        // From the results, a query and all, the pane closes.
+        app.chat_search = "engine".into();
+        escape(&mut app, &ctx);
+        assert!(matches!(app.actions.as_slice(), [Action::CloseChatSearch]));
     }
 
     #[test]

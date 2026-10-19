@@ -575,6 +575,58 @@ pub fn chat_label(locale: Locale, label: &ChatLabel<'_>) -> String {
     parts.join(", ")
 }
 
+/// What a screen reader reads for one in-chat search result: who wrote it,
+/// the line the search matched, and when, joined with ", ".
+pub fn search_hit_label(sender: &str, line: &str, time: &str) -> String {
+    let mut parts = vec![
+        spoken(without_push_marker(sender)),
+        spoken(line),
+        time.to_owned(),
+    ];
+    parts.retain(|part| !part.is_empty());
+    parts.join(", ")
+}
+
+/// What a screen reader reads for one starred message: the chat it is in,
+/// who wrote it, its words and when, then when it was starred, joined with
+/// ", ".
+pub fn starred_label(
+    locale: Locale,
+    chat: &str,
+    sender: &str,
+    words: &str,
+    time: &str,
+    starred: &str,
+) -> String {
+    let mut parts = vec![
+        spoken(without_push_marker(chat)),
+        spoken(without_push_marker(sender)),
+        spoken(words),
+        time.to_owned(),
+        fill(
+            // Translators: when a message was starred, as the Starred list
+            // shows it ("Yesterday", "12:30").
+            &gettext(locale, "starred {moment}"),
+            &[("moment", starred)],
+        ),
+    ];
+    parts.retain(|part| !part.is_empty());
+    parts.join(", ")
+}
+
+/// The in-chat search field's name: "Search messages with Ahmed", the line
+/// the empty search pane shows, for one-to-one chats and groups alike. The
+/// field's own hint, "Search", is all a chat without a name gets.
+pub fn chat_search_label(locale: Locale, title: &str) -> String {
+    let name = spoken(without_push_marker(title));
+    if name.is_empty() {
+        return gettext(locale, "Search").into_owned();
+    }
+    // The search pane's own line, upstream's msgid with its translations:
+    // one value, and `replace` never looks inside it.
+    gettext(locale, "Search messages with {}").replace("{}", &name)
+}
+
 /// Whether a screen reader is attached. egui has no public flag, but the
 /// node builder exists only while AccessKit is on, so probing one widget
 /// tells idle frames to skip building labels nobody reads.
@@ -1219,6 +1271,40 @@ mod tests {
             "Ahmed, first line second line, 10:32 PM, replying to Sara: quoted line"
         );
         assert!(!text.contains(" ,") && !text.contains('\n'), "{text:?}");
+    }
+
+    #[test]
+    fn a_search_hit_reads_sender_line_and_time_as_one_clean_line() {
+        assert_eq!(
+            search_hit_label(" Ahmed\n", "the \u{2022} engine\n  failed ", "Yesterday"),
+            "Ahmed, the engine failed, Yesterday"
+        );
+        assert_eq!(search_hit_label("You", "", "10:32 PM"), "You, 10:32 PM");
+    }
+
+    /// A search result's sender known only from a profile is said without
+    /// the "~" its row shows.
+    #[test]
+    fn a_search_hit_says_a_profile_name_without_its_marker() {
+        assert_eq!(
+            search_hit_label("~Ana", "dinner?", "Yesterday"),
+            "Ana, dinner?, Yesterday"
+        );
+    }
+
+    /// The in-chat search field says whose messages it searches, the name
+    /// said as the chat's other names are.
+    #[test]
+    fn the_in_chat_search_is_named_after_its_chat() {
+        let en = Locale::default();
+        assert_eq!(chat_search_label(en, "Ahmed"), "Search messages with Ahmed");
+        assert_eq!(chat_search_label(en, "~Ana"), "Search messages with Ana");
+        assert_eq!(
+            chat_search_label(en, "Family\nand friends"),
+            "Search messages with Family and friends"
+        );
+        assert_eq!(chat_search_label(en, "A{}B"), "Search messages with A{}B");
+        assert_eq!(chat_search_label(en, "~"), "Search");
     }
 
     #[test]

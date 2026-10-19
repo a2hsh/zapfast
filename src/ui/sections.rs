@@ -71,6 +71,7 @@ pub fn of(stop: Stop) -> Section {
         | Stop::ChatSearchDate
         | Stop::ChatSearchField
         | Stop::ChatSearchDay
+        | Stop::ChatSearchResults
         | Stop::Messages => Section::Conversation,
         Stop::InfoClose | Stop::InfoControl(_) => Section::Info,
         Stop::Composer | Stop::MessageActions => Section::Composer,

@@ -9168,7 +9168,15 @@ impl Worker {
                     truncated,
                 });
             }
-            Err(error) => self.emit(Event::Error(format!("Could not search: {error}"))),
+            Err(error) => {
+                self.emit(Event::ChatSearchFailed {
+                    chat,
+                    query,
+                    from,
+                    until,
+                });
+                self.emit(Event::Error(format!("Could not search: {error}")));
+            }
         }
     }
 
@@ -9181,7 +9189,10 @@ impl Worker {
                 }
                 self.emit(Event::SearchHits { query, messages });
             }
-            Err(error) => self.emit(Event::Error(format!("Could not search: {error}"))),
+            Err(error) => {
+                self.emit(Event::SearchFailed { query });
+                self.emit(Event::Error(format!("Could not search: {error}")));
+            }
         }
     }
 

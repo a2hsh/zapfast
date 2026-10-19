@@ -6951,6 +6951,13 @@ fn menu_first_item_id(chat: &str, message: &str) -> egui::Id {
     bubble_id(chat, message).with("menu-first-item")
 }
 
+/// The first item the menu of `message` in `chat` drew in this pass, where a
+/// menu the keys open puts focus.
+pub(crate) fn menu_first_item(ctx: &egui::Context, chat: &str, message: &str) -> Option<egui::Id> {
+    ctx.data(|data| data.get_temp::<Option<egui::Id>>(menu_first_item_id(chat, message)))
+        .flatten()
+}
+
 /// Whether the message menu offers Reply. A call in the chat is a record,
 /// with its own menu and no replies.
 pub(crate) fn can_reply(content: &Content) -> bool {

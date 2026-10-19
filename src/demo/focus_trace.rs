@@ -710,6 +710,22 @@ fn the_switcher_asked_for_from_the_keys_takes_focus() {
     trace.assert_clean(from, "the switcher asked for");
 }
 
+/// The day filter opened from the keys for the first time puts focus on
+/// today at once: its first pass, drawn hidden to measure it, never leaves
+/// the window focused.
+#[test]
+fn the_day_filter_opens_from_the_keys_without_a_window_frame() {
+    let mut trace = Trace::new(app());
+    trace.press("Ctrl+F", egui::Key::F, egui::Modifiers::COMMAND);
+    focus_stop(&mut trace, Stop::ChatSearchDate);
+    let button = trace.last().egui;
+    let from = trace.mark();
+    trace.press("Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    assert!(trace.app.chat_search_calendar, "Enter opens the filter");
+    assert_ne!(trace.last().egui, button, "focus is on a day");
+    trace.assert_clean(from, "the day filter opened");
+}
+
 /// Tab walks the open chat as it is laid out, top to bottom: from the chat
 /// list to the chat's actions, its messages, the message field and Message
 /// actions, the window's last stop, then wraps to its first, the rail.
