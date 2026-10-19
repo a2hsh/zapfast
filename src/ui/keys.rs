@@ -323,6 +323,11 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
             // Taken here, the key never reaches the selection bar, and
             // would otherwise fall through to closing the chat.
             actions.push(Action::CancelSelection);
+            // The bar goes with the selection: focus in it goes to the
+            // message list, where the messages were picked.
+            if crate::ui::conversation::selection_bar_had_focus(ctx) && escape_keeps_focus(ctx) {
+                actions.push(Action::FocusMessages);
+            }
         } else if app.show_starred {
             actions.push(Action::ToggleStarred);
             // From the list, back to the rail's Starred that opened it: the
@@ -700,13 +705,6 @@ fn message_keys(app: &mut App, ctx: &egui::Context, chat: &str, id: &str) -> Vec
     }) {
         return Vec::new();
     }
-    // While this chat selects messages, a key acting on one message would
-    // act behind the selection's back, and the bubbles draw no menu then: one
-    // asked for would open only once the selection ends. The keys that move
-    // the list still move it.
-    if app.selecting_in(chat) {
-        return Vec::new();
-    }
     // A copy: the keys below change the window's state while they read it,
     // and the conversations are borrowed through the whole `App`. An album
     // is one row with several messages, its items.
@@ -832,6 +830,21 @@ fn message_keys(app: &mut App, ctx: &egui::Context, chat: &str, id: &str) -> Vec
         Some(crate::a11y::KeyTarget::Phone { url, .. }) => Some(url.clone()),
         _ => None,
     };
+    // While this chat selects messages, Space ticks or unticks the current
+    // message, as clicking its row does then, and F forwards the selection.
+    // Ctrl+Space and the Shift keys work with or without one, as in a file
+    // list: Ctrl+Space ticks (Shift+Space too on macOS, see
+    // `SHIFT_SPACE_SELECTS`), Ctrl+Up and Ctrl+Down move without ticking,
+    // and the Shift keys tick a range. Enter, which otherwise does what Space
+    // does, and the keys that act on one message wait until the selection
+    // ends: they would act behind its back, and the bubbles draw no menu
+    // then, so one asked for would open only after it.
+    let page = app.message_page_rows(ctx, chat);
+    let selected = app
+        .selection
+        .as_ref()
+        .filter(|(selecting, _)| selecting == chat)
+        .map(|(_, ids)| ids.clone());
     let mut opened_card = None;
     let mut actions = Vec::new();
     let mut said = None;
@@ -839,8 +852,41 @@ fn message_keys(app: &mut App, ctx: &egui::Context, chat: &str, id: &str) -> Vec
     let mut mute_said = None;
     let mut moved = None;
     let mut refused = None;
+    let mut nothing_selected = false;
     ctx.input_mut(|input| {
-        if take_exact(input, Modifiers::SHIFT, Key::F10) {
+        if take_select(input, SHIFT_SPACE_SELECTS) {
+            // As Ctrl-click: starts a selection with this message, or ticks
+            // or unticks it in the open one.
+            actions.push(if selected.is_some() {
+                Action::ToggleSelected(id.to_owned())
+            } else {
+                Action::SelectMessage(id.to_owned())
+            });
+        } else if selected.is_some() && take_plain_once(input, Key::Space) {
+            // Held, it ticks once, as Ctrl+Space does: its repeats would
+            // flip the message back and forth.
+            actions.push(Action::ToggleSelected(id.to_owned()));
+        } else if let Some(step) = take_extend(input, page) {
+            actions.push(Action::ExtendSelection(step));
+        } else if take_command(input, Key::ArrowUp) {
+            actions.push(Action::MessageCursor(crate::ui::list_nav::Step::Previous));
+        } else if take_command(input, Key::ArrowDown) {
+            actions.push(Action::MessageCursor(crate::ui::list_nav::Step::Next));
+        } else if let Some(ids) = &selected
+            && take_plain(input, Key::F)
+        {
+            // The whole selection, as the selection bar's Forward… does.
+            if ids.is_empty() {
+                nothing_selected = true;
+            } else {
+                actions.push(Action::ShowDialog(Dialog::Forward {
+                    chat: chat.to_owned(),
+                    messages: ids.clone(),
+                }));
+            }
+        } else if selected.is_some() {
+            // Selecting: nothing else acts on the message.
+        } else if take_exact(input, Modifiers::SHIFT, Key::F10) {
             actions.push(Action::OpenMessageMenu(id.to_owned()));
         } else if record {
             // Nothing else acts on a call.
@@ -933,6 +979,23 @@ fn message_keys(app: &mut App, ctx: &egui::Context, chat: &str, id: &str) -> Vec
     });
     if let Some(index) = opened_card {
         ctx.data_mut(|data| data.insert_temp(view::menu_card_id(chat, id), index));
+    }
+    // A selection draws each item of an album in a row of its own: one
+    // started on an album's item, as its own Select does, leaves the list on
+    // that item's row.
+    if album
+        && let Some(Action::SelectMessage(item)) = actions
+            .iter()
+            .find(|action| matches!(action, Action::SelectMessage(_)))
+    {
+        app.message_cursor.insert(chat.to_owned(), item.clone());
+        app.message_item = None;
+    }
+    if nothing_selected {
+        app.announcer.say(
+            crate::announcer::Category::Status,
+            crate::i18n::gettext(app.locale, "Nothing selected"),
+        );
     }
     // A download that Space or Enter asked for is spoken if it fails.
     if let Some((message, card)) = actions.iter().find_map(|action| match action {
@@ -1051,6 +1114,89 @@ fn take_command(input: &mut egui::InputState, key: Key) -> bool {
         !matches
     });
     taken
+}
+
+/// Removes this frame's first press of `key` with Control alone, if any, and
+/// reports whether one was found. Control on every platform, macOS too,
+/// where Command+Space belongs to the system. A held key's repeats do not
+/// count: the press toggles.
+fn take_control(input: &mut egui::InputState, key: Key) -> bool {
+    let mut taken = false;
+    input.events.retain(|event| {
+        let matches = !taken
+            && matches!(
+                event,
+                egui::Event::Key {
+                    key: found,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                    ..
+                } if *found == key
+                    && modifiers.matches_exact(Modifiers::CTRL)
+                    && !modifiers.mac_cmd
+            );
+        taken |= matches;
+        !matches
+    });
+    taken
+}
+
+/// Whether Shift+Space ticks the current message too, beside Control+Space:
+/// on macOS, where Control+Space is the system's "Select the previous input
+/// source" once a second input source is added, and the system takes it
+/// before ZapFast sees it. Elsewhere Ctrl+Space has no such owner, and
+/// Shift+Space is left alone: file lists there extend a range with it.
+const SHIFT_SPACE_SELECTS: bool = cfg!(target_os = "macos");
+
+/// Removes this frame's first press of the chord that ticks the current
+/// message, starting a selection if none is open, and reports whether one
+/// was found: Control+Space on every platform ([`take_control`]) and, with
+/// `shift_space` ([`SHIFT_SPACE_SELECTS`] in the app), Shift+Space. Each
+/// chord exactly: Shift+Space with Command, Control or Option held is not
+/// one. A held key's repeats do not count: the press toggles.
+fn take_select(input: &mut egui::InputState, shift_space: bool) -> bool {
+    if take_control(input, Key::Space) {
+        return true;
+    }
+    if !shift_space {
+        return false;
+    }
+    let mut taken = false;
+    input.events.retain(|event| {
+        let matches = !taken
+            && matches!(
+                event,
+                egui::Event::Key {
+                    key: Key::Space,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                    ..
+                } if *modifiers == Modifiers::SHIFT
+            );
+        taken |= matches;
+        !matches
+    });
+    taken
+}
+
+/// Takes this frame's Shift+Up, Shift+Down, Shift+Home, Shift+End,
+/// Shift+PgUp or Shift+PgDn, which tick a range of messages, as the step the
+/// cursor makes: the step of the same key without Shift, a page being
+/// `page` rows.
+fn take_extend(input: &mut egui::InputState, page: usize) -> Option<crate::ui::list_nav::Step> {
+    use crate::ui::list_nav::Step;
+    [
+        (Key::ArrowUp, Step::Previous),
+        (Key::ArrowDown, Step::Next),
+        (Key::Home, Step::First),
+        (Key::End, Step::Last),
+        (Key::PageUp, Step::PageUp(page)),
+        (Key::PageDown, Step::PageDown(page)),
+    ]
+    .into_iter()
+    .find_map(|(key, step)| take_exact(input, Modifiers::SHIFT, key).then_some(step))
 }
 
 /// Takes an exact Command/Ctrl+1..9 press, leaving modified number keys alone.
@@ -1662,6 +1808,16 @@ const MENU_KEYS: &str = if cfg!(target_os = "windows") {
     "Shift+F10"
 };
 
+/// Ticks the current message: Control on every platform, since Command+Space
+/// belongs to the system on macOS, and there Shift+Space as well, since
+/// Control+Space switches input sources once there are two
+/// ([`SHIFT_SPACE_SELECTS`]). `label` shows "Control" as ⌃ there.
+const SELECT_KEYS: &str = if cfg!(target_os = "macos") {
+    "Control+Space / Shift+Space"
+} else {
+    "Ctrl+Space"
+};
+
 /// Shortcuts shown in the help dialog.
 pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+K / Ctrl+Shift+F", "Search chats"),
@@ -1718,6 +1874,27 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("E", "React to the message (in the message list)"),
     ("C", "Copy the message (in the message list)"),
     ("F", "Forward the message (in the message list)"),
+    (
+        SELECT_KEYS,
+        "Select or unselect the message, starting a selection (in the message list)",
+    ),
+    (
+        "Space",
+        "Select or unselect the message while selecting (in the message list)",
+    ),
+    (
+        "Shift+↑ / ↓, Home / End",
+        "Move and select from the last selected message to the new one (in the message list)",
+    ),
+    (
+        "Shift+PgUp / PgDn",
+        "Move a screen and select from the last selected message (in the message list)",
+    ),
+    (
+        "Ctrl+↑ / Ctrl+↓",
+        "Move without changing the selection (in the message list)",
+    ),
+    ("F", "Forward the selected messages while selecting"),
     (
         DELETE_KEYS,
         "Delete the message for me (in the message list)",
@@ -2095,6 +2272,92 @@ mod tests {
         assert_eq!(
             opens(&message_key(&mut app, &chat, "text", Key::Space).0),
             ["https://a.org"]
+        );
+    }
+
+    /// The chord that ticks a message is Control+Space everywhere, and on
+    /// macOS Shift+Space too; each only with nothing else held, and only on
+    /// its first press. Off macOS Shift+Space is no chord.
+    #[test]
+    fn shift_space_ticks_only_on_macos_and_only_alone() {
+        // Whether each frame's press of Space with `modifiers` is taken, on
+        // one context: egui marks the presses after the first as the held
+        // key's repeats.
+        let takes = |modifiers: Modifiers, frames: usize, shift_space: bool| {
+            let ctx = egui::Context::default();
+            (0..frames)
+                .map(|_| {
+                    let mut taken = false;
+                    let mut output = ctx.run_ui(
+                        egui::RawInput {
+                            events: vec![egui::Event::Key {
+                                key: Key::Space,
+                                physical_key: None,
+                                pressed: true,
+                                repeat: false,
+                                modifiers,
+                            }],
+                            ..Default::default()
+                        },
+                        |ui| taken = ui.input_mut(|input| take_select(input, shift_space)),
+                    );
+                    output.textures_delta.clear();
+                    taken
+                })
+                .collect::<Vec<_>>()
+        };
+        // Control as each platform reports it: alone on macOS, with Command
+        // elsewhere.
+        for control in [Modifiers::CTRL, Modifiers::CTRL | Modifiers::COMMAND] {
+            for macos in [true, false] {
+                assert_eq!(
+                    takes(control, 1, macos),
+                    [true],
+                    "Control+Space, macOS {macos}"
+                );
+            }
+        }
+        assert_eq!(
+            takes(Modifiers::SHIFT, 3, true),
+            [true, false, false],
+            "Shift+Space on macOS, once however long it is held"
+        );
+        assert_eq!(takes(Modifiers::SHIFT, 1, false), [false], "not elsewhere");
+        assert_eq!(takes(Modifiers::NONE, 1, true), [false], "plain Space");
+        for extra in [
+            Modifiers::MAC_CMD,
+            Modifiers::COMMAND,
+            Modifiers::CTRL,
+            Modifiers::ALT,
+        ] {
+            assert_eq!(
+                takes(Modifiers::SHIFT | extra, 1, true),
+                [false],
+                "Shift+Space with {extra:?}"
+            );
+        }
+    }
+
+    /// Ctrl+Space on an album selects the item the cursor is on, as that
+    /// item's own Select does, and the list moves onto it: a selection draws
+    /// each of an album's items in a row of its own.
+    #[test]
+    fn ctrl_space_on_an_album_selects_its_current_item() {
+        let (_root, mut app, chat) = app_with(vec![
+            ("one", album_photo(Some("one.png"), None)),
+            ("two", album_photo(Some("two.png"), None)),
+            ("three", album_photo(Some("three.png"), None)),
+        ]);
+        app.message_cursor.insert(chat.clone(), "one".into());
+        for _ in 0..2 {
+            message_key(&mut app, &chat, "one", Key::ArrowRight);
+        }
+        let (actions, _) = message_key_with(&mut app, &chat, "one", Key::Space, Modifiers::CTRL);
+        assert_eq!(actions, [Action::SelectMessage("three".into())]);
+        assert_eq!(
+            app.message_cursor.get(&chat).map(String::as_str),
+            Some("three"),
+            "the list stands on the selected item's row"
         );
     }
 
@@ -2760,10 +3023,12 @@ mod tests {
         std::mem::take(&mut app.actions)
     }
 
-    /// The keys that act on one message (Enter, Space, R, E, C, F, Delete,
-    /// the item arrows) wait while the chat selects messages: the bubbles
-    /// draw no menu then, and the keys would act behind the selection's back.
-    /// Up and Down still move the list.
+    /// While the chat selects messages, the selection's own keys take over:
+    /// Space ticks the message, F forwards the selection and Escape cancels
+    /// it. Enter, which elsewhere does what Space does, and the keys that act
+    /// on one message (Shift+F10, R, E, C, Delete, the item arrows) wait: the
+    /// bubbles draw no menu then, and the keys would act behind the
+    /// selection's back. Up and Down still move the list.
     #[test]
     fn a_selection_holds_the_keys_that_act_on_a_message() {
         let (_root, mut app, chat, ctx) = focused_list();
@@ -2782,14 +3047,52 @@ mod tests {
                 "{key:?} acts without a selection"
             );
         }
+        // Released, so the presses below are not their repeats.
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events: keys
+                    .iter()
+                    .map(|key| egui::Event::Key {
+                        key: *key,
+                        physical_key: None,
+                        pressed: false,
+                        repeat: false,
+                        modifiers: Modifiers::NONE,
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+            |_| {},
+        );
+        output.textures_delta.clear();
         press_in_list(&mut app, &ctx, &chat, Key::ArrowRight);
         assert!(app.message_item.is_some(), "Right walks the items");
         app.message_item = None;
-        app.selection = Some((chat.clone(), Vec::new()));
-        for key in keys {
+        app.selection = Some((chat.clone(), vec!["one".into()]));
+        for key in [Key::Enter, Key::R, Key::E, Key::C, Key::Delete] {
             let actions = press_in_list(&mut app, &ctx, &chat, key);
             assert!(actions.is_empty(), "{key:?} while selecting: {actions:?}");
         }
+        app.actions.clear();
+        let list = crate::ui::conversation::messages_list_id(&chat);
+        ctx.memory_mut(|memory| memory.request_focus(list));
+        press(&mut app, &ctx, Key::F10, Modifiers::SHIFT);
+        assert!(app.actions.is_empty(), "Shift+F10 while selecting");
+        assert_eq!(
+            press_in_list(&mut app, &ctx, &chat, Key::Space),
+            [Action::ToggleSelected("two".into())],
+            "Space ticks while selecting"
+        );
+        assert_eq!(
+            press_in_list(&mut app, &ctx, &chat, Key::F),
+            [Action::ShowDialog(Dialog::Forward {
+                chat: chat.clone(),
+                messages: vec!["one".into()],
+            })]
+        );
+        assert!(
+            press_in_list(&mut app, &ctx, &chat, Key::Escape).contains(&Action::CancelSelection)
+        );
         press_in_list(&mut app, &ctx, &chat, Key::ArrowRight);
         assert!(app.message_item.is_none(), "nor do the items move");
         assert_eq!(
@@ -4089,11 +4392,86 @@ mod tests {
             assert!(!survived, "{key:?} reached the views");
             assert_eq!(app.actions, [Action::MessageCursor(expected)], "{key:?}");
         }
-        // Shift+Home and the like are not list keys.
+        // With no message to be on, Shift+Home is left alone. On one, the
+        // Shift keys tick a range and Ctrl+Up and Ctrl+Down move without
+        // ticking, as in a file list.
         app.actions.clear();
         ctx.memory_mut(|memory| memory.request_focus(list));
         assert!(press(&mut app, &ctx, Key::Home, Modifiers::SHIFT));
         assert!(app.actions.is_empty(), "{:?}", app.actions);
+        app.conversations
+            .entry(ids[0].clone())
+            .or_default()
+            .messages
+            .push(crate::model::Message {
+                id: "only".into(),
+                chat: ids[0].clone(),
+                sender: ids[0].clone(),
+                sender_name: None,
+                from_me: false,
+                timestamp: 1,
+                history_order: None,
+                content: crate::model::Content::text("Hello"),
+                status: crate::model::Delivery::None,
+                delivered_at: None,
+                read_at: None,
+                quoted: None,
+                reactions: Vec::new(),
+                edited: false,
+                mentions: Vec::new(),
+                forwarded: false,
+                thumbnail: None,
+            });
+        for (key, modifiers, expected) in [
+            (
+                Key::Home,
+                Modifiers::SHIFT,
+                Action::ExtendSelection(Step::First),
+            ),
+            (
+                Key::End,
+                Modifiers::SHIFT,
+                Action::ExtendSelection(Step::Last),
+            ),
+            (
+                Key::ArrowUp,
+                Modifiers::SHIFT,
+                Action::ExtendSelection(Step::Previous),
+            ),
+            (
+                Key::ArrowDown,
+                Modifiers::SHIFT,
+                Action::ExtendSelection(Step::Next),
+            ),
+            (
+                Key::PageUp,
+                Modifiers::SHIFT,
+                Action::ExtendSelection(Step::PageUp(8)),
+            ),
+            (
+                Key::PageDown,
+                Modifiers::SHIFT,
+                Action::ExtendSelection(Step::PageDown(8)),
+            ),
+            (
+                Key::ArrowUp,
+                Modifiers::COMMAND,
+                Action::MessageCursor(Step::Previous),
+            ),
+            (
+                Key::ArrowDown,
+                Modifiers::COMMAND,
+                Action::MessageCursor(Step::Next),
+            ),
+        ] {
+            app.actions.clear();
+            ctx.memory_mut(|memory| memory.request_focus(list));
+            assert!(
+                !press(&mut app, &ctx, key, modifiers),
+                "{key:?} reached the views"
+            );
+            assert_eq!(app.actions, [expected], "{key:?} {modifiers:?}");
+        }
         // Unfocused, PgUp scrolls as before and the arrows are left alone.
         ctx.memory_mut(|memory| memory.surrender_focus(list));
         app.actions.clear();

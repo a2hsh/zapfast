@@ -67,7 +67,15 @@ pub fn container(
     label: impl FnOnce() -> String,
     len: usize,
 ) -> egui::Response {
+    let had_focus = ui.memory(|memory| memory.has_focus(id));
     let response = ui.interact(rect, id, egui::Sense::focusable_noninteractive());
+    // A pass that will be discarded paints nothing, and egui lets go of the
+    // focus of a widget drawn invisible. One drawn above the list asked for
+    // it, such as the message field giving way to the selection bar: the
+    // list keeps its focus, and the pass after draws it again.
+    if had_focus && ui.ctx().will_discard() {
+        ui.memory_mut(|memory| memory.request_focus(id));
+    }
     outline_only(ui.ctx(), id);
     if ui.ctx().accesskit_node_builder(id, |_| ()).is_some() {
         let label = label();
@@ -135,7 +143,8 @@ pub fn set_active(ctx: &egui::Context, container: egui::Id, row: Option<egui::Id
 /// other item carries none, neither selected nor toggled. A row that said
 /// "not selected", or that kept the toggle state egui gives a selectable
 /// widget, would have a screen reader say "not selected" or "not checked"
-/// on every arrow press. Messages are never selected.
+/// on every arrow press. Messages carry a state only while a selection of
+/// messages is open ([`mark_selected`]).
 pub fn mark_row(
     ctx: &egui::Context,
     row: egui::Id,
@@ -159,6 +168,21 @@ pub fn mark_row(
             node.clear_selected();
         }
     });
+}
+
+/// Makes the list `container` multiselectable: several of its items can be
+/// selected at once, as messages are while a selection is open. Windows
+/// exposes it as the Selection pattern's CanSelectMultiple.
+pub fn mark_multiselectable(ctx: &egui::Context, container: egui::Id) {
+    ctx.accesskit_node_builder(container, |node| node.set_multiselectable());
+}
+
+/// Gives the item `row` of a multiselectable list its selection state,
+/// selected or not, after [`mark_row`]: a screen reader then says
+/// "selected" or "not selected" on the item, as in any multiselectable
+/// list. Windows exposes it as the SelectionItem pattern's IsSelected.
+pub fn mark_selected(ctx: &egui::Context, row: egui::Id, selected: bool) {
+    ctx.accesskit_node_builder(row, |node| node.set_selected(selected));
 }
 
 fn outline_only_id(id: egui::Id) -> egui::Id {

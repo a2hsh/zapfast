@@ -321,13 +321,6 @@ mod tests {
             gettext(Locale::PortugueseBrazil, "Select messages"),
             "Selecionar mensagens"
         );
-        assert_eq!(
-            gettext(
-                Locale::PortugueseBrazil,
-                "Select message from {sender}, {time}: {summary}"
-            ),
-            "Selecionar mensagem de {sender} ({time}): {summary}"
-        );
     }
 
     #[test]

@@ -47,6 +47,12 @@ pub enum Stop {
     InfoControl(u8),
     /// The open chat's message list: one stop, the arrows walk its messages.
     Messages,
+    /// The selection bar's Cancel selection, Delete… and Forward…, in the
+    /// message field's place while messages are selected. The message list's
+    /// keys tick messages; these act on the selection as a whole.
+    SelectionCancel,
+    SelectionDelete,
+    SelectionForward,
     /// The message field, after the messages, as it is drawn.
     Composer,
     /// The recorder's toolbar, Discard and Send, in place of the message
@@ -240,6 +246,9 @@ mod tests {
             Stop::ChatActions,
             Stop::ChatSearchClose,
             Stop::Messages,
+            Stop::SelectionCancel,
+            Stop::SelectionDelete,
+            Stop::SelectionForward,
             Stop::Composer,
             Stop::Recording,
             Stop::MessageActions,

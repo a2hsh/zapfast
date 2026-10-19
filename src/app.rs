@@ -324,6 +324,21 @@ pub(crate) struct Sweep {
     base: Vec<String>,
 }
 
+/// A run of Shift moves over the message list (Shift with Up, Down, Home,
+/// End, PgUp or PgDn): the selection is what was selected when the run
+/// began plus every message from its fixed anchor to the current one, so
+/// moving back toward the anchor unticks what the run passes again, as in
+/// a file list.
+#[derive(Clone, Debug, PartialEq)]
+struct KeyRange {
+    chat: ChatId,
+    anchor: String,
+    base: Vec<String>,
+    /// The selection the run last made: anything else that changes it,
+    /// such as a tick or a click, starts a new run.
+    made: Vec<String>,
+}
+
 /// Whether a message can join a selection, matching `Worker::forward_job`.
 pub(crate) fn can_select(content: &Content) -> bool {
     !matches!(
@@ -565,6 +580,8 @@ pub struct App {
     selection_anchor: Option<String>,
     /// Messages being swept with the mouse held down, if any.
     pub(crate) sweep: Option<Sweep>,
+    /// The run of Shift moves in the message list, if one is going on.
+    key_range: Option<KeyRange>,
     /// Whether files are being dragged over the window.
     pub dropping: bool,
     /// Where the Ctrl/Cmd+V shortcut stands across frames.
@@ -1530,6 +1547,7 @@ impl App {
             unread_jump: None,
             selection: None,
             selection_anchor: None,
+            key_range: None,
             sweep: None,
             dropping: false,
             paste_keys: PasteKeys::default(),
@@ -2009,6 +2027,7 @@ impl App {
         self.selection = None;
         self.selection_anchor = None;
         self.sweep = None;
+        self.key_range = None;
         self.reply_to = None;
         self.editing = None;
         self.reaction_target = None;
@@ -2623,6 +2642,66 @@ impl App {
             &crate::i18n::ngettext(self.locale, "{count} result", "{count} results", plural),
             &[("count", &count.to_string())],
         )
+    }
+
+    /// The chat selecting messages now, if any.
+    fn selecting_chat(&self) -> Option<ChatId> {
+        self.selection.as_ref().map(|(chat, _)| chat.clone())
+    }
+
+    /// Says how to use a selection when one has just opened: `before` is
+    /// the chat that was selecting before the action, if any. Said once
+    /// per selection, however it opened: the chat's menu, a message's
+    /// menu, Ctrl+Space, Ctrl-click or a drag.
+    fn announce_selection_opened(&mut self, before: Option<ChatId>) {
+        if self.selection.is_some() && self.selecting_chat() != before {
+            self.announcer.say(
+                crate::announcer::Category::Status,
+                crate::i18n::gettext(
+                    self.locale,
+                    "Selecting messages. Space selects, F forwards, Escape cancels",
+                ),
+            );
+        }
+    }
+
+    /// How many messages the selection holds, as the selection bar shows
+    /// it: "3 selected", after `state` ("Selected" or "Not selected") when
+    /// one message was just ticked or unticked.
+    fn announce_selected_count(&mut self, state: Option<bool>) {
+        let Some((_, ids)) = &self.selection else {
+            return;
+        };
+        let count = ids.len();
+        let plural = u32::try_from(count).unwrap_or(u32::MAX);
+        let template = match state {
+            Some(true) => crate::i18n::ngettext(
+                self.locale,
+                "Selected, {count} selected",
+                "Selected, {count} selected",
+                plural,
+            ),
+            Some(false) => crate::i18n::ngettext(
+                self.locale,
+                "Not selected, {count} selected",
+                "Not selected, {count} selected",
+                plural,
+            ),
+            None => {
+                crate::i18n::ngettext(self.locale, "{count} selected", "{count} selected", plural)
+            }
+        };
+        let text = crate::a11y::fill(&template, &[("count", &count.to_string())]);
+        self.announcer.say(crate::announcer::Category::Status, text);
+    }
+
+    /// Says that the message the keys asked to select cannot be: it has no
+    /// check box, as it cannot be forwarded.
+    fn announce_not_selectable(&mut self) {
+        self.announcer.say(
+            crate::announcer::Category::Status,
+            crate::i18n::gettext(self.locale, "Can't be selected"),
+        );
     }
 
     /// Speaks how many rows the chat list's search shows (chats, messages
@@ -7246,6 +7325,9 @@ impl App {
         if self.selection.as_ref().map(|(chat, _)| chat) != selecting.as_ref() {
             self.open_message_menu = None;
             self.open_phone_menu = None;
+            // A run of Shift moves belongs to the selection it began in,
+            // however that one ends: forwarded, another chat opened.
+            self.key_range = None;
         }
     }
 
@@ -8182,8 +8264,10 @@ impl App {
                         .as_ref()
                         .is_none_or(|(selected, _)| *selected != chat)
                 {
+                    let before = self.selecting_chat();
                     self.selection = Some((chat, Vec::new()));
                     self.selection_anchor = None;
+                    self.announce_selection_opened(before);
                 }
             }
             Action::SelectMessage(id) => {
@@ -8194,8 +8278,15 @@ impl App {
                         .and_then(|conversation| conversation.message(&id))
                         .is_some_and(|message| can_select(&message.content))
                 {
+                    let before = self.selecting_chat();
                     self.selection = Some((chat, vec![id.clone()]));
                     self.selection_anchor = Some(id);
+                    self.announce_selection_opened(before);
+                    self.announce_selected_count(Some(true));
+                } else if self.open_chat.is_some() {
+                    // Only the keys ask for a message without a check box:
+                    // the menus and Ctrl-click offer none.
+                    self.announce_not_selectable();
                 }
             }
             Action::SelectRange(id) => {
@@ -8210,11 +8301,82 @@ impl App {
                 add_range(&conversation.messages, &mut ids, &anchor, &id);
                 self.selection = Some((chat, ids));
                 self.selection_anchor = Some(id);
+                self.announce_selected_count(None);
+            }
+            Action::ExtendSelection(step) => {
+                let Some(chat) = self.open_chat.clone() else {
+                    return;
+                };
+                // The list's current message, as `MessageCursor` resolves
+                // it, and whether it can be selected.
+                let current = |app: &Self| {
+                    let messages = &app.conversations.get(chat.as_str())?.messages;
+                    app.message_cursor
+                        .get(&chat)
+                        .and_then(|id| messages.iter().find(|message| &message.id == id))
+                        .or(messages.last())
+                        .map(|message| (message.id.clone(), can_select(&message.content)))
+                };
+                let Some((from, _)) = current(self) else {
+                    return;
+                };
+                let before = self.selecting_chat();
+                if before.as_ref() != Some(&chat) {
+                    // As Shift-click in a file list: a range from the
+                    // message the keys start from opens a selection.
+                    self.selection = Some((chat.clone(), Vec::new()));
+                    self.selection_anchor = None;
+                    self.announce_selection_opened(before);
+                }
+                // A selection opened from the chat's menu has no anchor
+                // yet: the range starts where the keys started from.
+                if self.selection_anchor.is_none() {
+                    self.selection_anchor = Some(from);
+                }
+                // Home on the oldest loaded message may ask for older ones:
+                // the range takes in what is loaded now.
+                self.apply(Action::MessageCursor(step), ctx);
+                let Some((to, selectable)) = current(self) else {
+                    return;
+                };
+                let (Some((_, ids)), Some(anchor)) =
+                    (self.selection.clone(), self.selection_anchor.clone())
+                else {
+                    return;
+                };
+                // The run goes on while nothing else changed the selection;
+                // its anchor stays where it began.
+                let run = self
+                    .key_range
+                    .take()
+                    .filter(|run| run.chat == chat && run.anchor == anchor && run.made == ids)
+                    .unwrap_or_else(|| KeyRange {
+                        chat: chat.clone(),
+                        anchor,
+                        base: ids.clone(),
+                        made: Vec::new(),
+                    });
+                let Some(conversation) = self.conversations.get(chat.as_str()) else {
+                    return;
+                };
+                let mut next = run.base.clone();
+                add_range(&conversation.messages, &mut next, &run.anchor, &to);
+                let changed = next != ids;
+                self.selection = Some((chat, next.clone()));
+                self.key_range = Some(KeyRange { made: next, ..run });
+                // One word: the count when the range changed, else why the
+                // message reached was not ticked.
+                if selectable || changed {
+                    self.announce_selected_count(None);
+                } else {
+                    self.announce_not_selectable();
+                }
             }
             Action::SweepMessages { anchor, to } => {
                 let Some(chat) = self.open_chat.clone() else {
                     return;
                 };
+                let before = self.selecting_chat();
                 // A sweep adds to what was selected when it began, so
                 // dragging back leaves out the rows it passes again.
                 if self
@@ -8262,10 +8424,14 @@ impl App {
                     .is_some_and(|(selected, _)| *selected == chat);
                 self.selection = (open || !ids.is_empty()).then_some((chat, ids));
                 self.selection_anchor = Some(to);
+                // No count while the pointer sweeps: it would change with
+                // every row passed.
+                self.announce_selection_opened(before);
             }
             Action::EndSweep => self.sweep = None,
             Action::ToggleSelected(id) => {
                 let mut next = self.selection.clone();
+                let mut ticked = None;
                 if let Some((chat, ids)) = next.as_mut() {
                     let selectable = self
                         .conversations
@@ -8273,13 +8439,17 @@ impl App {
                         .and_then(|conversation| conversation.message(&id))
                         .is_some_and(|message| can_select(&message.content));
                     if !selectable {
+                        // Only Space reaches a message without a check box.
+                        self.announce_not_selectable();
                         return;
                     }
                     self.selection_anchor = Some(id.clone());
                     if let Some(index) = ids.iter().position(|selected| *selected == id) {
                         ids.remove(index);
+                        ticked = Some(false);
                     } else {
                         ids.push(id);
+                        ticked = Some(true);
                         if let Some(conversation) = self.conversations.get(chat.as_str()) {
                             let position = |id: &String| {
                                 conversation
@@ -8293,10 +8463,24 @@ impl App {
                     }
                 }
                 self.selection = next;
+                if ticked.is_some() {
+                    self.announce_selected_count(ticked);
+                }
             }
             Action::CancelSelection => {
+                if self.selection.take().is_some() {
+                    self.announcer.say(
+                        crate::announcer::Category::Status,
+                        crate::i18n::gettext(self.locale, "Selection cancelled"),
+                    );
+                }
+                self.sweep = None;
+                self.key_range = None;
+            }
+            Action::EndSelection => {
                 self.selection = None;
                 self.sweep = None;
+                self.key_range = None;
             }
             Action::Edit(id) => {
                 let open = self.open_chat.clone();
@@ -14274,6 +14458,35 @@ mod tests {
         assert!(dropped(&app), "ended");
     }
 
+    /// A run of Shift moves ends with the selection it began in, however
+    /// that ends, as by opening another chat: a later selection with the
+    /// same anchor and messages never goes on from the old run's, which
+    /// would tick what that selection held.
+    #[test]
+    fn a_run_of_shift_moves_ends_with_its_selection() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        let chat = "1@s.whatsapp.net";
+        let other = "2@s.whatsapp.net";
+        app.chats = vec![
+            Chat::new(chat.into(), "Ada".into()),
+            Chat::new(other.into(), "Bo".into()),
+        ];
+        app.open_chat = Some(chat.into());
+        let ids = || vec!["a".to_owned(), "b".to_owned()];
+        app.selection = Some((chat.into(), ids()));
+        app.selection_anchor = Some("a".into());
+        app.key_range = Some(KeyRange {
+            chat: chat.into(),
+            anchor: "a".into(),
+            base: vec!["c".into()],
+            made: ids(),
+        });
+        app.apply(Action::OpenChat(other.into()), &ctx);
+        assert_eq!(app.selection, None, "the selection ended");
+        assert!(app.key_range.is_none(), "and its run with it");
+    }
+
     /// The keys' item cursor, a download waiting to be spoken and a replied
     /// message still loading end with their account, as with their chat.
     #[test]
@@ -18572,6 +18785,90 @@ mod tests {
         // Escape ends both.
         app.apply(Action::CancelSelection, &ctx);
         assert!(app.selection.is_none() && app.sweep.is_none());
+    }
+
+    /// Opening a selection says how to use it, once, however it opens; each
+    /// tick says the new state and the count, and the end says so too.
+    #[test]
+    fn a_selection_says_when_it_opens_what_each_tick_does_and_when_it_ends() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        let chat = "1@s.whatsapp.net";
+        app.chats = vec![Chat::new(chat.into(), "Ada".into())];
+        app.open_chat = Some(chat.into());
+        let mut gone = message(chat, "gone", 3);
+        gone.content = Content::Revoked;
+        app.conversations.entry(chat.into()).or_default().merge(
+            vec![message(chat, "first", 1), message(chat, "second", 2), gone],
+            false,
+        );
+        // What one action has the announcer say, and nothing else.
+        let said = |app: &mut App, action: Action| {
+            app.announcer = Default::default();
+            app.apply(action, &ctx);
+            app.announcer.show(&ctx, true);
+            app.announcer.spoken().concat()
+        };
+        let opened = "Selecting messages. Space selects, F forwards, Escape cancels";
+        assert_eq!(said(&mut app, Action::StartSelection), opened);
+        assert_eq!(said(&mut app, Action::StartSelection), "", "said once");
+        assert_eq!(
+            said(&mut app, Action::ToggleSelected("second".into())),
+            "Selected, 1 selected"
+        );
+        assert_eq!(
+            said(&mut app, Action::ToggleSelected("first".into())),
+            "Selected, 2 selected"
+        );
+        assert_eq!(
+            said(&mut app, Action::ToggleSelected("second".into())),
+            "Not selected, 1 selected"
+        );
+        assert_eq!(
+            said(&mut app, Action::ToggleSelected("gone".into())),
+            "Can't be selected"
+        );
+        assert_eq!(
+            said(&mut app, Action::SelectRange("second".into())),
+            "2 selected"
+        );
+        assert_eq!(
+            said(&mut app, Action::CancelSelection),
+            "Selection cancelled"
+        );
+        assert_eq!(
+            said(&mut app, Action::CancelSelection),
+            "",
+            "nothing to end"
+        );
+        // A message's menu, Ctrl-click and Ctrl+Space open it on a message.
+        assert_eq!(
+            said(&mut app, Action::SelectMessage("first".into())),
+            format!("{opened}. Selected, 1 selected")
+        );
+        app.apply(Action::CancelSelection, &ctx);
+        assert_eq!(
+            said(&mut app, Action::SelectMessage("gone".into())),
+            "Can't be selected"
+        );
+        assert!(app.selection.is_none());
+        // A drag opens it once, and says no count while it sweeps.
+        let sweep = |to: &str| Action::SweepMessages {
+            anchor: "first".into(),
+            to: to.into(),
+        };
+        assert_eq!(said(&mut app, sweep("first")), opened);
+        assert_eq!(said(&mut app, sweep("second")), "");
+        // Forwarding ends it without a word: the forward says what it did.
+        app.chats
+            .push(Chat::new("2@s.whatsapp.net".into(), "Bob".into()));
+        app.dialog = Some(Dialog::Forward {
+            chat: chat.into(),
+            messages: vec!["first".into()],
+        });
+        app.forward_recipients = vec!["2@s.whatsapp.net".into()];
+        assert_eq!(said(&mut app, Action::ConfirmForward), "");
+        assert!(app.selection.is_none());
     }
 
     #[test]
