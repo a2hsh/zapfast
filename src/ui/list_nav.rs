@@ -775,6 +775,28 @@ impl KeyMenu {
         self.state.is_some()
     }
 
+    /// Places `popup`, the context menu of `response`, for a menu the keys
+    /// opened: egui puts a context menu where the pointer is, which the keys
+    /// do not move, so it opens in the pass it is `requested`, and stays
+    /// beside its control while it is open. The pointer's menu is left as
+    /// it was.
+    pub fn place<'a>(
+        &self,
+        popup: egui::Popup<'a>,
+        response: &egui::Response,
+        requested: bool,
+    ) -> egui::Popup<'a> {
+        if !self.from_keys() || response.secondary_clicked() {
+            return popup;
+        }
+        let popup = if requested {
+            popup.open_memory(Some(egui::SetOpenCommand::Bool(true)))
+        } else {
+            popup
+        };
+        popup.at_position(response.rect.left_top() + egui::vec2(12.0, 8.0))
+    }
+
     /// After the popup was shown on `layer` (None when it was not drawn),
     /// with `first` its first item drawn in this pass. Focus returns to
     /// `list` when the menu closes. Returns whether the menu is open now.
@@ -808,6 +830,11 @@ impl KeyMenu {
             if let Some(focused) = ctx.memory(|memory| memory.focused()) {
                 ctx.data_mut(|data| data.insert_temp(self.popup.with("last-focus"), focused));
             }
+        }
+        if open {
+            // Read by `key_menu_open`.
+            let frame = ctx.cumulative_frame_nr();
+            ctx.data_mut(|data| data.insert_temp(key_menu_open_id(), frame));
         }
         if open && !focus_pending && !hold && focus == MenuFocus::Elsewhere {
             // A shortcut (Ctrl+L, Ctrl+K, Alt+1, Alt+2) took focus out of
@@ -859,6 +886,39 @@ impl KeyMenu {
         }
         open
     }
+}
+
+/// Shift+F10 on the focused control `response`, taken: the keyboard's way
+/// to open the control's context menu, as it opens a list item's. On
+/// Windows the Applications key arrives as Shift+F10 (`crate::menu_key`).
+/// Opening a menu from the keys is keyboard navigation, as Tab is: the
+/// focus it moves into the menu is shown.
+pub fn take_menu_key(response: &egui::Response) -> bool {
+    let taken = response.has_focus()
+        && response.ctx.input_mut(|input| {
+            super::keys::take_exact(input, egui::Modifiers::SHIFT, egui::Key::F10)
+        });
+    if taken {
+        response
+            .ctx
+            .data_mut(|data| data.insert_temp(crate::theme::keyboard_focus_id(), true));
+    }
+    taken
+}
+
+fn key_menu_open_id() -> egui::Id {
+    egui::Id::new("key-menu-open")
+}
+
+/// Whether a menu the keys opened was open at the end of the last frame and
+/// still is: such a menu takes Escape itself, where a key handler that runs
+/// before it, as the image preview's does, would act on Escape first.
+pub fn key_menu_open(ctx: &egui::Context) -> bool {
+    let frame = ctx.cumulative_frame_nr();
+    egui::Popup::is_any_open(ctx)
+        && ctx
+            .data(|data| data.get_temp::<u64>(key_menu_open_id()))
+            .is_some_and(|registered| registered + 1 >= frame)
 }
 
 #[cfg(test)]

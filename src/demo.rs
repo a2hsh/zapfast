@@ -6672,6 +6672,70 @@ mod tests {
         assert_eq!(list.label(), Some("Messages in Rust Berlin"));
     }
 
+    /// The message field's name says whose chat it is, so landing in it
+    /// after opening a chat from the keyboard is never only "Message". The
+    /// hint it shows, "Type a message", which the name already says, is no
+    /// placeholder as well, or a screen reader would read it after the name;
+    /// "Add a caption" says more, and stays. The name follows a switch.
+    #[test]
+    fn the_message_field_is_named_after_the_open_chat() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        ctx.enable_accesskit();
+        let composer = egui::Id::new("composer-text").accesskit_id();
+        let field = |app: &mut App| {
+            let mut output = ctx.run_ui(Default::default(), |ui| app.frame_ui(ui));
+            output.textures_delta.clear();
+            let tree = output.platform_output.accesskit_update.unwrap();
+            tree.nodes
+                .iter()
+                .find(|(id, _)| *id == composer)
+                .expect("the message field is in the tree")
+                .1
+                .clone()
+        };
+
+        assert_eq!(app.open_chat.as_deref(), Some(SAMPLES[0].id));
+        let node = field(&mut app);
+        assert_eq!(node.role(), egui::accesskit::Role::MultilineTextInput);
+        assert_eq!(node.label(), Some("Type a message to Ada Lovelace"));
+        assert_eq!(node.placeholder(), None);
+
+        app.actions
+            .push(crate::model::Action::OpenChat(SAMPLES[1].id.into()));
+        render(&mut app, &ctx);
+        let node = field(&mut app);
+        assert_eq!(node.label(), Some("Type a message to group Rust Berlin"));
+        assert_eq!(node.placeholder(), None);
+        // An attachment waiting for its caption: the hint says so.
+        let (photo, _) = sample_files(&app);
+        app.stage(crate::app::Pending::File(photo));
+        render(&mut app, &ctx);
+        let node = field(&mut app);
+        assert_eq!(node.label(), Some("Type a message to group Rust Berlin"));
+        assert_eq!(node.placeholder(), Some("Add a caption"));
+        app.pending.clear();
+
+        // Known only by the name on their own profile: the screen keeps the
+        // "~", the name read aloud does not.
+        app.contacts.insert(
+            SAMPLES[0].id.into(),
+            crate::model::Contact {
+                id: SAMPLES[0].id.into(),
+                full_name: None,
+                first_name: None,
+                push_name: Some("Ada".into()),
+            },
+        );
+        assert_eq!(app.chat_title(app.chat(SAMPLES[0].id).unwrap()), "~Ada");
+        app.actions
+            .push(crate::model::Action::OpenChat(SAMPLES[0].id.into()));
+        render(&mut app, &ctx);
+        assert_eq!(field(&mut app).label(), Some("Type a message to Ada"));
+    }
+
     /// A message whose file is not simply there ends its label with why: not
     /// downloaded yet, downloading, or the error the bubble shows.
     #[test]
@@ -8498,6 +8562,84 @@ mod tests {
                 app.announcer.spoken()
             );
         }
+    }
+
+    /// While a reply is pending, the message field's description says what
+    /// it replies to, as the strip above it shows: who wrote it and its
+    /// words, and for a private reply the group the message is from. The
+    /// description goes with the reply.
+    #[test]
+    fn the_message_field_describes_the_reply() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let chat = app.open_chat.clone().unwrap();
+        let quoted = app.conversations[&chat]
+            .messages
+            .iter()
+            .rev()
+            .find(|message| !message.from_me && !message.summary().is_empty())
+            .cloned()
+            .expect("a message to reply to");
+        let composer = egui::Id::new("composer-text");
+        let described = |app: &mut App, ctx: &egui::Context| {
+            let tree = tree_after(app, ctx, None);
+            node(&tree, composer.accesskit_id())
+                .expect("the message field")
+                .description()
+                .map(str::to_owned)
+        };
+        assert_eq!(described(&mut app, &ctx), None, "no reply yet");
+        app.actions
+            .push(crate::model::Action::Reply(quoted.id.clone()));
+        render(&mut app, &ctx);
+        let who = app.display_name_or(&quoted.sender, quoted.sender_name.as_deref());
+        let words = crate::markup::plain(&quoted.summary(), &app.mention_list(&quoted));
+        assert_eq!(
+            described(&mut app, &ctx),
+            Some(format!(
+                "replying to {}: {}",
+                crate::a11y::spoken(crate::a11y::without_push_marker(&who)),
+                crate::a11y::spoken(&words)
+            ))
+        );
+        app.actions.push(crate::model::Action::CancelReply);
+        render(&mut app, &ctx);
+        assert_eq!(described(&mut app, &ctx), None, "the reply is gone");
+        // A private reply to a group's message says where it is from.
+        let group = SAMPLES[1].id;
+        app.actions
+            .push(crate::model::Action::OpenChat(group.into()));
+        render(&mut app, &ctx);
+        assert_eq!(app.open_chat.as_deref(), Some(group));
+        app.actions.push(crate::model::Action::ReplyPrivately {
+            chat: group.into(),
+            message: "group-photo".into(),
+        });
+        render(&mut app, &ctx);
+        assert_ne!(app.open_chat.as_deref(), Some(group), "the sender's chat");
+        let from = crate::a11y::without_push_marker(&app.chat_title_of(group)).to_owned();
+        let description = described(&mut app, &ctx).expect("the private reply");
+        assert!(description.starts_with("replying to "), "{description}");
+        assert!(
+            description.ends_with(&format!(", privately, from {from}")),
+            "{description}"
+        );
+        // Its message no longer loaded, the strip says the group's message is
+        // unavailable, and so does the field, never as who wrote it.
+        if let Some(conversation) = app.conversations.get_mut(group) {
+            conversation
+                .messages
+                .retain(|message| message.id != "group-photo");
+        }
+        render(&mut app, &ctx);
+        assert_eq!(
+            described(&mut app, &ctx),
+            Some(format!(
+                "Original group message unavailable, privately, from {from}"
+            ))
+        );
     }
 
     #[test]
@@ -22426,7 +22568,7 @@ mod tests {
             .expect("accessibility tree");
         tree.nodes
             .iter()
-            // The composer field is also labelled "Message"; match buttons only.
+            // Another node may share the label; match buttons only.
             .find(|(_, node)| {
                 node.role() == egui::accesskit::Role::Button && node.label() == Some(label)
             })

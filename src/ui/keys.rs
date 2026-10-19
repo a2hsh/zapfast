@@ -668,7 +668,8 @@ pub fn focused_message(app: &App, ctx: &egui::Context) -> Option<(ChatId, String
 /// what it does: each key is the message menu's item of the same name, with
 /// the same conditions, so the keys never offer what the menu does not.
 /// Enter does what Space does, and Shift+F10 opens the menu itself: egui
-/// never reports the Applications key.
+/// never reports the Applications key; on Windows `crate::menu_key` makes it
+/// Shift+F10.
 fn message_keys(app: &mut App, ctx: &egui::Context, chat: &str, id: &str) -> Vec<Action> {
     use crate::model::Content;
     use crate::ui::conversation as view;
@@ -1191,12 +1192,19 @@ fn take_matching_exactly(input: &mut egui::InputState, modifiers: Modifiers, key
 /// Tab, Enter, Space and Up/Down stay for the preview's own controls.
 fn preview_keys(app: &mut App, ctx: &egui::Context) {
     let mut actions = Vec::new();
+    // A menu the keys opened on the picture takes Escape itself, and closes;
+    // the pointer's menu closes with the preview, as it always did.
+    let key_menu = crate::ui::list_nav::key_menu_open(ctx);
     ctx.input_mut(|input| {
-        if input.consume_key(Modifiers::NONE, Key::Escape) {
+        if !key_menu && input.consume_key(Modifiers::NONE, Key::Escape) {
             actions.push(Action::CloseImagePreview);
         }
-        let copy_shortcut = input.consume_key(Modifiers::COMMAND, Key::C)
-            || input.consume_key(Modifiers::CTRL, Key::C);
+        // Under that menu the keys leave the picture alone: stepping to
+        // another one, zooming or copying would happen behind the menu,
+        // which then acts on a picture the reader did not open it on.
+        let copy_shortcut = !key_menu
+            && (input.consume_key(Modifiers::COMMAND, Key::C)
+                || input.consume_key(Modifiers::CTRL, Key::C));
         // The header leaves the copy action out while a clip is on screen, so
         // the shortcut does the same: copying a clip would decode a video as an
         // image and fail.
@@ -1208,7 +1216,7 @@ fn preview_keys(app: &mut App, ctx: &egui::Context) {
             actions.push(Action::CopyImage(path.to_owned()));
         }
         let mut event_actions = Vec::new();
-        for event in &input.events {
+        for event in input.events.iter().filter(|_| !key_menu) {
             if let egui::Event::Key {
                 key,
                 modifiers,
@@ -1236,9 +1244,27 @@ fn preview_keys(app: &mut App, ctx: &egui::Context) {
             });
         }
         actions.extend(event_actions);
-        input
-            .events
-            .retain(|event| !crate::image_preview::consumes_key(event));
+        // Shift+F10, which the Applications key also arrives as, stays for
+        // the focused picture's menu, and Escape for that menu once open.
+        input.events.retain(|event| {
+            !crate::image_preview::consumes_key(event)
+                || matches!(
+                    event,
+                    egui::Event::Key {
+                        key: Key::F10,
+                        modifiers,
+                        ..
+                    } if *modifiers == Modifiers::SHIFT
+                )
+                || (key_menu
+                    && matches!(
+                        event,
+                        egui::Event::Key {
+                            key: Key::Escape,
+                            ..
+                        }
+                    ))
+        });
     });
     app.actions.extend(actions);
 }
@@ -1610,6 +1636,15 @@ const UNREAD_KEYS: &str = if cfg!(target_os = "macos") {
     "Alt+3"
 };
 
+/// The lists' menu key, for the chat list and the message list alike. On
+/// Windows the Applications key opens the menu too (`crate::menu_key`);
+/// egui does not report it elsewhere.
+const MENU_KEYS: &str = if cfg!(target_os = "windows") {
+    "Shift+F10 / Applications"
+} else {
+    "Shift+F10"
+};
+
 /// Shortcuts shown in the help dialog.
 pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+K / Ctrl+Shift+F", "Search chats"),
@@ -1655,13 +1690,13 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
         "Move through chats without opening them (in the chat list)",
     ),
     ("Enter", "Open the chat (in the chat list)"),
-    ("Shift+F10", "Chat menu (in the chat list)"),
+    (MENU_KEYS, "Chat menu (in the chat list)"),
     (MESSAGES_KEYS, "Go to the message list"),
     (
         "↑ / ↓, Home / End, PgUp / PgDn",
         "Move through messages (in the message list)",
     ),
-    ("Shift+F10", "Message menu (in the message list)"),
+    (MENU_KEYS, "Message menu (in the message list)"),
     ("R", "Reply to the message (in the message list)"),
     ("E", "React to the message (in the message list)"),
     ("C", "Copy the message (in the message list)"),

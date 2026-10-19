@@ -31,6 +31,8 @@ pub mod macos;
 pub mod markup;
 pub mod media_pause;
 pub mod mentions;
+#[cfg(target_os = "windows")]
+pub mod menu_key;
 pub mod model;
 pub mod motion;
 pub mod nav;

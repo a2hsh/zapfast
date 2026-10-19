@@ -104,6 +104,74 @@ pub fn messages_list_label(locale: Locale, title: &str, group: bool) -> String {
     fill(&template, &[("name", &spoken(without_push_marker(title)))])
 }
 
+/// The message field's name: "Type a message to Ahmed" in a one-to-one chat,
+/// "Type a message to group Family" in a group, so a reader who opens a chat
+/// from the keyboard and lands in the field hears whose chat it is. Only the
+/// name: the field still shows its hint ("Type a message", "Add a caption").
+/// A name that is all marker or blank falls back to the hint.
+pub fn composer_label(locale: Locale, title: &str, group: bool) -> String {
+    let name = spoken(without_push_marker(title));
+    if name.is_empty() {
+        return gettext(locale, "Type a message").into_owned();
+    }
+    let template = if group {
+        // Translators: the message field's name for a screen reader in a
+        // group chat; {name} is the group's name.
+        gettext(locale, "Type a message to group {name}")
+    } else {
+        // Translators: the message field's name for a screen reader in a
+        // one-to-one chat; {name} is the person's name.
+        gettext(locale, "Type a message to {name}")
+    };
+    fill(&template, &[("name", &name)])
+}
+
+/// The message field's description while a reply is pending, as the strip
+/// above it shows it: "replying to Ada: see you at five", and for a private
+/// reply to a group's message, where the group's message is from. `name` is
+/// who wrote the quoted message, "You" for our own.
+pub fn reply_description(
+    locale: Locale,
+    name: &str,
+    text: &str,
+    private_from: Option<&str>,
+) -> String {
+    let mut description = fill(
+        &gettext(locale, "replying to {name}: {text}"),
+        &[
+            ("name", &spoken(without_push_marker(name))),
+            ("text", &spoken(text)),
+        ],
+    );
+    if let Some(group) = private_from {
+        description.push_str(&private_reply_from(locale, group));
+    }
+    description
+}
+
+/// The message field's description while a private reply's message is not
+/// loaded, as the strip above it says: "Original group message unavailable",
+/// then where it is from, as `reply_description` says it.
+pub fn unavailable_reply_description(locale: Locale, private_from: Option<&str>) -> String {
+    let mut description = gettext(locale, "Original group message unavailable").into_owned();
+    if let Some(group) = private_from {
+        description.push_str(&private_reply_from(locale, group));
+    }
+    description
+}
+
+/// ", privately, from Family": where a private reply's message is from.
+fn private_reply_from(locale: Locale, group: &str) -> String {
+    let from = fill(
+        // Translators: after "replying to {name}: {text}" or "Original group
+        // message unavailable", on the message field, for a private reply to
+        // a group's message; {group} is the group's name.
+        &gettext(locale, "privately, from {group}"),
+        &[("group", &spoken(without_push_marker(group)))],
+    );
+    format!(", {from}")
+}
+
 /// The chat header's name for a screen reader: the chat's name, then the
 /// line under it when there is one ("online", "last seen today at 10:32",
 /// "typing…", a group's members), as the header shows them.
@@ -111,6 +179,117 @@ pub fn chat_header_label(title: &str, subtitle: &str) -> String {
     let mut parts = vec![spoken(without_push_marker(title)), spoken(subtitle)];
     parts.retain(|part| !part.is_empty());
     parts.join(", ")
+}
+
+/// Where the window is, as its title names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TitlePlace<'a> {
+    /// A chat is open: its name as the chat header shows it.
+    Chat(&'a str),
+    /// Settings, or the wallpaper page opened from it.
+    Settings,
+    /// The Calls page, which shows the call history in the chats' place.
+    Calls,
+    /// A call ringing on screen, with the name of who calls, or none for a
+    /// call that must not name its chat (a locked chat's).
+    IncomingCall(Option<&'a str>),
+    /// A call on screen and under way, with the name of who it is with, or
+    /// none for a call that must not name its chat.
+    Call(Option<&'a str>),
+    /// A call joined through a call link, which belongs to no chat.
+    CallLink,
+    /// Anywhere else: the chat list with no chat open, the linking screen,
+    /// or a locked chat, whose name stays out of the title.
+    Elsewhere,
+}
+
+/// A name as the window title holds it: one line, with control characters
+/// as spaces (a NUL would cut a Windows title short) and without bidi
+/// embeddings, overrides or isolates, which a name written by someone else
+/// could use to turn " - ZapFast" around in the title bar.
+pub(crate) fn title_text(name: &str) -> String {
+    let text: String = name
+        .chars()
+        .filter(|c| !matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'))
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    spoken(&text)
+}
+
+/// The window's title, which a screen reader says on NVDA+T and when
+/// Alt+Tab reaches the window: where the reader is, then the account when
+/// several are here, then ZapFast ("Ahmed - Work - ZapFast"). `account` is
+/// `None` with one account, and on the lock screen, which names nothing.
+pub fn window_title(locale: Locale, place: TitlePlace<'_>, account: Option<&str>) -> String {
+    // One line each, and a name that is all marker or blank names nothing.
+    let place = match place {
+        TitlePlace::Chat(name) => Some(title_text(without_push_marker(name))),
+        TitlePlace::Settings => Some(gettext(locale, "Settings").into_owned()),
+        TitlePlace::Calls => Some(gettext(locale, "Calls").into_owned()),
+        TitlePlace::IncomingCall(_) | TitlePlace::Call(_) | TitlePlace::CallLink => {
+            Some(call_heading(locale, place))
+        }
+        TitlePlace::Elsewhere => None,
+    }
+    .filter(|place| !place.is_empty());
+    let account = account
+        .map(title_text)
+        .filter(|account| !account.is_empty());
+    match (place, account) {
+        (Some(place), Some(account)) => fill(
+            // Translators: the window title: where the reader is (a chat's
+            // name, "Settings", "Calls" or a call on screen), then the
+            // account's name. Keep ZapFast unchanged, at the end.
+            &gettext(locale, "{place} - {account} - ZapFast"),
+            &[("place", &place), ("account", &account)],
+        ),
+        (Some(name), None) | (None, Some(name)) => fill(
+            // Translators: the window title: where the reader is (a chat's
+            // name, "Settings", "Calls" or a call on screen), or the
+            // account's name. Keep ZapFast unchanged, at the end.
+            &gettext(locale, "{name} - ZapFast"),
+            &[("name", &name)],
+        ),
+        (None, None) => "ZapFast".to_owned(),
+    }
+}
+
+/// What a call on screen is, as the window's title names it: who calls, who
+/// the call is with, or a call link. A call that must not name its chat, or
+/// whose name is nothing once on one line, names nobody. Any other place is
+/// not a call, and reads as nothing.
+///
+/// Each message is a literal passed to `gettext` right here, so xgettext
+/// finds it and it reaches the translation template.
+fn call_heading(locale: Locale, place: TitlePlace<'_>) -> String {
+    let named = |name: Option<&str>| {
+        name.map(|name| title_text(without_push_marker(name)))
+            .filter(|name| !name.is_empty())
+    };
+    match place {
+        TitlePlace::IncomingCall(name) => match named(name) {
+            Some(name) => fill(
+                // Translators: the window title while a call rings, with
+                // who calls.
+                &gettext(locale, "Incoming call from {name}"),
+                &[("name", &name)],
+            ),
+            None => gettext(locale, "Incoming call").into_owned(),
+        },
+        TitlePlace::Call(name) => match named(name) {
+            Some(name) => fill(
+                // Translators: the window title during a call, with who it
+                // is with.
+                &gettext(locale, "Call with {name}"),
+                &[("name", &name)],
+            ),
+            // Translators: the window title during a call whose chat is
+            // locked, which names nobody.
+            None => gettext(locale, "Call in progress").into_owned(),
+        },
+        TitlePlace::CallLink => gettext(locale, "Call link").into_owned(),
+        _ => String::new(),
+    }
 }
 
 /// Joins the parts a screen reader announces for a message with ", ".
@@ -941,6 +1120,93 @@ mod tests {
             attachment: None,
             targets: None,
         }
+    }
+
+    /// Control characters become spaces and bidi formatting goes, so a
+    /// name cannot cut the title short or reorder it; other text stays.
+    #[test]
+    fn title_text_drops_controls_and_bidi_formatting() {
+        assert_eq!(title_text("Ada\u{0}Lovelace"), "Ada Lovelace");
+        assert_eq!(title_text("Ada\tLovelace\r\n"), "Ada Lovelace");
+        assert_eq!(title_text("\u{202E}Ada\u{202C}"), "Ada");
+        assert_eq!(title_text("\u{2066}Ada\u{2069} \u{202A}x\u{202B}"), "Ada x");
+        assert_eq!(
+            title_text("\u{200F}Ada"),
+            "\u{200F}Ada",
+            "a mark is not an override"
+        );
+        assert_eq!(title_text("\u{7}\u{202D}"), "");
+        assert_eq!(
+            window_title(
+                Locale::English,
+                TitlePlace::Chat("~\u{202E}Ada\u{0}"),
+                Some("Work\u{2067}\n")
+            ),
+            "Ada - Work - ZapFast"
+        );
+    }
+
+    /// The title names the place, then the account, then ZapFast, on one
+    /// line, without the push-name "~", and leaves out what is blank.
+    #[test]
+    fn the_window_title_joins_place_account_and_app() {
+        let en = Locale::English;
+        let title = |place, account| window_title(en, place, account);
+        assert_eq!(title(TitlePlace::Elsewhere, None), "ZapFast");
+        assert_eq!(title(TitlePlace::Chat("Ahmed"), None), "Ahmed - ZapFast");
+        assert_eq!(title(TitlePlace::Chat("~ Sara"), None), "Sara - ZapFast");
+        assert_eq!(
+            title(TitlePlace::Chat("Family\nand friends"), None),
+            "Family and friends - ZapFast"
+        );
+        assert_eq!(title(TitlePlace::Chat("~"), None), "ZapFast");
+        assert_eq!(title(TitlePlace::Settings, None), "Settings - ZapFast");
+        assert_eq!(title(TitlePlace::Elsewhere, Some("Work")), "Work - ZapFast");
+        assert_eq!(
+            title(TitlePlace::Chat("Ahmed"), Some("Work")),
+            "Ahmed - Work - ZapFast"
+        );
+        assert_eq!(
+            title(TitlePlace::Settings, Some("Work")),
+            "Settings - Work - ZapFast"
+        );
+        assert_eq!(
+            title(TitlePlace::Chat("{account}"), Some("Work")),
+            "{account} - Work - ZapFast"
+        );
+        assert_eq!(
+            window_title(Locale::German, TitlePlace::Settings, None),
+            "Einstellungen - ZapFast"
+        );
+    }
+
+    /// A call on screen names who calls, or who it is with, and nobody when
+    /// it must not; the account still follows, and ZapFast ends it.
+    #[test]
+    fn a_call_titles_the_window_by_who_it_is_with() {
+        let title = |place, account| window_title(Locale::English, place, account);
+        assert_eq!(
+            title(TitlePlace::IncomingCall(Some("~Ada")), None),
+            "Incoming call from Ada - ZapFast"
+        );
+        assert_eq!(
+            title(TitlePlace::IncomingCall(None), None),
+            "Incoming call - ZapFast"
+        );
+        assert_eq!(
+            title(TitlePlace::Call(Some("Ada")), Some("Work")),
+            "Call with Ada - Work - ZapFast"
+        );
+        assert_eq!(
+            title(TitlePlace::Call(None), None),
+            "Call in progress - ZapFast"
+        );
+        assert_eq!(
+            title(TitlePlace::Call(Some("~")), None),
+            "Call in progress - ZapFast",
+            "nothing left of the name"
+        );
+        assert_eq!(title(TitlePlace::CallLink, None), "Call link - ZapFast");
     }
 
     /// A name known only from a profile wears a "~" on screen; a screen
@@ -1824,6 +2090,35 @@ mod tests {
             messages_list_label(en, "A{name}B", false),
             "Messages with A{name}B"
         );
+    }
+
+    /// The message field says whose chat it is in, as the header names it,
+    /// without the push-name marker, and with "group" before a group's name.
+    #[test]
+    fn the_message_field_is_named_after_its_chat() {
+        let en = Locale::default();
+        assert_eq!(
+            composer_label(en, "Ahmed", false),
+            "Type a message to Ahmed"
+        );
+        assert_eq!(
+            composer_label(en, "Family", true),
+            "Type a message to group Family"
+        );
+        assert_eq!(composer_label(en, "~Ana", false), "Type a message to Ana");
+        assert_eq!(composer_label(en, "~ Ana", false), "Type a message to Ana");
+        assert_eq!(
+            composer_label(en, "Family\nand friends", true),
+            "Type a message to group Family and friends"
+        );
+        // A name holding braces is never filled again.
+        assert_eq!(
+            composer_label(en, "A{name}B", false),
+            "Type a message to A{name}B"
+        );
+        // Nothing left to name: the field's own hint, not a dangling "to".
+        assert_eq!(composer_label(en, "~", false), "Type a message");
+        assert_eq!(composer_label(en, " ", true), "Type a message");
     }
 
     #[test]

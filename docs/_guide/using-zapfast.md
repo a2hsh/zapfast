@@ -803,6 +803,22 @@ shortcuts.
 
 ## Screen readers
 
+The window's title, which NVDA+T and Alt+Tab read, names where you are:
+"Ada - ZapFast" with a chat open, on the Calls page too, "Settings -
+ZapFast", "Calls - ZapFast", or "ZapFast"; while the call screen is up,
+"Incoming call from Ada - ZapFast" as a call rings and "Call with Ada -
+ZapFast" once it is under way. With several accounts, the account's name
+comes before ZapFast: during a call, the name of the account the call is
+on. While ZapFast is locked the title is only "ZapFast", and a locked
+chat's name never appears in it: its call is "Incoming call - ZapFast" and
+"Call in progress - ZapFast".
+
+The message input is named after the open chat, "Type a message to Ada" or
+"Type a message to group Rust Berlin", so opening a chat from the keyboard
+says whose chat it is. While a reply is pending, the input's description says what it
+replies to, as the line above it shows: "replying to Ada: see you at five",
+and for a private reply, which group the message is from.
+
 ZapFast announces confirmations, errors, connection changes and history loading
 through the screen reader without moving focus. While the window is focused,
 the open chat also announces new messages with their sender, a quick burst as
@@ -830,9 +846,11 @@ focused control. Shift+F10 opens the current message's menu with
 focus on its first item; Tab, Shift+Tab, Up and Down move through the menu,
 and Escape closes it and returns to the list. Opened from the keyboard, the
 menu also lists a card's buttons, so none of them needs the pointer; the
-right-click menu is unchanged. The Applications key does not work yet: egui
-does not report it. In the list, R replies to the current message and moves
-to the message input, E reacts to it, C copies its text (or a downloaded
+right-click menu is unchanged. On Windows the Applications key (the menu
+key) opens the same menus as Shift+F10, wherever Shift+F10 opens one; on
+macOS and Linux, egui does not report that key, so use Shift+F10. In the
+list, R replies to the current message and moves to the message input, E
+reacts to it, C copies its text (or a downloaded
 picture), F forwards it, G goes to the message it replies to, and Delete
 (on a Mac, Delete or Fn+Delete) asks to delete it for you; Delete for
 everyone stays in the menu. Space or Enter does what clicking the message
@@ -875,12 +893,12 @@ beside the chat, it closes the panel. In the list, Up and Down move one chat
 without opening it, so nothing is marked as read; Home and End go to the
 first and last chat, and PgUp and PgDn move about a screen. Enter opens the
 chat and moves to its message input, or to its message list when it has
-none. Shift+F10 opens the chat's menu with focus on its first item, and
-Escape returns to the list. In the search field, Down moves into the search
-results on the first one, Up from the first returns to the field, and Enter
-in either opens a chat, as before. Once you pause typing, the search says
-how many results it shows, chats, messages and contacts together, such as
-"5 results" or "No results".
+none. Shift+F10, or the Applications key on Windows, opens the chat's menu
+with focus on its first item, and Escape returns to the list. In the search
+field, Down moves into the search results on the first one, Up from the
+first returns to the field, and Enter in either opens a chat, as before.
+Once you pause typing, the search says how many results it shows, chats,
+messages and contacts together, such as "5 results" or "No results".
 
 The chat's search pane (Ctrl+F) has a search field named for the chat,
 such as "Search messages with Ahmed", and lists its matches as a list
