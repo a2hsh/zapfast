@@ -68,7 +68,17 @@ fn password(app: &mut App, ui: &mut egui::Ui) {
     );
     // The placeholder is all the field shows of what it is for.
     super::widgets::name_field(&field, &gettext(locale, "Password"));
-    if ui.memory(|memory| memory.focused().is_none()) && !checking {
+    // In the lock screen's first pass the widget focused before the lock is
+    // still egui's focus, though no longer drawn: egui lets go of it only at
+    // the end of that pass, which a screen reader hears as the window. The
+    // field takes focus in that first pass instead.
+    let pass = ui.ctx().cumulative_pass_nr();
+    let first = ui.ctx().data_mut(|data| {
+        let last = data.get_temp::<u64>(id.with("drawn"));
+        data.insert_temp(id.with("drawn"), pass);
+        last.is_none_or(|last| last + 1 < pass)
+    });
+    if (first || ui.memory(|memory| memory.focused().is_none())) && !checking {
         field.request_focus();
     }
     if let Some(wait) = app.app_lock.wait_left() {

@@ -1910,8 +1910,13 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                                     app.mention_start = None;
                                 }
                                 // The composer waits for the image preview to
-                                // close before taking focus back.
-                                if app.focus_composer
+                                // close before taking focus back. Focus left on
+                                // the recorder, gone now that its recording was
+                                // sent, discarded or failed, comes back here
+                                // for a reader or the keys.
+                                let from_recorder = recording_focused(ui.ctx())
+                                    && super::keys::keyboard_or_reader(ui.ctx());
+                                if (app.focus_composer || from_recorder)
                                     && app.image_preview.is_none()
                                     && app.sticker_view.is_none()
                                 {
@@ -11296,7 +11301,11 @@ fn voice_player(
         })
 }
 
-/// Voice-recording controls and live waveform.
+/// Voice-recording controls and live waveform. Discard and Send are a
+/// toolbar, the composer's stop while it records, so Tab, F6 and the
+/// section keys keep the window's order. Recording puts focus on Send, as
+/// the message field had it; when the recording ends the field takes it
+/// back (`composer`).
 fn recording_strip(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     let (elapsed, levels) = match app.recording.as_ref() {
@@ -11314,69 +11323,164 @@ fn recording_strip(app: &mut App, ui: &mut egui::Ui) {
         .round()
         .max(COMPOSER_CONTROL);
     let button = row_height;
+    let time = crate::util::duration(elapsed.as_secs() as u32);
+    // Both buttons describe the time recorded so far. A screen reader reads
+    // a description with the name when focus arrives, and again when asked
+    // where focus is (NVDA+Tab), but does not speak it as it changes, as it
+    // would a changed name: the time is there on request, never every
+    // second.
+    let name = |response: &egui::Response, label: &str| {
+        let label = label.to_owned();
+        let time = time.clone();
+        response.ctx.accesskit_node_builder(response.id, |node| {
+            node.set_label(label);
+            node.set_description(time);
+        });
+    };
+    let label = crate::i18n::gettext(app.locale, "Recording");
     // As in WhatsApp: discard at the start, the light and the time, the
     // waveform across the rest, and send at the end.
     ui.allocate_ui_with_layout(
         vec2(ui.available_width().max(0.0), row_height),
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
-            ui.spacing_mut().item_spacing.x = 10.0;
-            if theme::circle_button(
-                ui,
-                Icon::Trash,
-                button,
-                palette.surface,
-                palette.surface_hover,
-                palette.secondary,
-                "Discard",
-            )
-            .clicked()
-            {
-                app.actions.push(Action::CancelRecording);
-            }
-            let (dot, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
-            let pulse = 0.55 + 0.45 * (elapsed.as_secs_f32() * 3.0).sin().abs();
-            ui.painter()
-                .circle_filled(dot.center(), 5.0, palette.danger.gamma_multiply(pulse));
-            theme::text(
-                ui,
-                crate::util::duration(elapsed.as_secs() as u32),
-                theme::tabular(fastframe_fonts::Weight::Medium, 14.0),
-                palette.text,
-            );
-            // Recent audio levels, newest on the right against send.
-            let spacing = ui.spacing().item_spacing.x;
-            let wave_width = (ui.available_width() - button - spacing).max(0.0);
-            let (rect, _) = ui.allocate_exact_size(vec2(wave_width, 28.0), Sense::hover());
-            ui.ctx()
-                .data_mut(|data| data.insert_temp(recording_wave_id(), rect));
-            let pitch = 3.0;
-            let count = (rect.width() / pitch).floor() as usize;
-            let shown = &levels[levels.len().saturating_sub(count)..];
-            for (index, level) in shown.iter().enumerate() {
-                let height = 2.0_f32 + (level * 4.0).min(1.0) * 24.0;
-                let x = rect.right() - (shown.len() - index) as f32 * pitch + 1.0;
-                ui.painter().rect_filled(
-                    Rect::from_center_size(egui::pos2(x, rect.center().y), vec2(2.0, height)),
-                    1.0,
-                    palette.accent,
+            toolbar(ui, recording_toolbar_id(), &label, Stop::Recording, |ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                let discard = theme::circle_button(
+                    ui,
+                    Icon::Trash,
+                    button,
+                    palette.surface,
+                    palette.surface_hover,
+                    palette.secondary,
+                    "Discard",
+                )
+                .in_toolbar(recording_toolbar_id());
+                name(
+                    &discard,
+                    &crate::i18n::gettext(app.locale, "Discard voice message"),
                 );
-            }
-            if theme::circle_button(
-                ui,
-                Icon::Send,
-                button,
-                palette.accent,
-                palette.accent_hover,
-                palette.on_accent,
-                "Send",
-            )
-            .clicked()
-            {
-                app.actions.push(Action::SendRecording);
-            }
+                if discard.clicked() {
+                    app.actions.push(Action::CancelRecording);
+                }
+                let (dot, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                let pulse = 0.55 + 0.45 * (elapsed.as_secs_f32() * 3.0).sin().abs();
+                ui.painter()
+                    .circle_filled(dot.center(), 5.0, palette.danger.gamma_multiply(pulse));
+                theme::text(
+                    ui,
+                    &time,
+                    theme::tabular(fastframe_fonts::Weight::Medium, 14.0),
+                    palette.text,
+                );
+                // Recent audio levels, newest on the right against send.
+                let spacing = ui.spacing().item_spacing.x;
+                let wave_width = (ui.available_width() - button - spacing).max(0.0);
+                let (rect, _) = ui.allocate_exact_size(vec2(wave_width, 28.0), Sense::hover());
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(recording_wave_id(), rect));
+                let pitch = 3.0;
+                let count = (rect.width() / pitch).floor() as usize;
+                let shown = &levels[levels.len().saturating_sub(count)..];
+                for (index, level) in shown.iter().enumerate() {
+                    let height = 2.0_f32 + (level * 4.0).min(1.0) * 24.0;
+                    let x = rect.right() - (shown.len() - index) as f32 * pitch + 1.0;
+                    ui.painter().rect_filled(
+                        Rect::from_center_size(egui::pos2(x, rect.center().y), vec2(2.0, height)),
+                        1.0,
+                        palette.accent,
+                    );
+                }
+                let send = theme::circle_button(
+                    ui,
+                    Icon::Send,
+                    button,
+                    palette.accent,
+                    palette.accent_hover,
+                    palette.on_accent,
+                    "Send",
+                )
+                .in_toolbar(recording_toolbar_id());
+                ui.ctx().data_mut(|data| {
+                    data.insert_temp(recording_buttons_id(), [discard.id, send.id]);
+                });
+                name(
+                    &send,
+                    &crate::i18n::gettext(app.locale, "Send voice message"),
+                );
+                // The message field's focus is Send's while the recorder
+                // stands in for the field: when recording starts, and when
+                // a chat opens with it running. Only for the keys or a
+                // screen reader: with the pointer nothing is focused, as
+                // upstream, and the request waits for the field.
+                if app.focus_composer
+                    && app.image_preview.is_none()
+                    && super::keys::keyboard_or_reader(ui.ctx())
+                {
+                    app.focus_composer = false;
+                    send.request_focus();
+                }
+                if send.clicked() {
+                    app.actions.push(Action::SendRecording);
+                }
+            });
         },
     );
+}
+
+/// Why a chat's composer takes no messages, in the words it shows in the
+/// field's place, or `None` when it does take them.
+pub(crate) fn read_only_reason(app: &App, chat: &Chat) -> Option<std::borrow::Cow<'static, str>> {
+    use crate::i18n::gettext;
+    if chat.can_send() {
+        return None;
+    }
+    let locale = app.locale;
+    Some(if chat.kind == crate::model::ChatKind::Broadcast {
+        if chat.left {
+            gettext(locale, "You left this channel")
+        } else {
+            gettext(locale, "Channels are read-only in ZapFast")
+        }
+    } else if chat.locked {
+        gettext(locale, "Locked chats are read-only in ZapFast")
+    } else {
+        // A group we left, here or as the phone says, rather than the admins.
+        let ours = app.our_ids();
+        let left = chat.left
+            || (!ours.is_empty() && !chat.participants.is_empty() && !chat.lists_any(&ours));
+        if left {
+            gettext(locale, "You left this group")
+        } else {
+            gettext(locale, "Only admins can send messages")
+        }
+    })
+}
+
+/// The recorder's toolbar: Discard and Send.
+fn recording_toolbar_id() -> egui::Id {
+    egui::Id::new("recording-actions")
+}
+
+/// The recorder's buttons as last drawn, Discard and Send.
+fn recording_buttons_id() -> egui::Id {
+    egui::Id::new("recording-buttons")
+}
+
+/// The recorder's Send button as last drawn, which Enter sends from
+/// (`keys.rs`).
+pub(crate) fn recording_send(ctx: &egui::Context) -> Option<egui::Id> {
+    ctx.data(|data| data.get_temp::<[egui::Id; 2]>(recording_buttons_id()))
+        .map(|[_, send]| send)
+}
+
+/// Whether focus is on one of the recorder's buttons as last drawn. Still
+/// true in the pass after the recorder is gone: egui lets go of a widget
+/// only at the end of the first pass that does not draw it.
+pub(crate) fn recording_focused(ctx: &egui::Context) -> bool {
+    let buttons = ctx.data(|data| data.get_temp::<[egui::Id; 2]>(recording_buttons_id()));
+    ctx.memory(|memory| memory.focused())
+        .is_some_and(|focused| buttons.is_some_and(|buttons| buttons.contains(&focused)))
 }
 
 /// Where the recorder's waveform was drawn, for layout tests.

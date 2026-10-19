@@ -445,9 +445,11 @@ voice messages right after it that you have not heard yet, as on the phone;
 any other message ends the run. The speaker's pitch stays the same at every
 speed. The first play sends
 a played receipt. When the composer is empty, the send button becomes a
-microphone. Press Enter or the send button to send the recording, or Escape or
-the delete button to discard it. ZapFast raises the volume of quiet recordings.
-Starting a reply before recording includes the quoted message.
+microphone. `Ctrl+Shift+R` (`Command+Shift+R` on macOS) also starts recording
+in the open chat, and pressed again sends the recording. Press Enter or the
+send button to send the recording, or Escape or the delete button to discard
+it. ZapFast raises the volume of quiet recordings. Starting a reply before
+recording includes the quoted message.
 
 ## Calls
 
@@ -947,6 +949,35 @@ or no chat open, focus stays where it is and the screen reader says so. On
 macOS, Control+1 to Control+3 can also be Mission Control's "Switch to
 Desktop" shortcuts, which are off by default; while they are on, macOS takes
 these keys first.
+
+Recording a voice message keeps all of this working. The recorder takes the
+composer's place as a toolbar named Recording, with Discard voice message
+and Send voice message, and F6 into the composer lands there. Starting a
+recording, from the microphone button or with Ctrl+Shift+R (Command+Shift+R
+on macOS), moves focus to Send, so the screen reader says "Recording
+toolbar" as focus enters it. Both buttons give the time recorded so far as
+their description, read when focus arrives and when you ask the screen
+reader where focus is (NVDA+Tab), but not spoken as it counts. Enter or
+Ctrl+Shift+R sends the recording, and Escape discards it and says "Recording
+discarded"; on Discard, Enter discards. A recording under half a second is
+not sent, and the screen reader says "Recording too short, not sent". Either
+way focus returns to the message input, as it does when the microphone
+cannot start, which is announced as an error. While recording, the chat list
+and the message list can still be read with the arrows; the message list's
+keys and Ctrl+1 to 9 wait until the recording ends. Opening another chat,
+from the chat list or with Alt+Up/Down or Ctrl+Shift+[ and ], keeps
+recording for that chat and says so, such as "Recording continues in Ada",
+followed by the chat's reason when it takes no messages, such as "Only
+admins can send messages"; sending there keeps recording and says that
+reason again, so the recording can go to another chat. Ctrl+Shift+R works
+beside the call history on the Calls tab as in the chats. Where the
+microphone button is not offered, Ctrl+Shift+R says why, such as "Send or
+clear the message to record" or "Channels are read-only in ZapFast"; under
+a dialog, a menu or the call screen, or on the linking screen, it does
+nothing. Switching accounts, or a chat that is
+deleted or locked while you record, discards the recording and says
+"Recording discarded"; locking ZapFast discards it silently. With the mouse
+and no screen reader, recording moves no focus, as before.
 
 In the chat view, Tab cycles through the message input, the Message actions
 toolbar, then from the top left of the window the Navigation toolbar (the

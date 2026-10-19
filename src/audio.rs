@@ -833,6 +833,20 @@ impl Recorder {
         recorder
     }
 
+    /// A recorder whose microphone could not start, as when there is no
+    /// input device or no permission to use it.
+    #[cfg(test)]
+    pub fn failed(error: &str) -> Self {
+        Self {
+            started: Instant::now(),
+            stop: Arc::new(AtomicBool::new(true)),
+            levels: Default::default(),
+            stepped: Default::default(),
+            outcome: Arc::new(Mutex::new(Some(Err(error.to_owned())))),
+            thread: None,
+        }
+    }
+
     pub fn elapsed(&self) -> Duration {
         self.started.elapsed()
     }

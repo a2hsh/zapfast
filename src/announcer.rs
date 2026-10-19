@@ -31,6 +31,8 @@ pub enum Category {
     /// What the message list's keys reach inside a message: a link, a
     /// phone number, a card's text, a file's name or a poll option.
     Item,
+    /// Status that names a chat, such as where a recording goes on.
+    ChatStatus,
 }
 
 /// Whether a `category` item said at `at` is still worth speaking `now`.
@@ -39,13 +41,19 @@ fn fresh(category: Category, at: Instant, now: Instant) -> bool {
 }
 
 impl Category {
-    /// Categories hidden while locked: messages, typing and a message's items
-    /// reveal who wrote or what, and toasts, errors included, are not drawn
-    /// on the lock screen and can name a contact or an account.
+    /// Categories hidden while locked and cleared once another account is
+    /// on screen: messages, typing, a message's items and chat status reveal
+    /// who wrote or what, or with whom, and toasts, errors included, are not
+    /// drawn on the lock screen and can name a contact or an account.
     fn private(self) -> bool {
         matches!(
             self,
-            Self::Message | Self::Typing | Self::Item | Self::Toast | Self::Error
+            Self::Message
+                | Self::Typing
+                | Self::Item
+                | Self::ChatStatus
+                | Self::Toast
+                | Self::Error
         )
     }
 }

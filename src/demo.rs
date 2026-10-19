@@ -8430,6 +8430,76 @@ mod tests {
         assert!(said_last(&app, &why), "{:?}", app.announcer.spoken());
     }
 
+    /// While a voice message records, the call history and the Starred list
+    /// are read with their keys, as the chat list is, and Enter opens the
+    /// chat as the chat list's does: the recording goes on there, and says
+    /// so.
+    #[test]
+    fn the_call_history_and_starred_are_read_while_recording() {
+        for page in ["calls-chat,recording", "starred,recording"] {
+            let (mut app, ctx) = calls_page(page);
+            assert!(app.recording.is_some(), "{page}");
+            let list = if app.show_starred {
+                // A second starred message, in another chat.
+                let other = app.conversations[SAMPLES[2].id]
+                    .messages
+                    .last()
+                    .cloned()
+                    .expect("a sample message");
+                app.starred.push(crate::archive::Starred {
+                    message: other,
+                    starred_at: crate::util::now() - 60,
+                });
+                crate::ui::chats::starred_list_id()
+            } else {
+                crate::ui::calls::history_list_id()
+            };
+            ctx.memory_mut(|memory| memory.request_focus(list));
+            render(&mut app, &ctx);
+            let tree = tree_after(&mut app, &ctx, Some(egui::Key::ArrowDown));
+            let active = list_nodes(&tree, list).1.expect("the current row");
+            assert_eq!(active.position_in_set(), Some(1), "{page}: the arrows read");
+            // The first row of a chat other than the one open, so that Enter
+            // moves the recording to another chat.
+            let chats: Vec<String> = if app.show_starred {
+                crate::ui::chats::starred_shown(&app)
+                    .iter()
+                    .map(|entry| entry.message.chat.clone())
+                    .collect()
+            } else {
+                crate::ui::calls::rows(&app.call_log)
+                    .iter()
+                    .map(|row| row[0].chat.clone())
+                    .collect()
+            };
+            let open = app.open_chat.clone();
+            let target = chats
+                .iter()
+                .position(|chat| Some(chat) != open.as_ref())
+                .expect("a row of another chat");
+            press_key(&mut app, &ctx, egui::Key::Home, egui::Modifiers::NONE);
+            for _ in 0..target {
+                press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+            }
+            press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+            assert_eq!(
+                app.open_chat.as_ref(),
+                Some(&chats[target]),
+                "{page}: opened"
+            );
+            assert_ne!(app.open_chat, open, "{page}: another chat");
+            assert!(app.recording.is_some(), "{page}: still recording");
+            assert!(
+                app.announcer
+                    .spoken()
+                    .iter()
+                    .any(|spoken| spoken.starts_with("Recording continues in")),
+                "{page}: {:?}",
+                app.announcer.spoken()
+            );
+        }
+    }
+
     #[test]
     fn arrows_move_the_chat_cursor_without_opening() {
         let mut app = app();
@@ -23845,6 +23915,47 @@ mod tests {
             "the waveform is {} wide",
             wave.width()
         );
+    }
+
+    /// With the pointer and no screen reader, recording focuses nothing, as
+    /// upstream: the keys keep their upstream meaning, so Home still
+    /// scrolls the chat rather than walking the recorder's buttons, and
+    /// "Recording" is said for want of the toolbar's name.
+    #[test]
+    fn a_pointer_recording_focuses_nothing() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        assert!(!crate::ui::keys::keyboard_or_reader(&ctx));
+        app.actions.push(crate::model::Action::StartRecording);
+        render(&mut app, &ctx);
+        assert!(app.recording.is_some());
+        assert_eq!(ctx.memory(|memory| memory.focused()), None);
+        assert!(!app.focus_composer, "no focus waits for the field");
+        app.announcer.show(&ctx, true);
+        assert!(app.announcer.spoken().contains(&"Recording"));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Home,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| crate::ui::keys::handle(&mut app, ui.ctx()),
+        );
+        output.textures_delta.clear();
+        assert!(
+            app.actions
+                .contains(&crate::model::Action::ScrollPage(crate::model::Scroll::Top)),
+            "{:?}",
+            app.actions
+        );
+        assert_eq!(ctx.memory(|memory| memory.focused()), None);
     }
 
     #[test]

@@ -49,6 +49,9 @@ pub enum Stop {
     Messages,
     /// The message field, after the messages, as it is drawn.
     Composer,
+    /// The recorder's toolbar, Discard and Send, in place of the message
+    /// field and Message actions while a voice message records.
+    Recording,
     /// The composer's toolbar: plus, emoji, and send or record.
     MessageActions,
 }
@@ -238,6 +241,7 @@ mod tests {
             Stop::ChatSearchClose,
             Stop::Messages,
             Stop::Composer,
+            Stop::Recording,
             Stop::MessageActions,
         ];
         assert!(order.is_sorted(), "{order:?}");
