@@ -498,10 +498,21 @@ you open the locked chats with their code.
 During a call the window shows the length of the call, counted from the moment
 the two sides are connected, and the controls along the bottom: mute, the
 microphone and speaker pickers, and hang up. Mute tells the other side, as on
-the phone. The arrow in the top corner puts the call screen aside: the call
+the phone. Ctrl+Shift+M (Command+Shift+M on macOS) mutes and unmutes the
+microphone from anywhere in the window during a call, also with the call
+screen put aside, and the screen reader says "Microphone muted" or
+"Microphone unmuted" once the call has done it; before the call connects it
+says where the call is instead. The arrow in the top corner puts the call screen aside: the call
 keeps running in a strip at the bottom of the window with **Return to the
 call** and a hang-up button, and you can read and write in any chat meanwhile.
-Escape does the same, and leaves full screen first. Only hanging up ends a
+The strip's two buttons are a toolbar named for the call, such as "Call with
+Ada": it is the window's first Tab stop, and F6 reaches it as a section of its
+own.
+Escape does the same, and leaves full screen first; on a call that rings it
+closes nothing and says "Incoming call: Accept or Decline". While the call
+screen is up, the window's shortcuts for chats do not reach the chat beneath
+it, and nothing typed goes into a message field left there; quitting, closing
+the window, zoom and locking ZapFast still work. Only hanging up ends a
 call; closing the window to the tray keeps it running. A call you hang up or
 decline leaves the screen at once; one the other side ends, declines, or
 misses, or one that could not connect, says so for a second and a half.
@@ -548,7 +559,13 @@ A call link in a message (`call.whatsapp.com/voice/…` or `/video/…`) joins
 that call here rather than opening the browser. The call screen says
 **Connecting…** until the call lets you in, which can take a while when its
 creator admits people one by one, then shows everyone on it as in a group call.
-Hanging up while you wait stops the join. A call joined through a link belongs
+Hanging up while you wait stops the join. In the message list a call link
+reads as one, "Call link 1 of 1, voice call", rather than as its address;
+opened from the keyboard, or with a screen reader, it joins with your
+microphone muted, says "Joining with the microphone muted", and the call
+starts muted, with nothing your microphone hears sent before it is: unmute
+with the Mute button or Ctrl+Shift+M once you are in.
+A click joins as before. A call joined through a link belongs
 to no chat: it is not filed in one, and shows on the Calls page as **Call
 link** with a link sign for a picture. That row only records the call; there
 is no chat to open from it and no one to call back.
@@ -840,6 +857,45 @@ on. While ZapFast is locked the title is only "ZapFast", and a locked
 chat's name never appears in it: its call is "Incoming call - ZapFast" and
 "Call in progress - ZapFast".
 
+The call screen is one dialog, named as the title names the call, with
+how the call is going as its description, such as "Incoming voice call" or
+the call's length. A call that rings takes focus on Accept, with a screen
+reader or after you used the keyboard, and so does a click on its
+notification; Tab reaches Decline. So that a key you were typing as the
+call came up does not answer or decline it, Enter and Space on Accept and
+Decline do nothing for a second after the call screen takes focus, and a
+key held down does nothing there; press it again. A call you place takes focus on Mute, or
+on Hang up until the call connects, and answering moves focus from Accept
+to Mute. On the call screen Tab and Shift+Tab move through its own controls
+only, in the order they appear from the top: the corner's buttons, the
+device pickers while they are shown, then Mute, the camera, Devices and Hang
+up. Mute, and a video call's Camera, are toggle buttons that keep their name
+and say whether they are pressed, and Devices says whether the pickers are
+expanded. When the call ends, or the screen is put aside, focus returns to where
+it was before the call screen took it.
+
+A call that rings is announced with who calls, "Incoming call from Ada",
+also in a muted or archived chat, whose call raises no notification; a
+locked chat's call, and any call while ZapFast is locked, is only "Incoming
+call". During a call the screen reader hears each change of the line under
+the name once: Connecting…, Calling…, Ringing…, Connected, and how the call
+ended (Declined, Busy, No answer, Connection lost, Call ended and the
+others), "Call ended" or "Call declined" when you end it yourself, and the
+notes the screen shows: a request to switch to video, the other side's
+camera going off or on, a device that went away, or their audio not
+getting through. On a video call the name and the call's length over the
+other side's picture are read as one label.
+
+On a group call the tiles are one list, People on the call, whose items
+read each person's name and state: "Grace, invited", "Mira, camera on",
+"You, muted", and how many more a full grid counts on its last tile. A
+group call that rings reads its faces as "On the call: Jonas, Mira and 3
+more". While the call screen is open, who joins or leaves is said once the
+roster settles, one person by name ("Mira joined the call", "Tom left the
+call") and a burst as a count ("3 people joined the call"); a locked
+group's call names nobody. A call link says "Waiting to be let in" while
+the call decides, then "You are in the call".
+
 The message input is named after the open chat, "Type a message to Ada" or
 "Type a message to group Rust Berlin", so opening a chat from the keyboard
 says whose chat it is. While a reply is pending, the input's description says what it
@@ -976,7 +1032,8 @@ account switcher with focus on the first account; Up and Down move through the a
 returns to your picture. Choosing an account moves focus to its message
 field, and Add account to the new account's linking screen.
 
-The chat view has four sections: the chat list (the rail, the list's
+The chat view has four sections, and a fifth, the call bar, while a call is
+put aside: the chat list (the rail, the list's
 toolbars, search and the list, or the call history on the Calls page), the
 conversation (Chat actions, the pinned message line, the chat's search pane,
 the message list and, while selecting messages, the selection bar), the chat

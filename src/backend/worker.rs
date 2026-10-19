@@ -839,7 +839,7 @@ pub async fn run(
                     Some(events) => events.recv().await.ok(),
                     None => std::future::pending().await,
                 }
-            } => worker.call_runtime(event),
+            } => worker.call_runtime(event).await,
             Some(tick) = async {
                 match call_frames.as_mut() {
                     Some(frames) => frames.recv().await.ok(),
@@ -5921,9 +5921,13 @@ impl Worker {
             Command::JoinCallLink {
                 token,
                 video,
+                muted,
                 generation,
                 cancel,
-            } => self.join_call_link(token, video, generation, cancel).await,
+            } => {
+                self.join_call_link(token, video, muted, generation, cancel)
+                    .await;
+            }
             Command::AnswerCall => self.answer_call().await,
             Command::DeclineCall => self.decline_call().await,
             Command::HangupCall => self.hangup_call().await,

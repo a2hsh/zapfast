@@ -246,6 +246,12 @@ impl Announcer {
         }
     }
 
+    /// What waits to be spoken in the next `show`, in the order it was said.
+    #[cfg(test)]
+    pub fn waiting(&self) -> Vec<&str> {
+        self.queue.iter().map(|item| item.text.as_str()).collect()
+    }
+
     #[cfg(test)]
     pub fn spoken(&self) -> [&str; 2] {
         [&self.slots[0].text, &self.slots[1].text]

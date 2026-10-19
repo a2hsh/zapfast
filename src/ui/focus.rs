@@ -10,7 +10,11 @@ use egui::{Context, FocusDirection, Id, Response};
 /// comes first, then the chat list's stops, and the composer's last.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Stop {
-    /// The rail on the left, the window's first stop: one vertical toolbar
+    /// The strip of a call put aside, along the bottom of the window: one
+    /// toolbar of Return to the call and Hang up, ahead of everything else,
+    /// so the way back to the call is always one Tab away.
+    CallStrip,
+    /// The rail on the left, the window's first stop after a call's strip: one vertical toolbar
     /// of Chats, Calls and Starred, Show the chat list while the list is
     /// hidden, then Archived, Locked, Settings and our picture. The chats'
     /// avatars between them are not its buttons: while the list is hidden
@@ -238,6 +242,7 @@ mod tests {
     #[test]
     fn the_composer_comes_last() {
         let order = [
+            Stop::CallStrip,
             Stop::Rail,
             Stop::ChatListActions,
             Stop::Search,

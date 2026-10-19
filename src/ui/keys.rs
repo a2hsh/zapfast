@@ -7,8 +7,18 @@ use crate::model::{Action, Chat, ChatId, Dialog, InfoView, Page, Scroll};
 
 /// Routes keyboard commands to actions, respecting overlays and text focus.
 pub fn handle(app: &mut App, ctx: &egui::Context) {
+    // During a call, wherever the reader is, the call screen up or put aside.
+    if let Some(action) = mute_key(app, ctx) {
+        app.actions.push(action);
+    }
     if app.picture_edit.is_some() {
         editor_keys(app, ctx);
+        return;
+    }
+    // The call screen covers the chats, the viewer and any dialog: it takes
+    // the keys, and none of them reaches what it covers.
+    if app.call_screen_on() {
+        call_keys(app, ctx);
         return;
     }
     if app.image_preview.is_some() {
@@ -364,14 +374,6 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
             actions.push(Action::CancelEdit);
         } else if app.reply_to.is_some() {
             actions.push(Action::CancelReply);
-        } else if app.call_fullscreen {
-            // The window shrinks back first, and only then does the next Escape put the surface
-            // aside. Neither one ends the call; only the hang-up button does that.
-            actions.push(Action::ToggleCallFullscreen);
-        } else if app.call_surface_open() {
-            // The same move the surface's own button makes: the call keeps running, and the bar at
-            // the bottom of the chat offers the way back.
-            actions.push(Action::LeaveCallSurface);
         } else if app.info_visible() && app.group_name_edit.is_some() {
             // Cancels the group rename and keeps the panel open.
             actions.push(Action::CloseGroupName);
@@ -1604,6 +1606,149 @@ fn editor_keys(app: &mut App, ctx: &egui::Context) {
     app.actions.extend(actions);
 }
 
+/// Handles keys while the call screen covers the window, whether the call
+/// rings, is under way or says how it ended. Escape leaves full screen first,
+/// then puts the screen aside, as its own button does; neither ends the call.
+/// On a ringing call Escape closes nothing, and says what does. The window's
+/// own keys still work: quit, close the window to the tray, zoom and lock.
+/// Nothing else reaches the chat drawn beneath: none of its shortcuts is
+/// taken, and a control left focused there, such as the message field, gets
+/// no keys and no text, so nothing typed during a call is sent. The screen's
+/// own focused control keeps the keys that press it, and Tab walks the
+/// screen's controls alone (`call::tab`).
+fn call_keys(app: &mut App, ctx: &egui::Context) {
+    let menu_open = egui::Popup::is_any_open(ctx);
+    if !menu_open {
+        super::call::tab(ctx);
+    }
+    let ringing = app
+        .call
+        .as_ref()
+        .is_some_and(|call| call.phase == crate::calls::CallPhase::Incoming);
+    let lock = app.settings.app_lock_hash.is_some();
+    let mut actions = Vec::new();
+    let escape = ctx.input_mut(|input| {
+        let mut key = |modifiers: Modifiers, key: Key, action: Action| {
+            if input.consume_key(modifiers, key) {
+                actions.push(action);
+            }
+        };
+        if lock {
+            key(
+                Modifiers::COMMAND | Modifiers::SHIFT,
+                Key::L,
+                Action::LockApp,
+            );
+        }
+        key(Modifiers::COMMAND, Key::Q, Action::Quit);
+        key(Modifiers::COMMAND, Key::W, Action::CloseWindow);
+        key(Modifiers::COMMAND, Key::Plus, Action::ZoomBy(0.1));
+        key(Modifiers::COMMAND, Key::Equals, Action::ZoomBy(0.1));
+        key(Modifiers::COMMAND, Key::Minus, Action::ZoomBy(-0.1));
+        key(Modifiers::COMMAND, Key::Num0, Action::ResetZoom);
+        // A picker's open list takes Escape itself, and closes.
+        !menu_open && input.consume_key(Modifiers::NONE, Key::Escape)
+    });
+    if escape {
+        if ringing {
+            // Escape is neither an answer nor a refusal.
+            app.announcer.say(
+                crate::announcer::Category::Status,
+                crate::i18n::gettext(app.locale, "Incoming call: Accept or Decline"),
+            );
+        } else if app.call_fullscreen {
+            actions.push(Action::ToggleCallFullscreen);
+        } else if app.call_surface_open() {
+            actions.push(Action::LeaveCallSurface);
+        }
+        // egui let go of focus on this Escape: the control stays focused,
+        // unless the screen goes with it, which gives focus back itself.
+        if !actions.contains(&Action::LeaveCallSurface)
+            && escape_keeps_focus(ctx)
+            && let Some(id) = focus_before_escape(ctx)
+        {
+            ctx.memory_mut(|memory| memory.request_focus(id));
+        }
+    }
+    let on_screen = menu_open || focus_on_call_screen(ctx);
+    // A key typed for the field the ringing screen covered must not answer
+    // or refuse the call: Enter and Space on Accept and Decline wait a
+    // moment after the screen takes focus, and a key held down since then
+    // never answers.
+    let answer_waits = ringing && !menu_open && super::call::answer_waits(ctx);
+    ctx.input_mut(|input| {
+        input.events.retain(|event| match event {
+            // There is no text to type, paste or copy on the call screen.
+            egui::Event::Text(_)
+            | egui::Event::Paste(_)
+            | egui::Event::Copy
+            | egui::Event::Cut
+            | egui::Event::Ime(_) => false,
+            egui::Event::Key {
+                key,
+                pressed: true,
+                repeat,
+                ..
+            } => {
+                let answering = ringing && !menu_open && matches!(key, Key::Enter | Key::Space);
+                on_screen
+                    && call_screen_key(*key, menu_open)
+                    && !(answering && (answer_waits || *repeat))
+            }
+            _ => true,
+        });
+    });
+    app.actions.extend(actions);
+}
+
+/// Takes Ctrl+Shift+M (Command+Shift+M on macOS) during a call, on its
+/// screen or with the screen put aside, and returns what it does: it mutes
+/// or unmutes the microphone, as the screen's Mute button does, and says so
+/// once the call confirms it. Matched exactly, so AltGr, which Windows sends
+/// as Ctrl+Alt, never takes it, nor does a held key's repeat. Before the
+/// call connects, when Mute does not apply yet, it says where the call is.
+fn mute_key(app: &mut App, ctx: &egui::Context) -> Option<Action> {
+    let call = app.call.clone().filter(|call| call.phase.is_live())?;
+    if !ctx.input_mut(|input| {
+        take_matching_exactly(input, Modifiers::COMMAND | Modifiers::SHIFT, Key::M)
+    }) {
+        return None;
+    }
+    if call.phase.is_connected() {
+        app.call_mute_wanted = Some((call.generation, !call.muted));
+        return Some(Action::SetCallMuted(!call.muted));
+    }
+    let text = if call.phase == crate::calls::CallPhase::Incoming {
+        crate::i18n::gettext(app.locale, "Incoming call: Accept or Decline").into_owned()
+    } else {
+        super::call::status(app.locale, &call)
+    };
+    app.announcer.say(crate::announcer::Category::Status, text);
+    None
+}
+
+/// Whether the focused control is one of the call screen's own, as the last
+/// pass drew it.
+fn focus_on_call_screen(ctx: &egui::Context) -> bool {
+    let Some(focused) = ctx.memory(|memory| memory.focused()) else {
+        return false;
+    };
+    ctx.viewport(|viewport| {
+        viewport
+            .prev_pass
+            .widgets
+            .get(focused)
+            .is_some_and(|widget| widget.layer_id == super::call::layer())
+    })
+}
+
+/// The keys a control on the call screen uses: Enter and Space press it, and
+/// a picker's open list takes them all. The arrows are left out: egui would
+/// move focus by them to whatever lies nearest, the chat beneath included.
+fn call_screen_key(key: Key, menu_open: bool) -> bool {
+    menu_open || matches!(key, Key::Enter | Key::Space)
+}
+
 /// Handles a playing clip's keys while the viewer shows it: Space plays or
 /// pauses, unless another control has focus, M mutes, S changes the speed,
 /// and the arrows jump five seconds, as they step through the album only
@@ -1830,7 +1975,7 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+L", "Focus the message input"),
     (
         "F6 / Shift+F6",
-        "Next / previous section: chat list, conversation, chat info, message input",
+        "Next / previous section: call bar, chat list, conversation, chat info, message input",
     ),
     ("Alt+↑ / Alt+↓", "Previous / next chat"),
     ("Ctrl+Shift+[ / ]", "Previous / next chat, as in WhatsApp"),
@@ -1846,6 +1991,10 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     (
         "Escape",
         "Dismiss the current action, return from search, Calls or Starred, or close the chat",
+    ),
+    (
+        "Ctrl+Shift+M",
+        "Mute or unmute the microphone during a call",
     ),
     ("Ctrl+N", "New chat or message yourself"),
     ("Ctrl+E", "Archive or unarchive the open chat"),
@@ -2246,6 +2395,28 @@ mod tests {
             Some("one"),
             "the list stays on the album"
         );
+    }
+
+    /// N23: a call link reads as a call link with its kind, not as its
+    /// address, and Space joins it as a click does; other links read as
+    /// before.
+    #[test]
+    fn a_call_link_item_says_it_joins_a_call() {
+        let voice = "https://call.whatsapp.com/voice/AbCdEf1234567890";
+        let video = "https://call.whatsapp.com/video/AbCdEf1234567890";
+        let (_root, mut app, chat) = app_with(vec![(
+            "text",
+            crate::model::Content::text(format!("{voice} or {video} or https://a.org")),
+        )]);
+        let (_, spoken) = message_key(&mut app, &chat, "text", Key::ArrowRight);
+        assert_eq!(spoken, "Call link 2 of 3, video call");
+        let (actions, _) = message_key(&mut app, &chat, "text", Key::Space);
+        assert_eq!(actions, [Action::OpenUrl(video.to_owned())]);
+        let (_, spoken) = message_key(&mut app, &chat, "text", Key::ArrowLeft);
+        assert_eq!(spoken, "Call link 1 of 3, voice call");
+        message_key(&mut app, &chat, "text", Key::ArrowRight);
+        let (_, spoken) = message_key(&mut app, &chat, "text", Key::ArrowRight);
+        assert_eq!(spoken, "Link 3 of 3, https://a.org");
     }
 
     /// Phone numbers are items between the links, in the order the text has
@@ -3429,6 +3600,8 @@ mod tests {
             crate::settings::Settings::default(),
         )
         .0;
+        // Linked: the call screen covers the chats, never the linking screen.
+        app.link = crate::backend::LinkStatus::Connected;
         app.call = Some(crate::calls::CallUpdate {
             generation: 1,
             chat: "1@s.whatsapp.net".to_owned(),

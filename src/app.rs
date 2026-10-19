@@ -901,6 +901,20 @@ pub struct App {
     /// leaving it never touches the call, and a call that ends puts the
     /// window back itself.
     pub call_fullscreen: bool,
+    /// Whether the call screen takes focus again in the next pass, as a
+    /// click on a call's notification brings the window up
+    /// (`ui::overlay::settle`).
+    pub call_refocus: bool,
+    /// Whether the strip's Return to the call takes focus as it is next
+    /// drawn: the call screen was put aside from the keys with nowhere else
+    /// to give focus back to.
+    pub call_strip_focus: bool,
+    /// The mute state Ctrl+Shift+M asked of a call, by the call's
+    /// generation: said once the call's own update confirms it.
+    pub call_mute_wanted: Option<(u64, bool)>,
+    /// Who joined or left the group call on screen, held to be said as one
+    /// burst.
+    call_roster: Option<calls::RosterHold>,
     /// The incoming call the desktop was told about, so its notification can
     /// be taken back once it is answered or given up.
     call_notified: Option<u64>,
@@ -979,7 +993,8 @@ pub struct App {
     /// Requests received from later launches.
     control_commands: Option<std::sync::Arc<std::sync::Mutex<Vec<ControlCommand>>>>,
     /// Chats and messages from clicked notifications.
-    notification_opens: std::sync::Arc<std::sync::Mutex<Vec<crate::notify::NotificationTarget>>>,
+    pub(crate) notification_opens:
+        std::sync::Arc<std::sync::Mutex<Vec<crate::notify::NotificationTarget>>>,
     notifications: crate::notify::Notifications,
     /// Unread count on the taskbar icon, where the desktop reads it. `None`
     /// for demo and test runs, which must not touch the real taskbar.
@@ -1682,6 +1697,10 @@ impl App {
             call_devices_open: false,
             call_surface_hidden: false,
             call_fullscreen: false,
+            call_refocus: false,
+            call_strip_focus: false,
+            call_mute_wanted: None,
+            call_roster: None,
             call_notified: None,
             call_rings: None,
             call_tones: Default::default(),
@@ -2403,8 +2422,11 @@ impl App {
                     message,
                 }),
                 // A call's notification brings the window up, where the call
-                // is waiting.
-                None => self.actions.push(Action::ReturnToCall),
+                // is waiting, with focus on its screen.
+                None => {
+                    self.actions.push(Action::ReturnToCall);
+                    self.call_refocus = true;
+                }
             }
             self.actions.push(Action::ShowWindow);
         }
@@ -2520,10 +2542,12 @@ impl App {
             self.announcer
                 .say(crate::announcer::Category::Message, text);
         }
+        let roster_due = self.flush_call_roster(now);
         self.message_hold
             .deadline()
             .into_iter()
             .chain(self.search_deadlines().into_iter().flatten())
+            .chain(roster_due)
             .min()
     }
 
@@ -6583,7 +6607,12 @@ impl App {
     /// overlay is active.
     pub(crate) fn refocus_composer(&mut self, ctx: &egui::Context) {
         let search_focused = ctx.memory(|memory| memory.has_focus(egui::Id::new("chat-search")));
-        if self.chat_view()
+        // The call screen covers the message field, and takes focus itself
+        // wherever focus is followed. For the pointer the field takes it as
+        // it always did, and gets no keys while covered.
+        let covered = self.call_screen_on() && crate::ui::keys::keyboard_or_reader(ctx);
+        if !covered
+            && self.chat_view()
             && self.dialog.is_none()
             && self.picker.is_none()
             && self.reaction_target.is_none()
@@ -8049,7 +8078,11 @@ impl App {
             }
             Action::OpenUrl(url) => {
                 if let Some((token, video)) = crate::safety::call_link(&url) {
-                    self.join_call_link(token, video);
+                    // From the keys or a screen reader, a link checked with
+                    // Space must not open the microphone to a call at once:
+                    // it joins muted. A click joins as it always has.
+                    let muted = crate::ui::overlay::followed(ctx);
+                    self.join_call_link(token, video, muted);
                 } else if let Some(code) = crate::safety::group_invite_code(&url) {
                     self.invite = Some(crate::model::GroupInvite {
                         code: code.clone(),
@@ -10411,6 +10444,7 @@ impl App {
         self.announcer.forget_private();
         // Messages waiting to be spoken must not be heard after the unlock.
         self.message_hold.clear();
+        self.call_roster = None;
         self.window_focused = false;
         self.flush_open_draft();
         self.recording = None;

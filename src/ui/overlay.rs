@@ -1,6 +1,6 @@
 //! Focus for the overlays a reader opens from the keys or with a screen
 //! reader attached: the dialogs, the media viewer, the sticker view, the
-//! picture cropper and the emoji and reaction pickers. Opened, an overlay
+//! picture cropper, the call screen and the emoji and reaction pickers. Opened, an overlay
 //! takes focus in the first pass that shows it, on its first control (the
 //! cropper's on "Keep this crop", the viewer's on a clip's frame) unless it
 //! put focus on one of its own, so
@@ -8,6 +8,8 @@
 //! that opened it on the way. Closed, a dialog, the viewer, the sticker view
 //! or the cropper gives focus back to where it was when it opened, such as
 //! the message the viewer was opened from, rather than to the message field;
+//! the call screen enters on Accept while a call rings, else on Mute, and
+//! gives focus back as it goes or is put aside;
 //! the pickers keep their own way back. Opened or closed with the pointer,
 //! even with a screen reader or another UIA client attached, an overlay is
 //! left exactly as it was (`followed`).
@@ -28,6 +30,9 @@ enum Overlay {
     Dialog(Dialog),
     Viewer,
     Editor,
+    /// The call screen. A call that rings is never opened by the pointer: it
+    /// takes focus whenever focus is followed at all.
+    Call,
     Sticker,
     Reactions,
     Picker,
@@ -40,6 +45,7 @@ impl Overlay {
             Self::Dialog(_) => super::dialogs::modal_id(),
             Self::Viewer => super::image_preview::modal_id(),
             Self::Editor => super::image_editor::area_id(),
+            Self::Call => super::call::layer().id,
             Self::Sticker => super::image_preview::sticker_modal_id(),
             Self::Reactions => super::picker::reaction_area_id(),
             Self::Picker => super::picker::area_id(),
@@ -65,6 +71,9 @@ impl Overlay {
             // rather than Close, where Space would close the viewer. Not
             // drawn for a picture, which enters on Close as before.
             Self::Viewer => Some(super::image_preview::video_id()),
+            // Accept on a ringing call, Mute (Hang up while placing) on one
+            // under way, rather than the corner's buttons drawn first.
+            Self::Call => super::call::entry(ctx),
             _ => None,
         }
     }
@@ -106,6 +115,9 @@ fn current(app: &App) -> Option<Overlay> {
     // The cropper covers everything, and takes the keys first.
     if app.picture_edit.is_some() {
         Some(Overlay::Editor)
+    } else if app.call_screen_on() {
+        // It covers the viewer, the sticker view and any dialog.
+        Some(Overlay::Call)
     } else if app.image_preview.is_some() {
         Some(Overlay::Viewer)
     } else if app.sticker_view.is_some() {
@@ -158,14 +170,28 @@ pub fn settle(app: &mut App, ctx: &egui::Context) {
     let before = ctx.data(|data| data.get_temp::<Opened>(opened_id()));
     let handed_back = ctx.data(|data| data.get_temp::<(Id, Option<Id>)>(handed_back_id()));
     ctx.data_mut(|data| data.remove::<(Id, Option<Id>)>(handed_back_id()));
+    // A click on a call's notification brought the window up for the call:
+    // its screen takes focus, however focus was moved before.
+    let refocus = std::mem::take(&mut app.call_refocus) && now == Some(Overlay::Call);
+    if refocus
+        && let Some(mut opened) = before
+            .clone()
+            .filter(|opened| opened.overlay == Overlay::Call)
+    {
+        opened.followed = true;
+        opened.entered = false;
+        ctx.data_mut(|data| data.insert_temp(opened_id(), opened));
+        return;
+    }
     if before.as_ref().map(|opened| &opened.overlay) == now.as_ref() {
         return;
     }
-    if let Some(before) = &before
-        && now.is_none()
-        && before.followed
-        && followed(ctx)
-        && before.overlay.returns()
+    let returning = before.as_ref().is_some_and(|before| {
+        now.is_none() && before.followed && followed(ctx) && before.overlay.returns()
+    });
+    let mut returned = false;
+    if returning
+        && let Some(before) = &before
         && before.chat == app.open_chat
         && before.page == app.page
         && let Some(opener) = before.opener
@@ -174,6 +200,17 @@ pub fn settle(app: &mut App, ctx: &egui::Context) {
         app.focus_composer = false;
         ctx.memory_mut(|memory| memory.request_focus(opener));
         ctx.data_mut(|data| data.insert_temp(returned_id(), opener));
+        returned = true;
+    }
+    // The call screen put aside, with no opener to go back to, gives focus
+    // to the strip's way back, the window's first stop.
+    if returning
+        && !returned
+        && before.as_ref().map(|before| &before.overlay) == Some(&Overlay::Call)
+        && app.call_surface_hidden
+        && app.call_live()
+    {
+        app.call_strip_focus = true;
     }
     // The cropper follows focus as it was asked for: a file opens it frames
     // later, once its size is read, with no key or click in that frame.
@@ -188,7 +225,7 @@ pub fn settle(app: &mut App, ctx: &egui::Context) {
     // where it was, but follows focus as the move that opened it does: a
     // viewer opened from the keys over a dialog the pointer opened takes
     // focus.
-    let opened = now.map(|overlay| match &before {
+    let mut opened = now.map(|overlay| match &before {
         Some(before) => Opened {
             followed: follows(&overlay, app),
             overlay,
@@ -215,6 +252,9 @@ pub fn settle(app: &mut App, ctx: &egui::Context) {
             }
         }
     });
+    if refocus && let Some(opened) = &mut opened {
+        opened.followed = true;
+    }
     ctx.data_mut(|data| match opened {
         Some(opened) => {
             data.insert_temp(opened_id(), opened);
@@ -284,6 +324,9 @@ pub fn finish(ctx: &egui::Context) {
     } else if let Some(first) = first {
         ctx.memory_mut(|memory| memory.request_focus(first));
         opened.entered = true;
+        if opened.overlay == Overlay::Call {
+            super::call::note_entered(ctx);
+        }
     } else if drawn.iter().all(|widget| !widget.visible) {
         if ctx.current_pass_index() == 0 {
             ctx.request_discard("an overlay the keys opened takes focus in the pass that shows it");

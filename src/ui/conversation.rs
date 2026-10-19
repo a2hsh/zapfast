@@ -7745,6 +7745,17 @@ pub(crate) fn target_label(
         .join(", ")
     };
     match target {
+        // A call link joins a call here rather than opening a page, so it
+        // says so instead of reading out its token.
+        KeyTarget::Link { url, .. } if crate::safety::call_link(url).is_some() => {
+            let video = crate::safety::call_link(url).is_some_and(|(_, video)| video);
+            let template = if video {
+                gettext(locale, "Call link {position} of {total}, video call")
+            } else {
+                gettext(locale, "Call link {position} of {total}, voice call")
+            };
+            fill(&template, &[("position", &at), ("total", &of)])
+        }
         KeyTarget::Link { written, .. } => fill(
             &gettext(locale, "Link {position} of {total}, {link}"),
             &[("position", &at), ("total", &of), ("link", written)],

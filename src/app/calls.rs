@@ -35,6 +35,16 @@ pub struct CallPerson {
     pub video: bool,
 }
 
+/// Who joined or left a group call on screen since the last time it was
+/// said, by id and name, held until the roster goes quiet so a burst is said
+/// as one count (`App::flush_call_roster`).
+pub(super) struct RosterHold {
+    generation: u64,
+    joined: Vec<(String, String)>,
+    left: Vec<(String, String)>,
+    settle: crate::announcer::Settle,
+}
+
 /// How long a call may stay placing with no word from its worker before the
 /// screen gives up on it. Placing waits on device checks, the camera (whose
 /// first use on macOS asks permission) and the peer's devices, so this is
@@ -55,6 +65,16 @@ impl App {
             .as_ref()
             .is_some_and(|call| call.phase.is_live() && call.phase != CallPhase::Incoming)
             && !self.call_surface_hidden
+    }
+
+    /// Whether the call screen covers the window: a call ringing, under way or
+    /// saying how it ended, that the reader has not put aside. The keys and
+    /// focus are the screen's then (`ui::keys`, `ui::overlay`), not the chat's
+    /// drawn beneath it. Only the chats have it over them: the linking screen,
+    /// which an account logged out during a call on another one shows, draws
+    /// no call screen and keeps its keys.
+    pub fn call_screen_on(&self) -> bool {
+        self.is_linked() && self.call.is_some() && !self.call_surface_hidden
     }
 
     /// Whether this chat of the account on screen has the live call, which is
@@ -299,6 +319,7 @@ impl App {
         if update.phase != CallPhase::Placing {
             self.call_placed = None;
         }
+        let before = self.call.clone();
         // A call we announced that no longer rings was picked up or given up:
         // its notification goes, and only its own.
         if update.phase != CallPhase::Incoming && self.call_notified == Some(update.generation) {
@@ -359,11 +380,217 @@ impl App {
         if finished || incoming {
             self.call_cancel = None;
         }
+        self.say_call_change(before, ringing);
         self.request_call_repaint();
         if ringing {
             self.notify_incoming_call();
         }
         self.sync_call_tone();
+    }
+
+    /// Says what changed in the call the window shows, once: that a call
+    /// rings and who calls, each new line under the call's name (Calling…,
+    /// Ringing…, Connected, how it ended), a request to switch to video, the
+    /// peer's camera going off or on, a device lost, the peer's audio failing.
+    /// A call to us is said whatever the chat's notification rules are: its
+    /// screen takes the window anyway. What names someone is private, so
+    /// nothing of it is said behind the lock screen, where only "Incoming
+    /// call" is; a locked chat's call names nobody.
+    fn say_call_change(&mut self, before: Option<CallUpdate>, ringing: bool) {
+        use crate::announcer::Category;
+        use crate::i18n::gettext;
+        let Some(call) = self.call.clone() else {
+            return;
+        };
+        let locale = self.locale;
+        if ringing {
+            if self.call_is_private() || self.app_lock.is_locked() {
+                self.announcer
+                    .say(Category::Status, gettext(locale, "Incoming call"));
+            } else {
+                let name = self.call_name();
+                let text = crate::a11y::call_heading(
+                    locale,
+                    crate::a11y::TitlePlace::IncomingCall(Some(&name)),
+                );
+                self.announcer.say(Category::ChatStatus, text);
+            }
+            return;
+        }
+        let before = before.filter(|before| before.generation == call.generation);
+        let mut said = Vec::new();
+        // Ctrl+Shift+M's answer, once the call confirms it.
+        match self.call_mute_wanted {
+            Some((generation, wanted)) if generation == call.generation => {
+                if call.muted == wanted {
+                    self.call_mute_wanted = None;
+                    said.push(if wanted {
+                        gettext(locale, "Microphone muted").into_owned()
+                    } else {
+                        gettext(locale, "Microphone unmuted").into_owned()
+                    });
+                }
+            }
+            Some(_) => self.call_mute_wanted = None,
+            None => {}
+        }
+        let status = crate::ui::call::spoken_status(locale, &call);
+        if status.is_some()
+            && status
+                != before
+                    .as_ref()
+                    .and_then(|before| crate::ui::call::spoken_status(locale, before))
+        {
+            said.extend(status);
+        }
+        let was = |test: fn(&CallUpdate) -> bool| before.as_ref().is_some_and(test);
+        if call.video_requested && !was(|before| before.video_requested) {
+            said.push(
+                gettext(
+                    locale,
+                    "Wants to switch to video: turn on your camera to answer",
+                )
+                .into_owned(),
+            );
+        }
+        // Their camera, once the video call is up and stays up.
+        let video_up = |call: &CallUpdate| call.video && call.phase == CallPhase::Active;
+        if video_up(&call) && was(video_up) {
+            match (was(|before| before.remote_video), call.remote_video) {
+                (true, false) => said.push(gettext(locale, "Their camera is off").into_owned()),
+                (false, true) => said.push(gettext(locale, "Their camera is on").into_owned()),
+                _ => {}
+            }
+        }
+        for lost in &call.lost_devices {
+            if !before
+                .as_ref()
+                .is_some_and(|before| before.lost_devices.contains(lost))
+            {
+                said.push(crate::ui::call::lost_device_text(locale, lost));
+            }
+        }
+        if let Some(audio) = call.peer_audio
+            && before.as_ref().and_then(|before| before.peer_audio) != Some(audio)
+        {
+            said.push(crate::ui::call::peer_audio_text(locale, audio));
+        }
+        for text in said {
+            self.announcer.say(Category::ChatStatus, text);
+        }
+        self.hold_roster_change(before.as_ref(), &call);
+    }
+
+    /// Notes who joined or left a group call since `before`, while its screen
+    /// is open, to be said once the roster settles. Nobody of a locked
+    /// chat's call is named, and someone who comes and goes within one burst
+    /// is not said at all.
+    fn hold_roster_change(&mut self, before: Option<&CallUpdate>, call: &CallUpdate) {
+        let joined_ids = |call: &CallUpdate| -> Vec<String> {
+            call.group
+                .iter()
+                .flat_map(|group| group.joined())
+                .map(|person| person.id.clone())
+                .collect()
+        };
+        let Some(before) = before else {
+            return;
+        };
+        if !self.call_surface_open() || self.call_is_private() || call.group.is_none() {
+            return;
+        }
+        // The roster a call link lets us in with is who was there already,
+        // not people joining: "You are in the call" says enough.
+        let admitted = call.group.as_ref().is_some_and(|group| group.link)
+            && !matches!(before.phase, CallPhase::Accepted | CallPhase::Active);
+        if admitted {
+            return;
+        }
+        let (was, now) = (joined_ids(before), joined_ids(call));
+        let came: Vec<String> = now.iter().filter(|id| !was.contains(id)).cloned().collect();
+        let went: Vec<String> = was.iter().filter(|id| !now.contains(id)).cloned().collect();
+        if came.is_empty() && went.is_empty() {
+            return;
+        }
+        let named = |app: &mut Self, ids: Vec<String>| -> Vec<(String, String)> {
+            app.with_call_account(|app| {
+                ids.into_iter()
+                    .map(|id| {
+                        let name = app.display_name(&id);
+                        (id, name)
+                    })
+                    .collect()
+            })
+        };
+        let came = named(self, came);
+        let went = named(self, went);
+        let now = Instant::now();
+        let hold = match self.call_roster.take() {
+            Some(mut hold) if hold.generation == call.generation => {
+                hold.settle.touch(now);
+                hold
+            }
+            _ => RosterHold {
+                generation: call.generation,
+                joined: Vec::new(),
+                left: Vec::new(),
+                settle: crate::announcer::Settle::new(now),
+            },
+        };
+        let mut hold = hold;
+        for person in came {
+            match hold.left.iter().position(|(id, _)| *id == person.0) {
+                Some(index) => {
+                    hold.left.remove(index);
+                }
+                None => hold.joined.push(person),
+            }
+        }
+        for person in went {
+            match hold.joined.iter().position(|(id, _)| *id == person.0) {
+                Some(index) => {
+                    hold.joined.remove(index);
+                }
+                None => hold.left.push(person),
+            }
+        }
+        self.call_roster = Some(hold);
+    }
+
+    /// Says who joined and left the group call on screen, once the roster
+    /// has been quiet a moment (or held long enough), and returns when the
+    /// held change is due. A change for a call no longer on its screen, or
+    /// behind the lock screen, is dropped.
+    pub(super) fn flush_call_roster(&mut self, now: Instant) -> Option<Instant> {
+        let generation = self.call.as_ref().map(|call| call.generation);
+        let hold = self.call_roster.as_ref()?;
+        if Some(hold.generation) != generation
+            || !self.call_surface_open()
+            || self.app_lock.is_locked()
+            || self.call_is_private()
+        {
+            self.call_roster = None;
+            return None;
+        }
+        let due = hold
+            .settle
+            .deadline(crate::announcer::QUIET, crate::announcer::MAX_HOLD);
+        if now < due {
+            return Some(due);
+        }
+        let hold = self.call_roster.take()?;
+        let names = |people: &[(String, String)]| -> Vec<String> {
+            people.iter().map(|(_, name)| name.clone()).collect()
+        };
+        let texts = [
+            crate::a11y::call_roster_change(self.locale, &names(&hold.joined), true),
+            crate::a11y::call_roster_change(self.locale, &names(&hold.left), false),
+        ];
+        for text in texts.into_iter().flatten() {
+            self.announcer
+                .say(crate::announcer::Category::ChatStatus, text);
+        }
+        None
     }
 
     /// Places a call from the chat header or the Calls page: the screen shows
@@ -385,7 +612,8 @@ impl App {
 
     /// Joins a call link from a message: drawn as connecting in this same
     /// frame, as a placed call is, while the worker asks to be let in.
-    pub(super) fn join_call_link(&mut self, token: String, video: bool) {
+    /// `muted` joins with the microphone muted from the start, and says so.
+    pub(super) fn join_call_link(&mut self, token: String, video: bool, muted: bool) {
         if self.call_live() {
             self.toast_error(crate::i18n::gettext(
                 self.locale,
@@ -398,9 +626,16 @@ impl App {
         self.backend.send(Command::JoinCallLink {
             token,
             video,
+            muted,
             generation,
             cancel: Arc::clone(&cancel),
         });
+        if muted {
+            self.announcer.say(
+                crate::announcer::Category::Status,
+                crate::i18n::gettext(self.locale, "Joining with the microphone muted"),
+            );
+        }
         let mut placing = CallUpdate::placing(generation, String::new(), video);
         placing.group = Some(crate::calls::GroupCall {
             link: true,
@@ -534,9 +769,9 @@ impl App {
         );
     }
 
-    /// Per-frame upkeep: the farewell's end, a placing call that never heard
-    /// back, full screen following the surface, the running timer, and the
-    /// call's tone.
+    /// Per-frame upkeep: the farewell's end, the strip's focus once the
+    /// call is over, a placing call that never heard back, full screen
+    /// following the surface, the running timer, and the call's tone.
     pub(super) fn tick_call(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
         if self.call_surface_until.is_some_and(|until| now >= until) {
@@ -544,6 +779,11 @@ impl App {
             self.call = None;
             self.call_account = None;
             self.drop_call_frames();
+        }
+        // A call that went before its strip took focus leaves none for the
+        // strip of a later call to take.
+        if !self.call_live() {
+            self.call_strip_focus = false;
         }
         if let Some(placed) = self.call_placed
             && now.duration_since(placed) >= PLACING_TIMEOUT
@@ -597,12 +837,27 @@ impl App {
             }
             Action::AnswerCall => self.send_call_command(Command::AnswerCall),
             Action::DeclineCall => {
+                let up = self.call_live();
                 self.send_call_command(Command::DeclineCall);
                 self.dismiss_call();
+                // Its screen goes at once, with nothing on it to say so.
+                if up {
+                    self.announcer.say(
+                        crate::announcer::Category::ChatStatus,
+                        crate::i18n::gettext(self.locale, "Call declined"),
+                    );
+                }
             }
             Action::HangupCall => {
+                let up = self.call_live();
                 self.send_call_command(Command::HangupCall);
                 self.dismiss_call();
+                if up {
+                    self.announcer.say(
+                        crate::announcer::Category::ChatStatus,
+                        crate::i18n::gettext(self.locale, "Call ended"),
+                    );
+                }
             }
             Action::SetCallMuted(muted) => self.send_call_command(Command::SetCallMuted(muted)),
             Action::SetCallMicrophone(device) => {
@@ -611,7 +866,15 @@ impl App {
             Action::SetCallSpeaker(device) => {
                 self.send_call_command(Command::SetCallSpeaker(device));
             }
-            Action::LeaveCallSurface => self.call_surface_hidden = true,
+            Action::LeaveCallSurface => {
+                self.call_surface_hidden = true;
+                // Focus goes back to where it was, which says nothing of the
+                // call still running.
+                self.announcer.say(
+                    crate::announcer::Category::Status,
+                    crate::i18n::gettext(self.locale, "Call screen hidden"),
+                );
+            }
             // Returning to a locked chat's call cannot lift the lock on its
             // own: it asks for the code instead.
             Action::ReturnToCall if self.call.is_some() => {
@@ -770,6 +1033,30 @@ mod tests {
         assert!(app.call_account.is_none());
     }
 
+    /// The strip's focus, asked for as a call is put aside from the keys,
+    /// goes with the call when it ends before the strip is drawn, by either
+    /// side: a later call's strip must not take focus from where it is.
+    #[test]
+    fn the_strip_focus_of_a_call_that_ended_is_not_kept() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _) = app(directory.path());
+        let ctx = egui::Context::default();
+        app.handle_call_update(update(1, CallPhase::Active));
+        app.call_strip_focus = true;
+        app.apply(Action::HangupCall, &ctx);
+        app.tick_call(&ctx);
+        assert!(!app.call_strip_focus, "hung up here");
+        app.handle_call_update(update(2, CallPhase::Active));
+        app.call_strip_focus = true;
+        app.handle_call_update(ended(2, CallOutcome::Answered));
+        app.tick_call(&ctx);
+        assert!(!app.call_strip_focus, "ended by the other side");
+        app.handle_call_update(update(3, CallPhase::Active));
+        app.call_strip_focus = true;
+        app.tick_call(&ctx);
+        assert!(app.call_strip_focus, "kept while the call is up");
+    }
+
     #[test]
     fn a_finished_call_nobody_saw_is_not_drawn() {
         let directory = tempfile::tempdir().unwrap();
@@ -897,6 +1184,44 @@ mod tests {
             app.call_member_frames.is_empty(),
             "a stopped camera leaves no frozen picture"
         );
+    }
+
+    /// N23: a call link opened from the keys or with a screen reader joins
+    /// with the microphone muted, and says so; a click joins as before.
+    #[test]
+    fn a_call_link_from_the_keys_joins_muted() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, mut commands) = app(directory.path());
+        let ctx = egui::Context::default();
+        ctx.data_mut(|data| data.insert_temp(crate::theme::keyboard_focus_id(), true));
+        app.apply(
+            Action::OpenUrl("https://call.whatsapp.com/voice/AbCdEf1234567890".to_owned()),
+            &ctx,
+        );
+        let sent = sent(&mut commands);
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [Command::JoinCallLink {
+                    video: false,
+                    muted: true,
+                    ..
+                }]
+            ),
+            "{sent:?}"
+        );
+        assert!(heard(&mut app).contains(&"Joining with the microphone muted".to_owned()));
+
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, mut commands) = self::app(directory.path());
+        app.apply(
+            Action::OpenUrl("https://call.whatsapp.com/voice/AbCdEf1234567890".to_owned()),
+            &egui::Context::default(),
+        );
+        assert!(matches!(
+            self::sent(&mut commands).as_slice(),
+            [Command::JoinCallLink { muted: false, .. }]
+        ));
     }
 
     /// A call link from a message is joined here rather than opened in the browser, and is
@@ -1259,6 +1584,316 @@ mod tests {
         app.handle_call_update(missed);
         assert_eq!(app.call_tone(), None);
         assert!(app.call_surface_until.is_some(), "missed, briefly");
+    }
+
+    /// What waits to be spoken, which the next frame would speak; taken.
+    fn heard(app: &mut App) -> Vec<String> {
+        let words = app
+            .announcer
+            .waiting()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        app.announcer.show(&egui::Context::default(), true);
+        words
+    }
+
+    /// N4: each new line under the call's name is said once, from the press
+    /// of the button to how the call ended.
+    #[test]
+    fn each_call_phase_is_said_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, mut commands) = app(directory.path());
+        let (generation, _) = press_call(&mut app, &mut commands, false);
+        assert_eq!(heard(&mut app), ["Connecting…"]);
+        for (phase, said) in [
+            (CallPhase::Dialing, &["Calling…"][..]),
+            (CallPhase::Ringing, &["Ringing…"]),
+            (CallPhase::Ringing, &[]),
+            (CallPhase::Connecting, &["Connecting…"]),
+            (CallPhase::Active, &["Connected"]),
+            (CallPhase::Active, &[]),
+        ] {
+            app.handle_call_update(outgoing(generation, phase));
+            assert_eq!(heard(&mut app), said, "{phase:?}");
+        }
+        let mut declined = outgoing(generation, CallPhase::Failed);
+        declined.outcome = Some(CallOutcome::Declined);
+        app.handle_call_update(declined.clone());
+        assert_eq!(heard(&mut app), ["Declined"]);
+        app.handle_call_update(declined);
+        assert!(heard(&mut app).is_empty(), "said once");
+    }
+
+    /// N1: a call that rings is said with who calls, in a muted chat too,
+    /// whose desktop notification stays quiet; a locked chat's names nobody.
+    #[test]
+    fn a_ringing_call_is_said_in_a_muted_chat_and_a_locked_one_names_nobody() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _) = app(directory.path());
+        app.chats[0].muted_until = Some(crate::util::now() + 3600);
+        app.handle_call_update(update(1, CallPhase::Incoming));
+        assert!(app.notifications.shown.is_empty(), "no notification");
+        assert_eq!(heard(&mut app), ["Incoming call from Ada"]);
+        app.handle_call_update(update(1, CallPhase::Incoming));
+        assert!(heard(&mut app).is_empty(), "the same ring is said once");
+
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _) = self::app(directory.path());
+        app.chats[0].locked = true;
+        app.settings.set_chat_lock_code(Some("test-code"));
+        app.handle_call_update(update(1, CallPhase::Incoming));
+        assert_eq!(heard(&mut app), ["Incoming call"]);
+    }
+
+    /// Our own hang-up or refusal takes the screen down at once: it is said
+    /// instead.
+    #[test]
+    fn hanging_up_and_declining_are_said() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _) = app(directory.path());
+        let ctx = egui::Context::default();
+        app.handle_call_update(update(1, CallPhase::Active));
+        heard(&mut app);
+        app.apply(Action::HangupCall, &ctx);
+        assert_eq!(heard(&mut app), ["Call ended"]);
+        app.handle_call_update(update(2, CallPhase::Incoming));
+        heard(&mut app);
+        app.apply(Action::DeclineCall, &ctx);
+        assert_eq!(heard(&mut app), ["Call declined"]);
+        app.apply(Action::HangupCall, &ctx);
+        assert!(heard(&mut app).is_empty(), "no call, nothing to say");
+    }
+
+    /// The notes under a call, and the peer's camera on a video call, are
+    /// said as they change, once each.
+    #[test]
+    fn the_peers_camera_lost_devices_and_audio_are_said_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _) = app(directory.path());
+        let mut call = update(1, CallPhase::Active);
+        call.video = true;
+        call.remote_video = true;
+        app.handle_call_update(call.clone());
+        assert_eq!(heard(&mut app), ["Connected"]);
+        call.remote_video = false;
+        app.handle_call_update(call.clone());
+        assert_eq!(heard(&mut app), ["Their camera is off"]);
+        call.remote_video = true;
+        call.lost_devices = vec![crate::calls::LostDevice {
+            kind: crate::calls::DeviceKind::Microphone,
+            name: "Headset".into(),
+        }];
+        call.peer_audio = Some(crate::calls::PeerAudio::Stalled);
+        app.handle_call_update(call.clone());
+        assert_eq!(
+            heard(&mut app),
+            [
+                "Their camera is on",
+                "Microphone “Headset” is not available; using the system default",
+                "No audio is arriving from this call",
+            ]
+        );
+        app.handle_call_update(call);
+        assert!(heard(&mut app).is_empty());
+    }
+
+    /// One frame of the window's keys with `key` pressed with `modifiers`.
+    fn press(app: &mut App, key: egui::Key, modifiers: egui::Modifiers, repeat: bool) {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat,
+                    modifiers,
+                }],
+                ..Default::default()
+            },
+            |ui| crate::ui::keys::handle(app, ui.ctx()),
+        );
+        output.textures_delta.clear();
+    }
+
+    /// Ctrl+Shift+M (Command+Shift+M on macOS) mutes and unmutes a call, on
+    /// its screen or with the screen put aside, and says so once the call
+    /// confirms it. Only that chord does: not with Alt (AltGr on Windows),
+    /// not without Shift, and not a held chord's repeat, which would mute
+    /// and unmute in turn. A call that has not connected yet says where it
+    /// is instead.
+    #[test]
+    fn ctrl_shift_m_mutes_the_call_and_says_so_once_it_is_muted() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _) = app(directory.path());
+        let chord = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
+        app.handle_call_update(update(1, CallPhase::Active));
+        heard(&mut app);
+        for (modifiers, repeat) in [
+            (chord | egui::Modifiers::ALT, false),
+            (egui::Modifiers::COMMAND, false),
+        ] {
+            press(&mut app, egui::Key::M, modifiers, repeat);
+            assert!(
+                app.actions.is_empty(),
+                "{modifiers:?}, repeat {repeat}: {:?}",
+                app.actions
+            );
+        }
+        // Held down, the chord mutes once: egui marks the presses after the
+        // first, with the key still down, as repeats.
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events: vec![egui::Event::Key {
+                        key: egui::Key::M,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: chord,
+                    }],
+                    ..Default::default()
+                },
+                |ui| crate::ui::keys::handle(&mut app, ui.ctx()),
+            );
+            output.textures_delta.clear();
+        }
+        assert_eq!(app.actions, [Action::SetCallMuted(true)]);
+        app.actions.clear();
+        assert!(heard(&mut app).is_empty(), "not muted yet");
+        let mut muted = update(1, CallPhase::Active);
+        muted.muted = true;
+        app.handle_call_update(muted.clone());
+        assert_eq!(heard(&mut app), ["Microphone muted"]);
+        app.handle_call_update(muted);
+        assert!(heard(&mut app).is_empty(), "said once");
+        // Put aside, the key still works.
+        app.call_surface_hidden = true;
+        press(&mut app, egui::Key::M, chord, false);
+        assert_eq!(app.actions, [Action::SetCallMuted(false)]);
+        app.actions.clear();
+        app.handle_call_update(update(1, CallPhase::Active));
+        assert_eq!(heard(&mut app), ["Microphone unmuted"]);
+
+        // A call that rings has no microphone to mute yet.
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _) = self::app(directory.path());
+        app.handle_call_update(update(2, CallPhase::Incoming));
+        heard(&mut app);
+        press(&mut app, egui::Key::M, chord, false);
+        assert!(app.actions.is_empty());
+        assert_eq!(heard(&mut app), ["Incoming call: Accept or Decline"]);
+    }
+
+    /// A group call's update with `joined` on it, all joined.
+    fn group(generation: u64, joined: &[&str]) -> CallUpdate {
+        let mut update = update(generation, CallPhase::Active);
+        update.group = Some(crate::calls::GroupCall {
+            link: false,
+            caller: None,
+            participants: joined
+                .iter()
+                .map(|id| crate::calls::Participant {
+                    id: (*id).to_owned(),
+                    joined: true,
+                    video: false,
+                })
+                .collect(),
+        });
+        update
+    }
+
+    /// N21: who joins or leaves a group call is said while its screen is
+    /// open, a burst as one count once the roster settles; nothing while the
+    /// screen is put aside, nor for a locked chat's call.
+    #[test]
+    fn members_joining_or_leaving_are_said_once_the_roster_settles() {
+        const MIRA: &str = "491702222222@s.whatsapp.net";
+        const TOM: &str = "491703333333@s.whatsapp.net";
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _) = app(directory.path());
+        app.handle_call_update(group(1, &[MIRA]));
+        heard(&mut app);
+        app.handle_call_update(group(1, &[MIRA, ADA]));
+        assert!(
+            app.flush_call_roster(Instant::now()).is_some(),
+            "held until the roster settles"
+        );
+        assert!(heard(&mut app).is_empty());
+        let later = Instant::now() + crate::announcer::MAX_HOLD;
+        app.flush_call_roster(later);
+        assert_eq!(heard(&mut app), ["Ada joined the call"]);
+        // Two more join and one leaves in one burst.
+        app.handle_call_update(group(1, &[ADA, TOM, "15550002222@s.whatsapp.net"]));
+        app.handle_call_update(group(1, &[ADA, TOM, "15550002222@s.whatsapp.net"]));
+        app.flush_call_roster(Instant::now() + crate::announcer::MAX_HOLD);
+        let said = heard(&mut app);
+        assert_eq!(said.len(), 2, "{said:?}");
+        assert_eq!(said[0], "2 people joined the call");
+        assert!(said[1].ends_with(" left the call"), "{said:?}");
+        // Someone who comes and goes in one burst is not said.
+        app.handle_call_update(group(1, &[ADA, TOM, "15550002222@s.whatsapp.net", MIRA]));
+        app.handle_call_update(group(1, &[ADA, TOM, "15550002222@s.whatsapp.net"]));
+        app.flush_call_roster(Instant::now() + crate::announcer::MAX_HOLD);
+        assert!(heard(&mut app).is_empty());
+        // With the screen put aside, nothing is said.
+        app.call_surface_hidden = true;
+        app.handle_call_update(group(1, &[ADA]));
+        app.flush_call_roster(Instant::now() + crate::announcer::MAX_HOLD);
+        assert!(heard(&mut app).is_empty());
+
+        // A locked chat's call names nobody joining.
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _) = self::app(directory.path());
+        app.chats[0].locked = true;
+        app.settings.set_chat_lock_code(Some("test-code"));
+        app.handle_call_update(group(1, &[MIRA]));
+        app.call_surface_hidden = false;
+        app.handle_call_update(group(1, &[MIRA, TOM]));
+        app.flush_call_roster(Instant::now() + crate::announcer::MAX_HOLD);
+        assert!(
+            heard(&mut app).iter().all(|text| !text.contains("joined")),
+            "nobody named"
+        );
+    }
+
+    /// N21: joining a call link says that it waits to be let in, and then
+    /// that it is in, without the people already on it said to join.
+    #[test]
+    fn a_call_link_says_it_waits_to_be_let_in() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _) = app(directory.path());
+        let ctx = egui::Context::default();
+        app.apply(
+            Action::OpenUrl("https://call.whatsapp.com/voice/AbCdEf1234567890".to_owned()),
+            &ctx,
+        );
+        assert!(
+            heard(&mut app).contains(&"Waiting to be let in".to_owned()),
+            "while the call service decides"
+        );
+        // Let in with two people on the call already: they are not said
+        // to join.
+        let mut joined = app.call.clone().expect("joining");
+        joined.phase = CallPhase::Accepted;
+        if let Some(group) = joined.group.as_mut() {
+            group.participants = ["491702222222@s.whatsapp.net", "491703333333@s.whatsapp.net"]
+                .into_iter()
+                .map(|id| crate::calls::Participant {
+                    id: id.to_owned(),
+                    joined: true,
+                    video: false,
+                })
+                .collect();
+        }
+        app.handle_call_update(joined.clone());
+        assert_eq!(heard(&mut app), ["You are in the call"]);
+        joined.phase = CallPhase::Active;
+        app.handle_call_update(joined);
+        app.flush_call_roster(Instant::now() + crate::announcer::MAX_HOLD);
+        assert!(heard(&mut app).is_empty(), "said once, and nobody joined");
     }
 
     #[test]

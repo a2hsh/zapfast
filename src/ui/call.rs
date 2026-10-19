@@ -16,10 +16,222 @@ use crate::calls::{CallOutcome, CallPhase, CallUpdate, PeerAudio, SilenceReason}
 use crate::i18n::{Locale, gettext};
 use crate::model::Action;
 use crate::theme::{self, Icon, Palette};
+use crate::ui::focus::Stop;
+use crate::ui::toolbar::{self, ToolbarButton};
 use crate::ui::widgets;
 
 /// The area's id, so the surface keeps its place in the layer order.
 const SURFACE: &str = "zapfast-call-surface";
+/// The layer the surface is drawn on: the keys know a control of its own by
+/// it.
+pub(crate) fn layer() -> egui::LayerId {
+    egui::LayerId::new(egui::Order::Foreground, egui::Id::new(SURFACE))
+}
+
+/// The surface's controls in the order Tab walks them, the order a reader
+/// meets them from the top: the corner's, the device pickers drawn above the
+/// controls, the controls, and a ringing call's two answers, Accept first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Control {
+    Hide,
+    FullScreen,
+    Microphone,
+    Speaker,
+    CameraDevice,
+    Mute,
+    Camera,
+    Devices,
+    HangUp,
+    Accept,
+    Decline,
+}
+
+/// The controls the surface drew, so the keys, which run before it draws,
+/// walk those of the pass before.
+#[derive(Clone, Default)]
+struct Ring {
+    /// The frame `drawn` belongs to.
+    frame: u64,
+    drawn: Vec<(Control, egui::Id)>,
+    /// What the last frame drew, while this frame's passes draw `drawn`.
+    previous: Vec<(Control, egui::Id)>,
+    /// The control this frame's Tab moved to: a re-layout pass replays the
+    /// frame's input, and must not move a second time.
+    moved: Option<(u64, egui::Id)>,
+}
+
+fn ring_id() -> egui::Id {
+    egui::Id::new(SURFACE).with("ring")
+}
+
+/// Starts this pass's controls.
+fn begin_ring(ctx: &egui::Context) {
+    let frame = ctx.cumulative_frame_nr();
+    ctx.data_mut(|data| {
+        let ring = data.get_temp_mut_or_default::<Ring>(ring_id());
+        if ring.frame != frame {
+            ring.previous = std::mem::take(&mut ring.drawn);
+            ring.frame = frame;
+        }
+        ring.drawn.clear();
+    });
+}
+
+/// Adds an enabled control to this pass's ring; one that does not apply yet
+/// is skipped by Tab, as everywhere else.
+fn ring(response: &egui::Response, control: Control) {
+    if response.enabled() {
+        response.ctx.data_mut(|data| {
+            let ring = data.get_temp_mut_or_default::<Ring>(ring_id());
+            ring.drawn.retain(|(known, _)| *known != control);
+            ring.drawn.push((control, response.id));
+        });
+    }
+}
+
+/// The controls the last full pass drew, in Tab order.
+fn ring_controls(ctx: &egui::Context) -> Vec<(Control, egui::Id)> {
+    let frame = ctx.cumulative_frame_nr();
+    let mut controls = ctx.data(|data| {
+        data.get_temp::<Ring>(ring_id())
+            .map(|ring| {
+                if ring.frame == frame {
+                    ring.previous
+                } else if ring.frame + 1 == frame {
+                    ring.drawn
+                } else {
+                    // A surface not drawn since: nothing of it is on screen.
+                    Vec::new()
+                }
+            })
+            .unwrap_or_default()
+    });
+    controls.sort_by_key(|(control, _)| *control);
+    controls
+}
+
+/// Takes Tab and Shift+Tab while the surface is up: they walk its controls
+/// in `Control` order, wrapping, and never reach the chat beneath it, nor the
+/// window's caption buttons drawn over its corners. From a control that is
+/// not the surface's, Tab enters on the first, Shift+Tab on the last.
+pub(crate) fn tab(ctx: &egui::Context) {
+    let mut steps = 0i32;
+    ctx.input_mut(|input| {
+        input.events.retain(|event| {
+            if let egui::Event::Key {
+                key: egui::Key::Tab,
+                pressed: true,
+                modifiers,
+                ..
+            } = event
+                && (!modifiers.any() || modifiers.shift_only())
+            {
+                steps += if modifiers.shift { -1 } else { 1 };
+                false
+            } else {
+                true
+            }
+        });
+    });
+    if steps == 0 {
+        return;
+    }
+    let frame = ctx.cumulative_frame_nr();
+    let replayed = ctx.data(|data| {
+        data.get_temp::<Ring>(ring_id())
+            .and_then(|ring| ring.moved)
+            .filter(|(at, _)| *at == frame)
+            .map(|(_, target)| target)
+    });
+    let target = replayed.or_else(|| {
+        let controls = ring_controls(ctx);
+        if controls.is_empty() {
+            return None;
+        }
+        let len = controls.len() as i32;
+        let focused = ctx.memory(|memory| memory.focused());
+        let index = match controls.iter().position(|(_, id)| Some(*id) == focused) {
+            Some(index) => index as i32 + steps,
+            None if steps > 0 => steps - 1,
+            None => len + steps,
+        };
+        Some(controls[index.rem_euclid(len) as usize].1)
+    });
+    ctx.memory_mut(|memory| {
+        // egui chose a move of its own for the key as the pass began.
+        memory.move_focus(egui::FocusDirection::None);
+        if let Some(target) = target {
+            memory.request_focus(target);
+        }
+    });
+    if let Some(target) = target {
+        ctx.data_mut(|data| {
+            data.get_temp_mut_or_default::<Ring>(ring_id()).moved = Some((frame, target));
+        });
+    }
+}
+
+/// The control focus enters the surface on: Accept while the call rings,
+/// else Mute, or Hang up while Mute does not apply yet. Read after the
+/// surface drew this pass; `None` when it offers none, as its farewell.
+pub(crate) fn entry(ctx: &egui::Context) -> Option<egui::Id> {
+    let frame = ctx.cumulative_frame_nr();
+    let drawn = ctx.data(|data| {
+        data.get_temp::<Ring>(ring_id())
+            .filter(|ring| ring.frame == frame)
+            .map(|ring| ring.drawn)
+            .unwrap_or_default()
+    });
+    [Control::Accept, Control::Mute, Control::HangUp]
+        .into_iter()
+        .find_map(|wanted| {
+            drawn
+                .iter()
+                .find(|(control, _)| *control == wanted)
+                .map(|(_, id)| *id)
+        })
+}
+
+/// How long, in seconds, Enter and Space on Accept or Decline wait after the
+/// call screen takes focus: a key meant for the field the ringing screen
+/// covered, typed as it came up, must not answer or refuse the call.
+pub(crate) const ANSWER_GUARD: f64 = 1.0;
+
+fn entered_id() -> egui::Id {
+    egui::Id::new(SURFACE).with("entered")
+}
+
+/// Notes that focus just went into the call screen (`ui::overlay::finish`).
+pub(crate) fn note_entered(ctx: &egui::Context) {
+    let now = ctx.input(|input| input.time);
+    ctx.data_mut(|data| data.insert_temp(entered_id(), now));
+}
+
+/// Whether Enter and Space on the focused control still wait: it is Accept
+/// or Decline, and the call screen took focus less than [`ANSWER_GUARD`]
+/// ago.
+pub(crate) fn answer_waits(ctx: &egui::Context) -> bool {
+    let Some(focused) = ctx.memory(|memory| memory.focused()) else {
+        return false;
+    };
+    let on_answer = ring_controls(ctx).iter().any(|(control, id)| {
+        *id == focused && matches!(control, Control::Accept | Control::Decline)
+    });
+    let now = ctx.input(|input| input.time);
+    on_answer
+        && ctx
+            .data(|data| data.get_temp::<f64>(entered_id()))
+            .is_some_and(|entered| now - entered < ANSWER_GUARD)
+}
+
+/// The id of the control `control` the last pass drew, for tests.
+#[cfg(test)]
+pub(crate) fn control_id(ctx: &egui::Context, control: Control) -> Option<egui::Id> {
+    ring_controls(ctx)
+        .into_iter()
+        .find_map(|(known, id)| (known == control).then_some(id))
+}
+
 /// Padding between the window edge and everything the surface draws.
 const PADDING: f32 = 24.0;
 /// The round controls along the bottom.
@@ -47,14 +259,38 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     let people = app.call_people();
     let me = app.call_self();
     let caller = app.call_caller_name();
+    let heading = heading(app, &call);
+    let description = if call.phase == CallPhase::Incoming {
+        incoming_text(app.locale, &call, caller.as_deref())
+    } else {
+        status(app.locale, &call)
+    };
     // The whole window, minus the strip macOS keeps for the traffic lights.
     let screen = ctx.content_rect();
     let screen = screen.with_min_y(screen.top() + theme::titlebar_inset(ctx));
+    begin_ring(ctx);
+    // It covers the window, so it keeps egui's focus as the cropper does:
+    // the arrows never move it to the chat drawn beneath. The pointer
+    // already met only the surface.
+    ctx.memory_mut(|memory| memory.set_modal_layer(layer()));
     egui::Area::new(egui::Id::new(SURFACE))
         .order(egui::Order::Foreground)
         .fixed_pos(screen.min)
         .show(ctx, |ui| {
             ui.set_min_size(screen.size());
+            // One node for the whole screen, named as the window's title
+            // names the call, with how it is going as its description: a
+            // screen reader says both as focus enters it.
+            ui.ctx().accesskit_node_builder(ui.unique_id(), |node| {
+                node.set_role(if call.phase == CallPhase::Incoming {
+                    egui::accesskit::Role::AlertDialog
+                } else {
+                    egui::accesskit::Role::Dialog
+                });
+                node.set_modal();
+                node.set_label(heading.clone());
+                node.set_description(description.clone());
+            });
             // A peer's picture is letterboxed in black, as any video is.
             let backdrop = if call.video && call.remote_video && app.call_remote_frame.is_some() {
                 Color32::BLACK
@@ -97,8 +333,29 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         });
 }
 
+/// The call's name, as the window's title gives it while the surface is up.
+fn heading(app: &mut App, call: &CallUpdate) -> String {
+    use crate::a11y::TitlePlace;
+    let name = (!app.call_is_private()).then(|| app.call_name());
+    let place = if call.phase == CallPhase::Incoming {
+        TitlePlace::IncomingCall(name.as_deref())
+    } else if call.group.as_ref().is_some_and(|group| group.link) {
+        TitlePlace::CallLink
+    } else {
+        TitlePlace::Call(name.as_deref())
+    };
+    crate::a11y::call_heading(app.locale, place)
+}
+
+/// The strip's toolbar, Return to the call and Hang up.
+pub(crate) fn strip_id() -> egui::Id {
+    egui::Id::new("call-strip-toolbar")
+}
+
 /// The strip a call keeps at the bottom of the window while the reader is
-/// elsewhere: who is on it, how long it has been up, and the way back.
+/// elsewhere: who is on it, how long it has been up, and the way back. Its
+/// two buttons are one toolbar, the window's first Tab stop and an F6
+/// section of its own.
 pub fn strip(app: &mut App, ui: &mut egui::Ui) {
     let Some(call) = app.call.clone() else {
         return;
@@ -109,6 +366,7 @@ pub fn strip(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     let peer = app.call_name();
     let status = status(app.locale, &call);
+    let label = heading(app, &call);
     egui::Panel::bottom("call-strip")
         .show_separator_line(false)
         .frame(
@@ -125,36 +383,48 @@ pub fn strip(app: &mut App, ui: &mut egui::Ui) {
                 if !call.phase.is_live() {
                     return;
                 }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let locale = app.locale;
-                    let hang_up = gettext(locale, "Hang up").into_owned();
-                    if theme::icon_button(
-                        ui,
-                        Icon::PhoneOff,
-                        16.0,
-                        palette.on_accent,
-                        palette.on_accent,
-                        &hang_up,
-                    )
-                    .clicked()
-                    {
-                        app.actions.push(Action::HangupCall);
-                    }
-                    let back = gettext(locale, "Return to the call").into_owned();
-                    let response = ui.add(
-                        egui::Button::new(
-                            egui::RichText::new(&back)
-                                .font(theme::semibold(13.0))
-                                .color(palette.on_accent),
+                let bar = strip_id();
+                toolbar::toolbar(ui, bar, &label, Stop::CallStrip, |ui| {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let locale = app.locale;
+                        let hang_up = gettext(locale, "Hang up").into_owned();
+                        if theme::icon_button(
+                            ui,
+                            Icon::PhoneOff,
+                            16.0,
+                            palette.on_accent,
+                            palette.on_accent,
+                            &hang_up,
                         )
-                        .frame(false),
-                    );
-                    if response
-                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .in_toolbar(bar)
                         .clicked()
-                    {
-                        app.actions.push(Action::ReturnToCall);
-                    }
+                        {
+                            app.actions.push(Action::HangupCall);
+                        }
+                        let back = gettext(locale, "Return to the call").into_owned();
+                        let response = ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new(&back)
+                                        .font(theme::semibold(13.0))
+                                        .color(palette.on_accent),
+                                )
+                                .frame(false),
+                            )
+                            .in_toolbar(bar);
+                        // The screen was put aside from the keys with nowhere
+                        // to give focus back to: it lands here, on the way
+                        // back.
+                        if std::mem::take(&mut app.call_strip_focus) {
+                            response.request_focus();
+                        }
+                        if response
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            app.actions.push(Action::ReturnToCall);
+                        }
+                    });
                 });
             });
         });
@@ -260,9 +530,18 @@ fn live(
         );
         ui.painter().galley(
             egui::pos2(plate.center().x - line.size().x / 2.0, top + name.size().y),
-            line,
+            line.clone(),
             Color32::WHITE,
         );
+        // Painted over the picture, the name and the line are no widgets: the
+        // plate carries them for a screen reader, without a pixel more.
+        let words = format!("{}, {}", name.text(), line.text());
+        ui.interact(
+            plate,
+            egui::Id::new(SURFACE).with("plate"),
+            egui::Sense::hover(),
+        )
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &words));
         let below = Rect::from_min_max(
             egui::pos2(area.left(), plate.bottom() + 6.0),
             egui::pos2(area.right(), plate.bottom() + 60.0),
@@ -310,9 +589,10 @@ fn corner_buttons(
         ui.horizontal(|ui| {
             if call.phase.is_live() {
                 let back = gettext(locale, "Hide the call screen").into_owned();
-                if theme::icon_button(ui, Icon::ArrowLeft, 20.0, corner_tint, corner_hover, &back)
-                    .clicked()
-                {
+                let response =
+                    theme::icon_button(ui, Icon::ArrowLeft, 20.0, corner_tint, corner_hover, &back);
+                ring(&response, Control::Hide);
+                if response.clicked() {
                     app.actions.push(Action::LeaveCallSurface);
                 }
             }
@@ -322,7 +602,9 @@ fn corner_buttons(
                 } else {
                     (Icon::Maximize, gettext(locale, "Full screen"))
                 };
-                if theme::icon_button(ui, icon, 18.0, corner_tint, corner_hover, &tip).clicked() {
+                let response = theme::icon_button(ui, icon, 18.0, corner_tint, corner_hover, &tip);
+                ring(&response, Control::FullScreen);
+                if response.clicked() {
                     app.actions.push(Action::ToggleCallFullscreen);
                 }
             });
@@ -430,20 +712,9 @@ fn status_color(call: &CallUpdate, palette: &Palette) -> Color32 {
 fn notes(ui: &mut egui::Ui, locale: Locale, call: &CallUpdate, palette: &Palette) {
     for lost in &call.lost_devices {
         ui.add_space(4.0);
-        let template = match lost.kind {
-            crate::calls::DeviceKind::Microphone => gettext(
-                locale,
-                "Microphone “{name}” is not available; using the system default",
-            ),
-            crate::calls::DeviceKind::Speaker => gettext(
-                locale,
-                "Speaker “{name}” is not available; using the system default",
-            ),
-            crate::calls::DeviceKind::Camera => gettext(locale, "Camera “{name}” is not available"),
-        };
         theme::text(
             ui,
-            template.replace("{name}", &lost.name),
+            lost_device_text(locale, lost),
             theme::medium(12.5),
             palette.warning,
         );
@@ -459,8 +730,44 @@ fn notes(ui: &mut egui::Ui, locale: Locale, call: &CallUpdate, palette: &Palette
     }
 }
 
+/// A device that went away during the call, in the reader's language.
+pub(crate) fn lost_device_text(locale: Locale, lost: &crate::calls::LostDevice) -> String {
+    let template = match lost.kind {
+        crate::calls::DeviceKind::Microphone => gettext(
+            locale,
+            "Microphone “{name}” is not available; using the system default",
+        ),
+        crate::calls::DeviceKind::Speaker => gettext(
+            locale,
+            "Speaker “{name}” is not available; using the system default",
+        ),
+        crate::calls::DeviceKind::Camera => gettext(locale, "Camera “{name}” is not available"),
+    };
+    template.replace("{name}", &lost.name)
+}
+
+/// What a screen reader is told of the line under the call's name as it
+/// changes: the line itself, but "Connected" once the call is up, rather
+/// than its length, which counts on. Nothing while the call rings, which is
+/// announced as it starts.
+pub(crate) fn spoken_status(locale: Locale, call: &CallUpdate) -> Option<String> {
+    // A call link's "Connecting…" waits for the call to let us in.
+    let link = call.group.as_ref().is_some_and(|group| group.link);
+    match call.phase {
+        CallPhase::Incoming => None,
+        CallPhase::Placing | CallPhase::Connecting if link => {
+            Some(gettext(locale, "Waiting to be let in").into_owned())
+        }
+        CallPhase::Accepted | CallPhase::Active if link => {
+            Some(gettext(locale, "You are in the call").into_owned())
+        }
+        CallPhase::Active => Some(gettext(locale, "Connected").into_owned()),
+        _ => Some(status(locale, call)),
+    }
+}
+
 /// What the engine says about the peer's audio, in the reader's language.
-fn peer_audio_text(locale: Locale, audio: PeerAudio) -> String {
+pub(crate) fn peer_audio_text(locale: Locale, audio: PeerAudio) -> String {
     match audio {
         PeerAudio::Stalled => gettext(locale, "No audio is arriving from this call").into_owned(),
         PeerAudio::Silent(SilenceReason::NoDecoder) => {
@@ -532,7 +839,12 @@ fn controls(ui: &mut egui::Ui, app: &mut App, call: &CallUpdate, palette: &Palet
                 palette.text,
             )
         };
-        if control(ui, icon, fill, tint, &tip, call.phase.is_connected()).clicked() {
+        let response = control(ui, icon, fill, tint, &tip, call.phase.is_connected());
+        // The tooltip names what a press does; a screen reader hears one
+        // toggle button, Mute, pressed while muted.
+        toggle(&response, gettext(locale, "Mute").into_owned(), call.muted);
+        ring(&response, Control::Mute);
+        if response.clicked() {
             app.actions.push(Action::SetCallMuted(!call.muted));
         }
 
@@ -560,8 +872,21 @@ fn controls(ui: &mut egui::Ui, app: &mut App, call: &CallUpdate, palette: &Palet
                 palette.window,
             )
         };
-        if camera && control(ui, icon, fill, tint, &tip, call.phase.is_connected()).clicked() {
-            app.actions.push(Action::SetCallCamera(!call.camera_on));
+        if camera {
+            let response = control(ui, icon, fill, tint, &tip, call.phase.is_connected());
+            // On a video call the camera is one toggle button, pressed while
+            // it sends; on a voice call it starts video, and stays a button.
+            if call.video {
+                toggle(
+                    &response,
+                    gettext(locale, "Camera").into_owned(),
+                    call.camera_on,
+                );
+            }
+            ring(&response, Control::Camera);
+            if response.clicked() {
+                app.actions.push(Action::SetCallCamera(!call.camera_on));
+            }
         }
 
         let open = app.call_devices_open;
@@ -571,24 +896,40 @@ fn controls(ui: &mut egui::Ui, app: &mut App, call: &CallUpdate, palette: &Palet
         } else {
             (palette.surface_active, palette.text)
         };
-        if control(ui, Icon::Volume2, fill, tint, &tip, live).clicked() {
+        let response = control(ui, Icon::Volume2, fill, tint, &tip, live);
+        // It shows and hides the pickers above the controls.
+        ui.ctx()
+            .accesskit_node_builder(response.id, |node| node.set_expanded(open));
+        ring(&response, Control::Devices);
+        if response.clicked() {
             app.call_devices_open = !open;
         }
 
         let tip = gettext(locale, "Hang up");
-        if control(
+        let response = control(
             ui,
             Icon::PhoneOff,
             palette.danger,
             Color32::WHITE,
             &tip,
             live,
-        )
-        .clicked()
-        {
+        );
+        ring(&response, Control::HangUp);
+        if response.clicked() {
             app.actions.push(Action::HangupCall);
         }
     }
+}
+
+/// Names a control one toggle button, `label`, pressed or not as `pressed`
+/// says, in place of the name that says what a press does.
+fn toggle(response: &egui::Response, label: String, pressed: bool) {
+    let enabled = response.enabled();
+    response.widget_info(|| {
+        let mut info = egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, &label);
+        info.selected = Some(pressed);
+        info
+    });
 }
 
 /// The microphone and speaker pickers. Each one rebinds a live stream, so
@@ -620,6 +961,7 @@ fn devices(ui: &mut egui::Ui, app: &mut App, call: &CallUpdate, palette: &Palett
         let width = pickers * PICKER + (pickers - 1.0) * 16.0;
         ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
         Picker {
+            control: Control::Microphone,
             salt: "call-microphone",
             icon: Icon::Mic,
             title: &gettext(locale, "Microphone"),
@@ -631,6 +973,7 @@ fn devices(ui: &mut egui::Ui, app: &mut App, call: &CallUpdate, palette: &Palett
         .show(ui, &mut actions, Action::SetCallMicrophone);
         ui.add_space(16.0);
         Picker {
+            control: Control::Speaker,
             salt: "call-speaker",
             icon: Icon::Volume2,
             title: &gettext(locale, "Speaker"),
@@ -643,6 +986,7 @@ fn devices(ui: &mut egui::Ui, app: &mut App, call: &CallUpdate, palette: &Palett
         if call.video {
             ui.add_space(16.0);
             Picker {
+                control: Control::CameraDevice,
                 salt: "call-camera",
                 icon: Icon::Video,
                 title: &gettext(locale, "Camera"),
@@ -663,6 +1007,8 @@ const PICKER_HEIGHT: f32 = 60.0;
 
 /// One device picker: its title with an icon, and what the machine has.
 struct Picker<'a> {
+    /// Its place in Tab order.
+    control: Control,
     salt: &'a str,
     icon: Icon,
     title: &'a str,
@@ -718,6 +1064,7 @@ impl Picker<'_> {
                         }
                     }
                 });
+            ring(&shown.response, self.control);
             shown.response.widget_info(|| {
                 let mut info = egui::WidgetInfo::labeled(
                     egui::WidgetType::ComboBox,
@@ -787,7 +1134,7 @@ fn ringing(
         let joined: Vec<&CallPerson> = who.people.iter().filter(|person| person.joined).collect();
         if !joined.is_empty() {
             ui.add_space(16.0);
-            faces(ui, palette, &joined);
+            faces(ui, locale, palette, &joined);
         }
     });
     bottom_row(ui, area, CONTROL + 26.0, |ui| {
@@ -796,29 +1143,29 @@ fn ringing(
         let width = 2.0 * CONTROL + gap;
         ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
         let decline = gettext(locale, "Decline");
-        if answer(
+        let response = answer(
             ui,
             Icon::PhoneOff,
             palette.danger,
             Color32::WHITE,
             &decline,
             palette,
-        )
-        .clicked()
-        {
+        );
+        ring(&response, Control::Decline);
+        if response.clicked() {
             app.actions.push(Action::DeclineCall);
         }
         let accept = gettext(locale, "Accept");
-        if answer(
+        let response = answer(
             ui,
             Icon::Phone,
             palette.accent,
             palette.on_accent,
             &accept,
             palette,
-        )
-        .clicked()
-        {
+        );
+        ring(&response, Control::Accept);
+        if response.clicked() {
             app.actions.push(Action::AnswerCall);
         }
     });
@@ -831,13 +1178,17 @@ const FACE: f32 = 36.0;
 
 /// A row of the pictures of the people on a group call, overlapping as
 /// WhatsApp draws them, and "+N" for those past the first few.
-fn faces(ui: &mut egui::Ui, palette: &Palette, people: &[&CallPerson]) {
+fn faces(ui: &mut egui::Ui, locale: Locale, palette: &Palette, people: &[&CallPerson]) {
     let shown = people.len().min(FACES);
     let extra = people.len() - shown;
     let step = FACE * 0.72;
     let count = shown + usize::from(extra > 0);
     let width = FACE + step * (count.saturating_sub(1)) as f32;
-    let (rect, _) = ui.allocate_exact_size(vec2(width, FACE), egui::Sense::hover());
+    let (rect, response) = ui.allocate_exact_size(vec2(width, FACE), egui::Sense::hover());
+    // The pictures are painted: the row reads who they are, as it shows them.
+    let names: Vec<String> = people.iter().map(|person| person.name.clone()).collect();
+    let label = crate::a11y::call_faces_label(locale, &names, FACES);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
     for (index, person) in people.iter().take(shown).enumerate() {
         let at = Rect::from_min_size(
             egui::pos2(rect.left() + step * index as f32, rect.top()),
@@ -1020,57 +1371,122 @@ fn group_live(
     );
     let rects = tile_grid(tiles.len(), grid, TILE_GAP);
     let you = gettext(locale, "You").into_owned();
-    for (tile, rect) in tiles.into_iter().zip(rects) {
-        match tile {
-            // A member whose camera is on fills their tile with it; anyone
-            // else keeps their photo, so nobody leaves the grid by turning it
-            // off.
-            Tile::Person(person) => match person
-                .video
-                .then(|| app.call_member_frames.get(&person.id).cloned())
-                .flatten()
-            {
-                Some(image) => {
-                    let mut kept = app.call_member_textures.remove(&person.id);
-                    let texture = call_texture(ui, &mut kept, "zapfast-call-member", &image);
-                    if let Some(kept) = kept {
-                        app.call_member_textures.insert(person.id.clone(), kept);
+    let count = tiles.len();
+    let ppp = ui.ctx().pixels_per_point();
+    // The tiles are one list, each a list item read as its name and state,
+    // for the painted pictures and names a screen reader cannot read. Its
+    // scopes change no pixel.
+    ui.scope_builder(
+        egui::UiBuilder::new().id(egui::Id::new(SURFACE).with("people")),
+        |ui| {
+            let list = gettext(locale, "People on the call").into_owned();
+            ui.ctx().accesskit_node_builder(ui.unique_id(), |node| {
+                node.set_role(egui::accesskit::Role::List);
+                node.set_label(list);
+                node.set_size_of_set(count);
+            });
+            for (index, (tile, rect)) in tiles.into_iter().zip(rects).enumerate() {
+                let label = match &tile {
+                    Tile::Person(person) => crate::a11y::call_tile_label(
+                        locale,
+                        &person.name,
+                        !person.joined,
+                        person.video && app.call_member_frames.contains_key(&person.id),
+                        false,
+                    ),
+                    Tile::Me(_) => {
+                        crate::a11y::call_tile_label(locale, &you, false, true, call.muted)
                     }
-                    video_tile(ui, &person.name, texture, image_size(&image), rect);
-                }
-                None => person_tile(ui, locale, palette, person, rect),
-            },
-            // Our own camera takes a tile of its own beside the others rather
-            // than floating over one of them.
-            Tile::Me(image) => {
-                let texture = call_texture(
-                    ui,
-                    &mut app.call_local_texture,
-                    "zapfast-call-local",
-                    &image,
-                );
-                video_tile(ui, &you, texture, image_size(&image), rect);
-                if call.muted {
-                    muted_badge(ui, palette, rect);
-                }
-            }
-            Tile::MyPhoto(me) => {
-                person_tile(ui, locale, palette, me, rect);
-                if call.muted {
-                    muted_badge(ui, palette, rect);
-                }
-            }
-            Tile::More(rest) => {
-                ui.painter()
-                    .rect_filled(rect, CornerRadius::same(14), tile_fill(palette));
-                ui.painter().text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    format!("+{rest}"),
-                    theme::bold(24.0),
-                    palette.secondary,
+                    Tile::MyPhoto(_) => {
+                        crate::a11y::call_tile_label(locale, &you, false, false, call.muted)
+                    }
+                    Tile::More(rest) => crate::a11y::call_more(locale, *rest),
+                };
+                ui.scope_builder(
+                    egui::UiBuilder::new().id(egui::Id::new(SURFACE).with(("tile", index))),
+                    |ui| {
+                        ui.ctx().accesskit_node_builder(ui.unique_id(), |node| {
+                            node.set_role(egui::accesskit::Role::ListItem);
+                            node.set_label(label);
+                            // AccessKit counts from 0; the platforms say
+                            // "1 of 6" for the first.
+                            node.set_position_in_set(index);
+                            node.set_size_of_set(count);
+                            node.set_bounds(egui::accesskit::Rect {
+                                x0: f64::from(rect.min.x * ppp),
+                                y0: f64::from(rect.min.y * ppp),
+                                x1: f64::from(rect.max.x * ppp),
+                                y1: f64::from(rect.max.y * ppp),
+                            });
+                        });
+                        draw_tile(ui, app, call, palette, &you, tile, rect);
+                    },
                 );
             }
+        },
+    );
+}
+
+/// Draws one tile of a group call's grid.
+fn draw_tile(
+    ui: &mut egui::Ui,
+    app: &mut App,
+    call: &CallUpdate,
+    palette: &Palette,
+    you: &str,
+    tile: Tile<'_>,
+    rect: Rect,
+) {
+    let locale = app.locale;
+    match tile {
+        // A member whose camera is on fills their tile with it; anyone
+        // else keeps their photo, so nobody leaves the grid by turning it
+        // off.
+        Tile::Person(person) => match person
+            .video
+            .then(|| app.call_member_frames.get(&person.id).cloned())
+            .flatten()
+        {
+            Some(image) => {
+                let mut kept = app.call_member_textures.remove(&person.id);
+                let texture = call_texture(ui, &mut kept, "zapfast-call-member", &image);
+                if let Some(kept) = kept {
+                    app.call_member_textures.insert(person.id.clone(), kept);
+                }
+                video_tile(ui, &person.name, texture, image_size(&image), rect);
+            }
+            None => person_tile(ui, locale, palette, person, rect),
+        },
+        // Our own camera takes a tile of its own beside the others rather
+        // than floating over one of them.
+        Tile::Me(image) => {
+            let texture = call_texture(
+                ui,
+                &mut app.call_local_texture,
+                "zapfast-call-local",
+                &image,
+            );
+            video_tile(ui, you, texture, image_size(&image), rect);
+            if call.muted {
+                muted_badge(ui, palette, rect);
+            }
+        }
+        Tile::MyPhoto(me) => {
+            person_tile(ui, locale, palette, me, rect);
+            if call.muted {
+                muted_badge(ui, palette, rect);
+            }
+        }
+        Tile::More(rest) => {
+            ui.painter()
+                .rect_filled(rect, CornerRadius::same(14), tile_fill(palette));
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                format!("+{rest}"),
+                theme::bold(24.0),
+                palette.secondary,
+            );
         }
     }
 }
