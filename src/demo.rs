@@ -29012,3 +29012,244 @@ mod search_access_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod suggestion_access_tests {
+    use super::settings_access_tests::{node, settings, tree};
+    use super::tests::{press_key, render};
+    use egui::accesskit::Role;
+
+    fn field() -> egui::Id {
+        egui::Id::new("composer-text")
+    }
+
+    /// The row that mentions everyone shows a group icon beside "all". It is
+    /// read as what that icon says, has its place in the list's size like any
+    /// row, and the count says it apart from the people.
+    #[test]
+    fn the_everyone_suggestion_is_named_and_counted_apart_from_the_people() {
+        let (mut app, ctx) = settings("mention-everyone");
+        let chat = app.open_chat.clone().expect("a group is open");
+        let group = app.chat(&chat).expect("the group");
+        let candidates = app.mention_candidates(group, "");
+        assert_eq!(candidates[0].0, crate::mentions::ALL_ID);
+        let people = candidates.len() - 1;
+        assert!(people > 1, "{candidates:?}");
+        let end = app.composer.chars().count();
+        let mut state = egui::TextEdit::load_state(&ctx, field()).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(end),
+            )));
+        state.store(&ctx, field());
+        ctx.memory_mut(|memory| memory.request_focus(field()));
+        render(&mut app, &ctx);
+        let shown = tree(&mut app, &ctx);
+        let everyone = node(
+            &shown,
+            field()
+                .with(("mention-option", crate::mentions::ALL_ID))
+                .accesskit_id(),
+        );
+        assert_eq!(everyone.role(), Role::ListBoxOption);
+        assert_eq!(everyone.label(), Some("@all, everyone in the group"));
+        assert_eq!(everyone.position_in_set(), Some(0));
+        assert_eq!(everyone.size_of_set(), Some(candidates.len()));
+        // Each frame here is 1/60 s; the list is described once typing has
+        // paused for 0.4 s.
+        for _ in 0..40 {
+            render(&mut app, &ctx);
+        }
+        let described = format!(
+            "@all and {people} people available. @all, everyone in the group selected. Press Down to browse"
+        );
+        assert!(
+            super::settings_access_tests::spoke(&app, &described),
+            "{:?}",
+            app.announcer.spoken()
+        );
+    }
+
+    /// Up from the first suggestion wraps to the last, which the list has
+    /// to draw before the field can name it: with more rows than the list
+    /// shows, it scrolls there first.
+    #[test]
+    fn up_from_the_first_suggestion_names_the_last() {
+        let (mut app, ctx) = settings("mention-everyone");
+        let chat = app.open_chat.clone().expect("a group is open");
+        if let Some(group) = app.chats.iter_mut().find(|group| group.id == chat) {
+            for index in 0..6 {
+                group
+                    .participants
+                    .push(format!("4915550000{index}@s.whatsapp.net"));
+            }
+        }
+        let group = app.chat(&chat).expect("the group");
+        let candidates = app.mention_candidates(group, "");
+        assert!(candidates.len() > 6, "{}", candidates.len());
+        let end = app.composer.chars().count();
+        let mut state = egui::TextEdit::load_state(&ctx, field()).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(end),
+            )));
+        state.store(&ctx, field());
+        ctx.memory_mut(|memory| memory.request_focus(field()));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::ArrowUp, egui::Modifiers::NONE);
+        assert_eq!(app.mention_selected, candidates.len() - 1);
+        let last = &candidates[candidates.len() - 1].0;
+        let shown = tree(&mut app, &ctx);
+        assert_eq!(
+            node(&shown, field().accesskit_id()).active_descendant(),
+            Some(field().with(("mention-option", last)).accesskit_id()),
+            "the field names the last suggestion"
+        );
+    }
+
+    /// The description waits for the typing to pause in the message field:
+    /// focus gone elsewhere by then, as with Alt+2 just after "@", it is
+    /// not said over where the reader went.
+    #[test]
+    fn a_suggestion_list_is_not_described_once_the_field_lost_focus() {
+        let (mut app, ctx) = settings("mention-everyone");
+        let end = app.composer.chars().count();
+        let mut state = egui::TextEdit::load_state(&ctx, field()).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(end),
+            )));
+        state.store(&ctx, field());
+        ctx.memory_mut(|memory| memory.request_focus(field()));
+        render(&mut app, &ctx);
+        let chat = app.open_chat.clone().expect("a group is open");
+        let list = crate::ui::conversation::messages_list_id(&chat);
+        ctx.memory_mut(|memory| memory.request_focus(list));
+        for _ in 0..40 {
+            render(&mut app, &ctx);
+        }
+        assert_ne!(ctx.memory(|memory| memory.focused()), Some(field()));
+        assert!(
+            !app.announcer
+                .spoken()
+                .iter()
+                .any(|spoken| spoken.contains("Press Down to browse")),
+            "{:?}",
+            app.announcer.spoken()
+        );
+    }
+
+    /// The message field's mention and emoji suggestions work as a combo
+    /// box: once typing pauses the count and the highlighted option are
+    /// said, typing stays in the field, the arrows have the field name the
+    /// highlighted option, and a caret move hands the field back so the
+    /// screen reader reads it.
+    #[test]
+    fn the_field_names_the_suggestion_the_arrows_reach() {
+        for (page, units) in [
+            ("mention", [" person available", " people available"]),
+            ("emoji-complete", [" emoji available", " emoji available"]),
+        ] {
+            let (mut app, ctx) = settings(page);
+            if page == "mention" {
+                // "@" alone suggests every member, after the caret.
+                app.composer = "@".to_owned();
+                app.mention_start = Some(0);
+                app.mention_selected = 0;
+            }
+            let end = app.composer.chars().count();
+            let mut state = egui::TextEdit::load_state(&ctx, field()).unwrap_or_default();
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(
+                    egui::text::CCursor::new(end),
+                )));
+            state.store(&ctx, field());
+            ctx.memory_mut(|memory| memory.request_focus(field()));
+            render(&mut app, &ctx);
+            let before = tree(&mut app, &ctx);
+            assert_eq!(
+                node(&before, field().accesskit_id()).active_descendant(),
+                None,
+                "{page}: nothing is named before an arrow"
+            );
+            let said = |app: &crate::app::App| -> Vec<String> {
+                app.announcer
+                    .spoken()
+                    .iter()
+                    .map(|spoken| spoken.trim_end_matches('\u{200B}').to_owned())
+                    .collect()
+            };
+            let described = |said: &[String]| {
+                said.iter().any(|spoken| {
+                    spoken.ends_with(" selected. Press Down to browse")
+                        && units.iter().any(|unit| {
+                            spoken
+                                .split_once(&format!("{unit}. "))
+                                // "@all and 3 people available" counts the
+                                // people after the row that mentions everyone.
+                                .and_then(|(count, _)| count.rsplit(' ').next())
+                                .is_some_and(|count| count.parse::<usize>().is_ok())
+                        })
+                })
+            };
+            assert!(!described(&said(&app)), "{page}: not while typing");
+            // Each frame here is 1/60 s; the list is described once typing
+            // has paused for 0.4 s.
+            for _ in 0..40 {
+                render(&mut app, &ctx);
+            }
+            assert!(
+                described(&said(&app)),
+                "{page}: the count and the pick are said: {:?}",
+                said(&app)
+            );
+
+            press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+            let selected = if page == "mention" {
+                app.mention_selected
+            } else {
+                app.emoji_selected
+            };
+            assert_eq!(selected, 1, "{page}");
+            let after = tree(&mut app, &ctx);
+            assert_eq!(after.focus, field().accesskit_id(), "{page}: typing stays");
+            let active = node(&after, field().accesskit_id())
+                .active_descendant()
+                .expect("the field names the option");
+            let option = node(&after, active);
+            assert_eq!(option.role(), Role::ListBoxOption, "{page}");
+            assert_eq!(option.position_in_set(), Some(1), "{page}");
+            let count = option.size_of_set().expect("a size");
+            assert!(option.label().is_some_and(|label| !label.is_empty()));
+            // Its siblings are the other suggestions drawn, all of one list.
+            let parent = after
+                .nodes
+                .iter()
+                .find(|(_, node)| node.children().contains(&active))
+                .map(|(_, node)| node.clone())
+                .expect("a parent");
+            let siblings: Vec<_> = parent
+                .children()
+                .iter()
+                .map(|id| node(&after, *id))
+                .filter(|node| node.role() == Role::ListBoxOption)
+                .collect();
+            assert!(siblings.len() > 1, "{page}");
+            for sibling in &siblings {
+                assert_eq!(sibling.size_of_set(), Some(count), "{page}");
+            }
+
+            press_key(&mut app, &ctx, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+            let moved = tree(&mut app, &ctx);
+            assert_eq!(
+                node(&moved, field().accesskit_id()).active_descendant(),
+                None,
+                "{page}: a caret move hands the field back"
+            );
+        }
+    }
+}

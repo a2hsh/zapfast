@@ -1187,6 +1187,130 @@ fn take_plain_key(ui: &mut egui::Ui, key: Key) -> bool {
     })
 }
 
+/// The suggestion row the message field names as its active descendant
+/// this frame, as a combo box's field names its list's current option. The
+/// lists draw before the field, so the field claims it once drawn: setting
+/// it from the list would create the field's node under the list's.
+fn suggestion_active_id() -> egui::Id {
+    egui::Id::new("suggestion-active-row")
+}
+
+/// Screen reader side of a suggestion list above the message field. Once
+/// typing pauses after the list appears or the text changes, it says how
+/// many suggestions there are, the one Enter or Tab would pick, and that
+/// Down browses them: the screen reader stays in the field, where it reads
+/// the typing. Returns whether the field should name the highlighted row:
+/// only once the arrows have reached the list, and only until the caret
+/// moves or the text changes, since the screen reader then reads that row
+/// instead of the field.
+#[allow(clippy::too_many_arguments)]
+fn suggestion_speech(
+    app: &mut App,
+    ui: &egui::Ui,
+    field: egui::Id,
+    kind: &'static str,
+    count: usize,
+    highlighted: &str,
+    arrowed: bool,
+    available: impl Fn(usize) -> String,
+) -> bool {
+    /// How long typing pauses before the list is described, in seconds.
+    const PAUSE: f64 = 0.4;
+    let id = egui::Id::new(("suggestion-speech", kind));
+    let text = app.composer.clone();
+    let now = ui.input(|input| input.time);
+    let moved = ui.input(|input| {
+        input.events.iter().any(|event| {
+            matches!(
+                event,
+                egui::Event::Text(_)
+                    | egui::Event::Paste(_)
+                    | egui::Event::Key {
+                        key: Key::ArrowLeft
+                            | Key::ArrowRight
+                            | Key::Home
+                            | Key::End
+                            | Key::Backspace
+                            | Key::Delete,
+                        pressed: true,
+                        ..
+                    }
+            )
+        })
+    });
+    let shown: Option<SuggestionSpeech> = ui.ctx().data(|data| data.get_temp(id));
+    // The list draws before the field takes this frame's keys, so an edit
+    // shows in the text a frame later: compare the text.
+    let edited = shown.as_ref().is_none_or(|shown| shown.text != text);
+    let mut reached = shown.as_ref().is_some_and(|shown| shown.reached) && !moved && !edited;
+    let mut due = shown.and_then(|shown| shown.due);
+    if edited {
+        due = Some(now + PAUSE);
+    }
+    if arrowed {
+        // The screen reader reads the row the arrows reach.
+        reached = true;
+        due = None;
+    }
+    if let Some(at) = due {
+        if now >= at {
+            // Said in the field only: focus gone elsewhere meanwhile, as
+            // with Alt+2, it would be heard over where the reader went.
+            if ui.memory(|memory| memory.has_focus(field)) {
+                let template = crate::i18n::gettext(
+                    app.locale,
+                    // Translators: said once typing pauses above a suggestion
+                    // list; {available} is how many it holds, such as "3
+                    // people available", and {option} the one Enter or Tab
+                    // would pick.
+                    "{available}. {option} selected. Press Down to browse",
+                );
+                let said = crate::a11y::fill(
+                    &template,
+                    &[("available", &available(count)), ("option", highlighted)],
+                );
+                app.announcer.say(crate::announcer::Category::Status, said);
+            }
+            due = None;
+        } else {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(at - now));
+        }
+    }
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(id, SuggestionSpeech { text, reached, due }));
+    reached
+}
+
+/// What `suggestion_speech` remembers between frames.
+#[derive(Clone)]
+struct SuggestionSpeech {
+    /// The message field's text when last seen.
+    text: String,
+    /// Whether the arrows have reached the list since the last edit.
+    reached: bool,
+    /// When to describe the list, once typing has paused.
+    due: Option<f64>,
+}
+
+/// The list of `kind` is gone: the next one is described again.
+fn suggestions_gone(ui: &egui::Ui, kind: &'static str) {
+    let id = egui::Id::new(("suggestion-speech", kind));
+    ui.ctx()
+        .data_mut(|data| data.remove::<SuggestionSpeech>(id));
+}
+
+/// Makes `ui`, which holds a suggestion list's rows, the list itself: a
+/// screen reader then says its name, and takes "2 of 5" from its size.
+fn suggestion_list_node(ui: &egui::Ui, locale: crate::i18n::Locale, len: usize) {
+    let label = crate::i18n::gettext(locale, "Suggestions").into_owned();
+    ui.ctx().accesskit_node_builder(ui.unique_id(), |node| {
+        node.set_role(egui::accesskit::Role::ListBox);
+        node.set_label(label);
+        node.set_size_of_set(len);
+    });
+}
+
 /// Slack-style emoji suggestions above the composer. The composer keeps
 /// focus, so ordinary typing continues refining the query.
 fn emoji_suggestions(app: &mut App, ui: &mut egui::Ui, field: egui::Id) {
@@ -1196,11 +1320,13 @@ fn emoji_suggestions(app: &mut App, ui: &mut egui::Ui, field: egui::Id) {
         .unwrap_or_else(|| app.composer.chars().count());
     let Some((end, query)) = active_emoji(&app.composer, app.emoji_start, cursor) else {
         app.emoji_start = None;
+        suggestions_gone(ui, "emoji");
         return;
     };
     let start = app.emoji_start.expect("checked above");
     let candidates = emoji_candidates(app, query);
     if candidates.is_empty() {
+        suggestions_gone(ui, "emoji");
         return;
     }
 
@@ -1213,19 +1339,53 @@ fn emoji_suggestions(app: &mut App, ui: &mut egui::Ui, field: egui::Id) {
         app.emoji_selected = (app.emoji_selected + candidates.len() - 1) % candidates.len();
     }
     app.emoji_selected = app.emoji_selected.min(candidates.len() - 1);
+    let locale = app.locale;
+    let highlighted = candidates[app.emoji_selected].name;
+    let reached = suggestion_speech(
+        app,
+        ui,
+        field,
+        "emoji",
+        candidates.len(),
+        highlighted,
+        down || up,
+        |count| {
+            crate::i18n::ngettext(
+                locale,
+                "{} emoji available",
+                "{} emoji available",
+                u32::try_from(count).unwrap_or(u32::MAX),
+            )
+            .replace("{}", &count.to_string())
+        },
+    );
     let submit = take_plain_key(ui, Key::Enter) || take_plain_key(ui, Key::Tab);
     let mut picked = submit.then(|| candidates[app.emoji_selected].clone());
     let palette = app.palette;
+    let mut active = None;
 
     let list = widgets::raised(ui, &palette, suggestion_frame(&palette), |ui| {
         let row_height = 36.0;
         ui.spacing_mut().item_spacing.y = 0.0;
+        suggestion_list_node(ui, locale, candidates.len());
         for (index, candidate) in candidates.iter().enumerate() {
-            let (rect, response) =
-                ui.allocate_exact_size(vec2(ui.available_width(), row_height), Sense::click());
-            widgets::name_button_with(&response, || {
-                format!("{} {}", candidate.emoji, candidate.name)
-            });
+            // A fixed id per emoji, so the option a screen reader is on keeps
+            // its node while typing reorders the list.
+            let row = field.with(("emoji-option", &candidate.shortcode));
+            let (_, rect) = ui.allocate_space(vec2(ui.available_width(), row_height));
+            let response = ui.interact(rect, row, Sense::click());
+            super::list_nav::mark_row(
+                ui.ctx(),
+                row,
+                candidate.name.to_owned(),
+                index,
+                candidates.len(),
+                rect,
+                false,
+            );
+            if index == app.emoji_selected {
+                active = Some(row);
+            }
             if index == app.emoji_selected {
                 ui.painter().rect_filled(
                     rect,
@@ -1295,6 +1455,10 @@ fn emoji_suggestions(app: &mut App, ui: &mut egui::Ui, field: egui::Id) {
     });
     ui.ctx()
         .data_mut(|data| data.insert_temp(suggestion_list_id(), list.response.rect));
+    if reached {
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(suggestion_active_id(), active));
+    }
     strip_gap(ui);
     if let Some(candidate) = picked {
         app.actions.push(Action::InsertEmojiCompletion {
@@ -1305,6 +1469,53 @@ fn emoji_suggestions(app: &mut App, ui: &mut egui::Ui, field: egui::Id) {
     }
 }
 
+/// A mention suggestion's spoken name: the member's name, or for the row
+/// that mentions everyone, which shows a group icon beside "all", what that
+/// icon says: "@all, everyone in the group".
+fn mention_option_name(locale: crate::i18n::Locale, id: &str, label: &str) -> String {
+    let label = crate::a11y::without_push_marker(label);
+    if id == crate::mentions::ALL_ID {
+        // Translators: a screen reader's name for the suggestion that
+        // mentions everyone in a group; {} is the mention, such as @all.
+        crate::i18n::gettext(locale, "{}, everyone in the group")
+            .replace("{}", &format!("@{label}"))
+    } else {
+        label.to_owned()
+    }
+}
+
+/// How many mention suggestions there are, `count` in all. The row that
+/// mentions everyone is not a person, so it is said apart from them.
+fn mentions_available(locale: crate::i18n::Locale, count: usize, everyone: bool) -> String {
+    use crate::i18n::{gettext, ngettext};
+    let all = format!("@{}", crate::mentions::ALL_USER);
+    if !everyone {
+        return ngettext(
+            locale,
+            "{} person available",
+            "{} people available",
+            u32::try_from(count).unwrap_or(u32::MAX),
+        )
+        .replace("{}", &count.to_string());
+    }
+    let people = count.saturating_sub(1);
+    if people == 0 {
+        // Translators: the only mention suggestion is {all}, such as @all,
+        // which mentions everyone in the group.
+        return gettext(locale, "{all} available").replace("{all}", &all);
+    }
+    ngettext(
+        locale,
+        // Translators: mention suggestions: {all}, such as @all, which
+        // mentions everyone in the group, and {count} people.
+        "{all} and {count} person available",
+        "{all} and {count} people available",
+        u32::try_from(people).unwrap_or(u32::MAX),
+    )
+    .replace("{all}", &all)
+    .replace("{count}", &people.to_string())
+}
+
 /// Group-member suggestions above the composer.
 fn mention_picker(app: &mut App, ui: &mut egui::Ui, chat: &Chat, field: egui::Id) {
     let cursor = egui::TextEdit::load_state(ui.ctx(), field)
@@ -1313,11 +1524,13 @@ fn mention_picker(app: &mut App, ui: &mut egui::Ui, chat: &Chat, field: egui::Id
         .unwrap_or_else(|| app.composer.chars().count());
     let Some((end, query)) = active_mention(&app.composer, app.mention_start, cursor) else {
         app.mention_start = None;
+        suggestions_gone(ui, "mention");
         return;
     };
     let start = app.mention_start.expect("checked above");
     let candidates = app.mention_candidates(chat, query);
     if candidates.is_empty() {
+        suggestions_gone(ui, "mention");
         return;
     }
     let down = take_plain_key(ui, Key::ArrowDown);
@@ -1329,26 +1542,79 @@ fn mention_picker(app: &mut App, ui: &mut egui::Ui, chat: &Chat, field: egui::Id
         app.mention_selected = (app.mention_selected + candidates.len() - 1) % candidates.len();
     }
     app.mention_selected = app.mention_selected.min(candidates.len() - 1);
+    let locale = app.locale;
+    let (highlighted_id, highlighted_label) = &candidates[app.mention_selected];
+    let highlighted = mention_option_name(locale, highlighted_id, highlighted_label);
+    let everyone = candidates
+        .iter()
+        .any(|(id, _)| id == crate::mentions::ALL_ID);
+    let reached = suggestion_speech(
+        app,
+        ui,
+        field,
+        "mention",
+        candidates.len(),
+        &highlighted,
+        down || up,
+        |count| mentions_available(locale, count, everyone),
+    );
     let submit = take_plain_key(ui, Key::Enter) || take_plain_key(ui, Key::Tab);
     let mut picked = submit.then(|| candidates[app.mention_selected].clone());
     let palette = app.palette;
     let everyone_alias = crate::mentions::everyone_alias(app.locale);
+    let mut active = None;
 
     let list = widgets::raised(ui, &palette, suggestion_frame(&palette), |ui| {
         let row_height = 38.0;
+        let max_height = row_height * candidates.len().min(5) as f32;
+        // Only the rows in view are drawn, and the field can name only a row
+        // drawn: the one the arrows reach, which Up from the first or Down
+        // from the last wraps to the other end, comes into view first.
+        // Otherwise the list stays where it is.
+        let id = ui.make_persistent_id(egui::IdSalt::new("mention-members"));
+        let current = egui::scroll_area::State::load(ui.ctx(), id)
+            .unwrap_or_default()
+            .offset
+            .y;
+        let offset = if down || up {
+            super::chats::row_scroll_offset(
+                current,
+                max_height,
+                app.mention_selected,
+                row_height,
+                0.0,
+            )
+        } else {
+            current
+        };
         egui::ScrollArea::vertical()
             .id_salt("mention-members")
-            .max_height(row_height * candidates.len().min(5) as f32)
+            .max_height(max_height)
             .auto_shrink([false, true])
+            .vertical_scroll_offset(offset)
             .show_rows(ui, row_height, candidates.len(), |ui, range| {
                 ui.spacing_mut().item_spacing.y = 0.0;
+                suggestion_list_node(ui, locale, candidates.len());
                 for index in range {
                     let (id, label) = &candidates[index];
-                    let (rect, response) = ui.allocate_exact_size(
-                        vec2(ui.available_width(), row_height),
-                        Sense::click(),
+                    // A fixed id per member: the rows drawn depend on the
+                    // scroll, and a renamed current row would be read again.
+                    let row = field.with(("mention-option", id));
+                    let (_, rect) = ui.allocate_space(vec2(ui.available_width(), row_height));
+                    let response = ui.interact(rect, row, Sense::click());
+                    super::list_nav::mark_row(
+                        ui.ctx(),
+                        row,
+                        mention_option_name(locale, id, label),
+                        index,
+                        candidates.len(),
+                        rect,
+                        false,
                     );
-                    widgets::name_button(&response, crate::a11y::without_push_marker(label));
+                    // Only a row drawn this frame may be named.
+                    if index == app.mention_selected {
+                        active = Some(row);
+                    }
                     if index == app.mention_selected || response.hovered() {
                         ui.painter().rect_filled(
                             rect,
@@ -1440,6 +1706,10 @@ fn mention_picker(app: &mut App, ui: &mut egui::Ui, chat: &Chat, field: egui::Id
     });
     ui.ctx()
         .data_mut(|data| data.insert_temp(suggestion_list_id(), list.response.rect));
+    if reached {
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(suggestion_active_id(), active));
+    }
     strip_gap(ui);
     if let Some((id, name)) = picked {
         app.actions.push(Action::InsertMention {
@@ -1606,6 +1876,8 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                 });
                 return;
             }
+            ui.ctx()
+                .data_mut(|data| data.remove::<Option<egui::Id>>(suggestion_active_id()));
             emoji_suggestions(app, ui, id);
             mention_picker(app, ui, chat, id);
             // `consume_key(NONE, Enter)` also matches Shift+Enter. Check the
@@ -1812,6 +2084,15 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                                     })
                                     .layouter(&mut layouter)
                                     .show(ui);
+                                if output.response.has_focus()
+                                    && let Some(Some(row)) = ui.ctx().data(|data| {
+                                        data.get_temp::<Option<egui::Id>>(suggestion_active_id())
+                                    })
+                                {
+                                    ui.ctx().accesskit_node_builder(id, |node| {
+                                        node.set_active_descendant(row.accesskit_id());
+                                    });
+                                }
                                 for (start, length, cluster) in &clusters {
                                     let Some(bounds) = crate::bidi::char_bounds(
                                         &output.galley,
@@ -11678,6 +11959,31 @@ fn chat_of(chat: &ChatId) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The row that mentions everyone is no person: the count says it apart,
+    /// and alone it is said by itself.
+    #[test]
+    fn mention_counts_say_the_everyone_row_apart() {
+        let locale = crate::i18n::Locale::English;
+        assert_eq!(mentions_available(locale, 3, false), "3 people available");
+        assert_eq!(mentions_available(locale, 1, true), "@all available");
+        assert_eq!(
+            mentions_available(locale, 2, true),
+            "@all and 1 person available"
+        );
+        assert_eq!(
+            mentions_available(locale, 4, true),
+            "@all and 3 people available"
+        );
+        assert_eq!(
+            mention_option_name(locale, crate::mentions::ALL_ID, "all"),
+            "@all, everyone in the group"
+        );
+        assert_eq!(
+            mention_option_name(locale, "1@s.whatsapp.net", "Ada"),
+            "Ada"
+        );
+    }
 
     /// Each reason the keyboard menu speaks for an unavailable card button
     /// goes through gettext as its own literal, so translators get it; no
