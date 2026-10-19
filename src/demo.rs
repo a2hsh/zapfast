@@ -29253,3 +29253,566 @@ mod suggestion_access_tests {
         }
     }
 }
+
+/// The linking screen with a keyboard, a screen reader and a pointer: the QR
+/// code and its enlarged view, the pairing code, and a code that runs out.
+#[cfg(test)]
+mod linking_access_tests {
+    use super::settings_access_tests::{focused, input_frame, tree};
+    use super::tests::{app, press_key, render};
+    use super::*;
+    use crate::backend::{Command, Event};
+    use egui::accesskit::{Node, NodeId, Role, TreeUpdate};
+    use egui::{Key, Modifiers};
+
+    /// A linking page of `apply_flags`, before its first frame, recording
+    /// what it sends the backend.
+    fn linking(page: &str) -> (App, egui::Context) {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        apply_flags(&mut app, Some(page));
+        app.backend.record_demo_commands();
+        (app, ctx)
+    }
+
+    /// The node named `name`, if the tree has one: a label's name is its
+    /// value.
+    fn named(tree: &TreeUpdate, name: &str) -> Option<(NodeId, Node)> {
+        tree.nodes
+            .iter()
+            .find(|(_, node)| node.label().or(node.value()) == Some(name))
+            .map(|(id, node)| (*id, node.clone()))
+    }
+
+    /// The middle of a drawn node, where a pointer clicks it.
+    fn middle(node: &Node) -> egui::Pos2 {
+        let bounds = node.bounds().expect("the node is drawn");
+        egui::pos2(
+            ((bounds.x0 + bounds.x1) / 2.0) as f32,
+            ((bounds.y0 + bounds.y1) / 2.0) as f32,
+        )
+    }
+
+    /// A pointer click at `pos`: moved there, pressed and released, a frame
+    /// each, then frames to settle.
+    fn click(app: &mut App, ctx: &egui::Context, pos: egui::Pos2) {
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        input_frame(app, ctx, vec![egui::Event::PointerMoved(pos)]);
+        input_frame(app, ctx, vec![button(true)]);
+        input_frame(app, ctx, vec![button(false)]);
+        render(app, ctx);
+    }
+
+    /// Keyboard and screen reader users start on the QR code, a button that
+    /// reads the steps. Enter or Space fills the window with it, and the
+    /// enlarged code takes focus and says how to use it.
+    #[test]
+    fn the_qr_code_takes_focus_and_enter_or_space_enlarges_it() {
+        for key in [Key::Enter, Key::Space] {
+            let (mut app, ctx) = linking("login");
+            ctx.enable_accesskit();
+            render(&mut app, &ctx);
+            let qr = focused(&tree(&mut app, &ctx));
+            assert_eq!(qr.role(), Role::Button);
+            assert_eq!(qr.label(), Some("QR code for linking"));
+            assert_eq!(
+                qr.description(),
+                Some(
+                    "1. Open WhatsApp on your phone. 2. Tap Menu or Settings, then Linked \
+                     devices. 3. Tap Link a device and point the phone at this code. Press \
+                     Enter to enlarge."
+                )
+            );
+            assert!(!app.qr_enlarged);
+            press_key(&mut app, &ctx, key, Modifiers::NONE);
+            assert!(app.qr_enlarged, "{key:?} enlarges it");
+            let enlarged = focused(&tree(&mut app, &ctx));
+            assert_eq!(enlarged.role(), Role::Button);
+            assert_eq!(enlarged.label(), Some("QR code enlarged"));
+            assert_eq!(
+                enlarged.description(),
+                Some(
+                    "Point your phone's camera at the screen, about a forearm's length \
+                     away. Press Escape to return."
+                )
+            );
+        }
+    }
+
+    /// A click on the QR code enlarges it, and a click anywhere returns it
+    /// to the card, with focus back on it.
+    #[test]
+    fn a_click_enlarges_the_qr_code_and_another_anywhere_returns_it() {
+        let (mut app, ctx) = linking("login");
+        render(&mut app, &ctx);
+        let (qr, button) =
+            named(&tree(&mut app, &ctx), "QR code for linking").expect("the QR code");
+        click(&mut app, &ctx, middle(&button));
+        assert!(app.qr_enlarged);
+        // Well away from where the small code was.
+        click(&mut app, &ctx, egui::pos2(60.0, 700.0));
+        assert!(!app.qr_enlarged);
+        assert_eq!(tree(&mut app, &ctx).focus, qr);
+        assert!(app.dialog.is_none());
+    }
+
+    /// "Your chats are ready" is for an account that links: switching from
+    /// one on its linking screen to another already linked says nothing.
+    #[test]
+    fn switching_to_a_linked_account_is_no_linking() {
+        let (mut app, ctx) = linking("login,accounts-closed");
+        render(&mut app, &ctx);
+        assert!(!app.is_linked());
+        let second = app.accounts[1].id.clone();
+        app.actions
+            .push(crate::model::Action::SwitchAccount(second));
+        render(&mut app, &ctx);
+        render(&mut app, &ctx);
+        assert!(app.is_linked() && !app.chats.is_empty());
+        assert!(
+            !app.announcer
+                .spoken()
+                .iter()
+                .any(|spoken| spoken.contains("Your chats are ready")),
+            "{:?}",
+            app.announcer.spoken()
+        );
+    }
+
+    /// Escape returns the enlarged QR code to the card, with focus on it,
+    /// and does nothing else: no dialog opens and nothing is withdrawn.
+    #[test]
+    fn escape_returns_the_enlarged_qr_code_and_focus_to_it() {
+        let (mut app, ctx) = linking("login");
+        ctx.enable_accesskit();
+        render(&mut app, &ctx);
+        let qr = tree(&mut app, &ctx).focus;
+        press_key(&mut app, &ctx, Key::Enter, Modifiers::NONE);
+        assert!(app.qr_enlarged);
+        press_key(&mut app, &ctx, Key::Escape, Modifiers::NONE);
+        assert!(!app.qr_enlarged, "Escape returns it");
+        let tree = tree(&mut app, &ctx);
+        assert_eq!(tree.focus, qr);
+        assert_eq!(focused(&tree).label(), Some("QR code for linking"));
+        assert!(app.dialog.is_none());
+        assert!(
+            !app.backend
+                .take_demo_commands()
+                .iter()
+                .any(|command| matches!(command, Command::CancelPairing))
+        );
+    }
+
+    /// Every text painted in a frame, with where it is.
+    fn painted(output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
+        fn walk(shape: &egui::Shape, found: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::Shape::Text(text) => {
+                    found.push((text.galley.text().to_owned(), text.visual_bounding_rect()));
+                }
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        walk(shape, found);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut found);
+        }
+        found
+    }
+
+    /// The enlarged code says under it, for pointer users, how to return;
+    /// the card does not.
+    #[test]
+    fn the_enlarged_qr_code_says_how_to_return() {
+        const HINT: &str = "Click anywhere or press Escape to return";
+        let (mut app, ctx) = linking("login");
+        render(&mut app, &ctx);
+        let card = input_frame(&mut app, &ctx, Vec::new());
+        assert!(painted(&card).iter().all(|(text, _)| text != HINT));
+        app.qr_enlarged = true;
+        render(&mut app, &ctx);
+        let enlarged = input_frame(&mut app, &ctx, Vec::new());
+        let (_, hint) = painted(&enlarged)
+            .into_iter()
+            .find(|(text, _)| text == HINT)
+            .expect("the hint is painted");
+        // Under the code, and all of it inside the window.
+        let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1180.0, 780.0));
+        assert!(window.contains_rect(hint), "{hint:?}");
+        assert!(hint.min.y > window.center().y, "{hint:?}");
+    }
+
+    /// A code is timed from when its account got it, not from the window's
+    /// first look at it: one that came 160 seconds before the window showed
+    /// it has 20 left, and its warning is due at once.
+    #[test]
+    fn a_pairing_code_shown_late_is_timed_from_its_arrival() {
+        let (mut app, ctx) = linking("pair");
+        app.pair_code_arrived = Some((
+            "FWAP1234".into(),
+            std::time::Instant::now() - std::time::Duration::from_secs(160),
+        ));
+        frame_at(&mut app, &ctx, 1000.0);
+        frame_at(&mut app, &ctx, 1000.1);
+        // Said with the code, which the screen says as it opens.
+        assert!(
+            app.announcer
+                .spoken()
+                .iter()
+                .any(|spoken| spoken.contains(WARNING)),
+            "{:?}",
+            app.announcer.spoken()
+        );
+        frame_at(&mut app, &ctx, 1020.0);
+        let tree = frame_at(&mut app, &ctx, 1020.1);
+        assert!(named(&tree, "This code expired").is_some());
+    }
+
+    /// The enlarged QR code holds the keys only on the linking screen that
+    /// draws it: left set once linked, the window's shortcuts still work, and
+    /// a new window starts with the code in its card.
+    #[test]
+    fn an_enlarged_qr_code_left_after_linking_holds_no_keys() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        assert!(app.is_linked());
+        app.qr_enlarged = true;
+        let chats = if cfg!(target_os = "macos") {
+            Modifiers::CTRL
+        } else {
+            Modifiers::ALT
+        };
+        press_key(&mut app, &ctx, Key::Num1, chats);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::chats::chats_list_id())
+        );
+        app.attach(&egui::Context::default());
+        assert!(!app.qr_enlarged);
+    }
+
+    /// The number a code is asked for in these tests.
+    const PHONE: &str = "15550001111";
+
+    /// The pairing code's status while a code is asked for or shown.
+    fn pairing(code: Option<&str>) -> LinkStatus {
+        LinkStatus::Unlinked {
+            qr: None,
+            pair_code: code.map(str::to_owned),
+            pairing_phone: Some(PHONE.to_owned()),
+        }
+    }
+
+    /// The QR code again, as the worker shows it once a code is withdrawn.
+    fn qr_again() -> LinkStatus {
+        LinkStatus::Unlinked {
+            qr: Some(sample_qr()),
+            pair_code: None,
+            pairing_phone: None,
+        }
+    }
+
+    /// How many times the app asked the worker to withdraw the code.
+    fn withdrawn(app: &App) -> usize {
+        app.backend
+            .take_demo_commands()
+            .iter()
+            .filter(|command| matches!(command, Command::CancelPairing))
+            .count()
+    }
+
+    /// A pairing code takes focus in a read-only field named for it, whose
+    /// value is the code as shown, so the arrows read it a letter at a time;
+    /// typing does not change it.
+    #[test]
+    fn a_pairing_code_takes_focus_in_a_read_only_field() {
+        let (mut app, ctx) = linking("pair");
+        ctx.enable_accesskit();
+        render(&mut app, &ctx);
+        let field = focused(&tree(&mut app, &ctx));
+        assert_eq!(field.role(), Role::TextInput);
+        assert_eq!(field.label(), Some("Pairing code"));
+        assert_eq!(field.value(), Some("FWAP-1234"));
+        assert!(field.is_read_only());
+        assert_eq!(
+            field.description(),
+            Some("Read it with the arrow keys. Press Escape to change the phone number.")
+        );
+        input_frame(&mut app, &ctx, vec![egui::Event::Text("X".into())]);
+        render(&mut app, &ctx);
+        let field = focused(&tree(&mut app, &ctx));
+        assert_eq!(field.label(), Some("Pairing code"));
+        assert_eq!(field.value(), Some("FWAP-1234"));
+    }
+
+    /// Enter on the number closes the phone number dialog, which would cover
+    /// the code and keep focus, and asks for a code; the code takes focus
+    /// when it arrives.
+    #[test]
+    fn get_a_code_closes_the_dialog_and_the_code_takes_focus() {
+        let (mut app, ctx) = linking("phone");
+        ctx.enable_accesskit();
+        app.pair_phone = PHONE.to_owned();
+        render(&mut app, &ctx);
+        assert_eq!(focused(&tree(&mut app, &ctx)).label(), Some("Phone number"));
+        app.backend.take_demo_commands();
+        press_key(&mut app, &ctx, Key::Enter, Modifiers::NONE);
+        assert!(app.dialog.is_none());
+        assert!(
+            app.backend
+                .take_demo_commands()
+                .iter()
+                .any(|command| matches!(command, Command::PairWithPhone(phone) if phone == PHONE))
+        );
+        app.link = pairing(None);
+        render(&mut app, &ctx);
+        app.link = pairing(Some("FWAP1234"));
+        render(&mut app, &ctx);
+        let field = focused(&tree(&mut app, &ctx));
+        assert_eq!(field.label(), Some("Pairing code"));
+        assert_eq!(field.value(), Some("FWAP-1234"));
+    }
+
+    /// Escape on a pairing code withdraws it and steps back to the phone
+    /// number dialog, with the number kept and in focus; the same Escape
+    /// does not also close the dialog it opened. From there, Escape closes
+    /// the dialog only, on the QR code, with nothing more to withdraw.
+    #[test]
+    fn escape_on_a_pairing_code_steps_back_to_the_phone_number() {
+        let (mut app, ctx) = linking("pair");
+        ctx.enable_accesskit();
+        app.pair_phone = PHONE.to_owned();
+        render(&mut app, &ctx);
+        assert_eq!(focused(&tree(&mut app, &ctx)).label(), Some("Pairing code"));
+        withdrawn(&app);
+        press_key(&mut app, &ctx, Key::Escape, Modifiers::NONE);
+        assert_eq!(app.dialog, Some(Dialog::PairWithPhone));
+        assert_eq!(withdrawn(&app), 1);
+        assert_eq!(app.pair_phone, PHONE);
+        app.link = qr_again();
+        render(&mut app, &ctx);
+        assert_eq!(app.dialog, Some(Dialog::PairWithPhone));
+        let field = focused(&tree(&mut app, &ctx));
+        assert_eq!(field.label(), Some("Phone number"));
+        assert_eq!(field.value(), Some(PHONE));
+        press_key(&mut app, &ctx, Key::Escape, Modifiers::NONE);
+        assert!(app.dialog.is_none());
+        assert_eq!(withdrawn(&app), 0, "nothing left to withdraw");
+        assert!(named(&tree(&mut app, &ctx), "QR code for linking").is_some());
+    }
+
+    /// "Change phone number", under a code or while one is asked for, does
+    /// what Escape does: withdraws it and steps back to the number.
+    #[test]
+    fn change_phone_number_withdraws_the_code() {
+        for code in [Some("FWAP1234"), None] {
+            let (mut app, ctx) = linking("pair");
+            app.link = pairing(code);
+            app.pair_phone = PHONE.to_owned();
+            render(&mut app, &ctx);
+            let (_, link) = named(&tree(&mut app, &ctx), "Change phone number").expect("the link");
+            withdrawn(&app);
+            click(&mut app, &ctx, middle(&link));
+            assert_eq!(app.dialog, Some(Dialog::PairWithPhone), "{code:?}");
+            assert_eq!(withdrawn(&app), 1, "{code:?}");
+            assert_eq!(app.pair_phone, PHONE);
+        }
+    }
+
+    /// The link says which number the code is for, before deciding to
+    /// change it: while a code is asked for, shown, or expired.
+    #[test]
+    fn change_phone_number_says_the_current_number() {
+        for (code, expired) in [
+            (None, false),
+            (Some("FWAP1234"), false),
+            (Some("FWAP1234"), true),
+        ] {
+            let (mut app, ctx) = linking("pair");
+            app.link = pairing(code);
+            frame_at(&mut app, &ctx, 1000.0);
+            let tree = frame_at(&mut app, &ctx, if expired { 1180.0 } else { 1001.0 });
+            assert_eq!(named(&tree, "This code expired").is_some(), expired);
+            let (_, link) = named(&tree, "Change phone number").expect("the link");
+            assert_eq!(
+                link.description(),
+                Some("Current number: +15550001111"),
+                "{code:?}, expired {expired}"
+            );
+        }
+    }
+
+    /// One frame at `time` seconds on the window's clock, with AccessKit on.
+    fn frame_at(app: &mut App, ctx: &egui::Context, time: f64) -> TreeUpdate {
+        ctx.enable_accesskit();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 780.0),
+                )),
+                time: Some(time),
+                ..Default::default()
+            },
+            |ui| {
+                let ctx = ui.ctx().clone();
+                app.background_frame(&ctx);
+                app.frame_ui(ui);
+            },
+        );
+        output.textures_delta.clear();
+        output
+            .platform_output
+            .accesskit_update
+            .expect("accessibility tree")
+    }
+
+    /// How many announcer slots say `text`.
+    fn saying(app: &App, text: &str) -> usize {
+        app.announcer
+            .spoken()
+            .iter()
+            .filter(|spoken| spoken.trim_end_matches('\u{200B}') == text)
+            .count()
+    }
+
+    const WARNING: &str = "30 seconds left to enter the code";
+
+    /// The pairing page with its code shown at `start` seconds, then run out
+    /// 180 seconds later; returns the tree once settled.
+    fn expired(app: &mut App, ctx: &egui::Context, start: f64) -> TreeUpdate {
+        frame_at(app, ctx, start);
+        frame_at(app, ctx, start + 180.0);
+        frame_at(app, ctx, start + 180.1);
+        frame_at(app, ctx, start + 180.2)
+    }
+
+    /// A code works for 180 seconds from when it arrived. A warning is said
+    /// once, 30 seconds before; at 180 the code gives way to "This code
+    /// expired", which is said, with focus on "Get a new code". Escape there
+    /// still steps back to the number.
+    #[test]
+    fn a_pairing_code_warns_at_150_seconds_and_expires_at_180() {
+        let (mut app, ctx) = linking("pair");
+        app.pair_phone = PHONE.to_owned();
+        let start = 1000.0;
+        frame_at(&mut app, &ctx, start);
+        frame_at(&mut app, &ctx, start + 149.9);
+        assert_eq!(saying(&app, WARNING), 0, "not yet");
+        frame_at(&mut app, &ctx, start + 150.0);
+        assert_eq!(saying(&app, WARNING), 1);
+        frame_at(&mut app, &ctx, start + 160.0);
+        let tree = frame_at(&mut app, &ctx, start + 179.9);
+        assert_eq!(saying(&app, WARNING), 1, "said once");
+        assert!(named(&tree, "Pairing code").is_some(), "still valid");
+        assert!(named(&tree, "This code expired").is_none());
+
+        frame_at(&mut app, &ctx, start + 180.0);
+        let tree = frame_at(&mut app, &ctx, start + 180.1);
+        assert!(named(&tree, "Pairing code").is_none(), "the code is gone");
+        let (_, heading) = named(&tree, "This code expired").expect("the heading");
+        assert_eq!(heading.role(), Role::Heading);
+        assert!(
+            named(
+                &tree,
+                "A code works for three minutes. Get a new one, then enter it on your phone."
+            )
+            .is_some()
+        );
+        assert_eq!(saying(&app, "This code expired. Get a new code."), 1);
+        assert_eq!(focused(&tree).label(), Some("Get a new code"));
+
+        withdrawn(&app);
+        press_key(&mut app, &ctx, Key::Escape, Modifiers::NONE);
+        assert_eq!(app.dialog, Some(Dialog::PairWithPhone));
+        assert_eq!(withdrawn(&app), 1);
+    }
+
+    /// "Get a new code" asks again for the same number. The new code is timed
+    /// from when it arrives, not from the one that ran out.
+    #[test]
+    fn get_a_new_code_asks_again_for_the_same_number() {
+        let (mut app, ctx) = linking("pair");
+        let start = 1000.0;
+        let tree = expired(&mut app, &ctx, start);
+        assert_eq!(focused(&tree).label(), Some("Get a new code"));
+        app.backend.take_demo_commands();
+        press_key(&mut app, &ctx, Key::Enter, Modifiers::NONE);
+        let asked: Vec<_> = app
+            .backend
+            .take_demo_commands()
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::PairWithPhone(phone) => Some(phone),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(asked, [PHONE]);
+        assert!(app.dialog.is_none());
+
+        // The worker asks, then answers with a new code.
+        app.link = pairing(None);
+        frame_at(&mut app, &ctx, start + 200.0);
+        app.link = pairing(Some("NEWC0DE2"));
+        frame_at(&mut app, &ctx, start + 210.0);
+        let tree = frame_at(&mut app, &ctx, start + 210.0 + 179.9);
+        let (_, field) = named(&tree, "Pairing code").expect("the new code works");
+        assert_eq!(field.value(), Some("NEWC-0DE2"));
+        frame_at(&mut app, &ctx, start + 210.0 + 180.0);
+        let tree = frame_at(&mut app, &ctx, start + 210.0 + 180.1);
+        assert!(named(&tree, "This code expired").is_some());
+    }
+
+    /// A refused code request steps back to the phone number dialog, with
+    /// the number kept and in focus, not to the QR code. Once it is closed,
+    /// a refreshed QR code opens nothing.
+    #[test]
+    fn a_failed_code_request_steps_back_to_the_phone_number() {
+        let (mut app, ctx) = linking("pair");
+        ctx.enable_accesskit();
+        let (backend, _commands, events) = crate::backend::Backend::recording_with_events();
+        app.backend = backend;
+        app.link = pairing(None);
+        app.pair_phone = PHONE.to_owned();
+        render(&mut app, &ctx);
+        assert!(app.dialog.is_none());
+        // As the worker reports a refusal: the error, then the QR code.
+        events
+            .send(Event::Error(
+                "Could not link by phone number: rate limited".into(),
+            ))
+            .unwrap();
+        events.send(Event::Link(qr_again())).unwrap();
+        render(&mut app, &ctx);
+        assert_eq!(app.dialog, Some(Dialog::PairWithPhone));
+        assert_eq!(app.pair_phone, PHONE);
+        let field = focused(&tree(&mut app, &ctx));
+        assert_eq!(field.label(), Some("Phone number"));
+        assert_eq!(field.value(), Some(PHONE));
+
+        press_key(&mut app, &ctx, Key::Escape, Modifiers::NONE);
+        assert!(app.dialog.is_none());
+        events
+            .send(Event::Link(LinkStatus::Unlinked {
+                qr: Some("2@another".into()),
+                pair_code: None,
+                pairing_phone: None,
+            }))
+            .unwrap();
+        render(&mut app, &ctx);
+        assert!(app.dialog.is_none(), "no request was outstanding");
+    }
+}

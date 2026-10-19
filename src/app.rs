@@ -670,6 +670,8 @@ pub struct App {
     /// album reaches messages the transcript has not paged in, so their
     /// progress and their failure have nowhere else to live.
     pub viewer_media_state: HashMap<String, MediaState>,
+    /// Whether the linking QR code fills the window, for a phone camera.
+    pub qr_enlarged: bool,
     /// Message bodies registered for transcript copy formatting.
     pub copy_rows: std::sync::Arc<std::sync::Mutex<Vec<crate::transcript::Row>>>,
     /// Previous message-list rect used by the selection hook.
@@ -1569,6 +1571,7 @@ impl App {
             viewer_media: Vec::new(),
             viewer_media_chat: None,
             viewer_media_state: HashMap::new(),
+            qr_enlarged: false,
             copy_rows: Default::default(),
             selection_view: Default::default(),
             gif_query: String::new(),
@@ -1753,8 +1756,12 @@ impl App {
                     call.group.as_ref().is_some_and(|group| group.link),
                 )
             });
-        let place = if locked || !self.is_linked() {
+        let linking;
+        let place = if locked {
             TitlePlace::Elsewhere
+        } else if !self.is_linked() {
+            linking = self.linking_title();
+            TitlePlace::Screen(&linking)
         } else if let Some((ringing, link)) = call {
             let private = self.call_is_private();
             caller = (!private).then(|| self.call_name());
@@ -1780,8 +1787,16 @@ impl App {
                 .current_chat()
                 .filter(|chat| !chat.locked)
                 .map(|chat| self.chat_title(chat));
-            chat.as_deref()
-                .map_or(TitlePlace::Elsewhere, TitlePlace::Chat)
+            match chat.as_deref() {
+                Some(chat) => TitlePlace::Chat(chat),
+                // Linked, with the chats still on their way from the phone,
+                // as the empty chat list says.
+                None if self.syncing && self.chats.is_empty() => {
+                    linking = crate::i18n::gettext(self.locale, "Loading your chats").into_owned();
+                    TitlePlace::Screen(&linking)
+                }
+                None => TitlePlace::Elsewhere,
+            }
         };
         // A call names the account it is on, which need not be the one on
         // screen.
@@ -1802,6 +1817,32 @@ impl App {
             title.push_str(" Demo");
         }
         title
+    }
+
+    /// What the linking screen is doing, for the window title: a screen
+    /// reader says the title on NVDA+T and when the window comes forward.
+    fn linking_title(&self) -> String {
+        use crate::backend::LinkStatus;
+        let title = if matches!(self.dialog, Some(crate::model::Dialog::PairWithPhone)) {
+            "Link with a phone number"
+        } else {
+            match &self.link {
+                LinkStatus::Unlinked {
+                    pair_code: Some(_), ..
+                } => "Enter the code on your phone",
+                LinkStatus::Unlinked { qr: Some(_), .. }
+                | LinkStatus::LoggedOut
+                | LinkStatus::Failed(_) => "Link your WhatsApp account",
+                // Connected and Disconnected are linked, past this screen:
+                // `window_title` titles the chats' loading.
+                LinkStatus::Starting
+                | LinkStatus::Connecting
+                | LinkStatus::Connected
+                | LinkStatus::Disconnected { .. }
+                | LinkStatus::Unlinked { .. } => "Connecting",
+            }
+        };
+        crate::i18n::gettext(self.locale, title).into_owned()
     }
 
     /// Gives the window its title when what it shows has changed, and only
@@ -2939,6 +2980,8 @@ impl App {
     pub fn attach(&mut self, ctx: &egui::Context) {
         // A window is here, so a hidden start's wait for a panel is over.
         self.tray_wait = None;
+        // A new window shows the QR code in its card, as the first one did.
+        self.qr_enlarged = false;
         // Register transcript copy formatting once per egui context.
         ctx.add_plugin(crate::transcript::CopyAnnotator {
             rows: std::sync::Arc::clone(&self.copy_rows),
@@ -5012,6 +5055,47 @@ impl App {
 
     /// Updates one account's link state, discarding its drafts when it is unlinked.
     fn handle_link(&mut self, status: LinkStatus, live: bool) {
+        // A pairing code is timed from when its account got it, here, on
+        // screen or not (`ui::login`).
+        match &status {
+            LinkStatus::Unlinked {
+                pair_code: Some(code),
+                ..
+            } => {
+                if self
+                    .pair_code_arrived
+                    .as_ref()
+                    .is_none_or(|(seen, _)| seen != code)
+                {
+                    self.pair_code_arrived = Some((code.clone(), Instant::now()));
+                }
+            }
+            _ => self.pair_code_arrived = None,
+        }
+        // A pairing code that failed or was refused goes one step back, to
+        // the number, kept as it was; its error is spoken on its own. The
+        // number's dialog belongs to the window, so only for the account on
+        // screen.
+        let was_pairing = matches!(
+            self.link,
+            LinkStatus::Unlinked {
+                pairing_phone: Some(_),
+                ..
+            }
+        );
+        if live
+            && was_pairing
+            && matches!(
+                status,
+                LinkStatus::Unlinked {
+                    pairing_phone: None,
+                    ..
+                }
+            )
+            && self.dialog.is_none()
+        {
+            self.dialog = Some(Dialog::PairWithPhone);
+        }
         // Only a drop after being connected is news; the startup sequence
         // (Starting, Connecting, Connected) stays silent. An account that is
         // not on screen is never announced.
@@ -9725,8 +9809,16 @@ impl App {
                         "Enter the phone number with its country code, using digits only",
                     );
                 } else {
+                    // The code shows on the screen below: the dialog would
+                    // cover it and keep focus away from it.
+                    self.dialog = None;
                     self.backend.send(Command::PairWithPhone(digits));
                 }
+            }
+            Action::CancelPairing => {
+                // One step back: the number stays, to correct or ask again.
+                self.backend.send(Command::CancelPairing);
+                self.dialog = Some(Dialog::PairWithPhone);
             }
             Action::Unlink => {
                 self.dialog = None;
@@ -12760,6 +12852,62 @@ mod tests {
         app.actions.push(Action::Open(Page::Settings));
         app.apply_actions(&ctx);
         (app, events)
+    }
+
+    /// A pairing code that fails for an account not on screen opens no
+    /// dialog: the number's dialog belongs to the window, and to the account
+    /// on screen, which goes on as it was.
+    #[test]
+    fn a_hidden_accounts_failed_pairing_opens_no_dialog() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, events) =
+            two_accounts_on_settings(directory.path(), "15550007777@s.whatsapp.net");
+        let pairing = LinkStatus::Unlinked {
+            qr: None,
+            pair_code: Some("ABCD1234".into()),
+            pairing_phone: Some("15550001111".into()),
+        };
+        let qr_again = LinkStatus::Unlinked {
+            qr: Some("2@qr".into()),
+            pair_code: None,
+            pairing_phone: None,
+        };
+        app.accounts[1].link = pairing.clone();
+        events.send(Event::Link(qr_again.clone())).unwrap();
+        app.handle_events();
+        assert_eq!(app.accounts[1].link, qr_again);
+        assert!(app.dialog.is_none(), "{:?}", app.dialog);
+        // On screen, it steps back to the number.
+        app.link = pairing;
+        app.handle_link(qr_again, true);
+        assert_eq!(app.dialog, Some(Dialog::PairWithPhone));
+    }
+
+    /// A pairing code is timed from when its account got it: the same code
+    /// again keeps its time, and none clears it.
+    #[test]
+    fn a_pairing_code_is_timed_from_its_arrival() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _events) =
+            App::headless(AppDirs::under(directory.path()), Settings::default());
+        let code = |code: Option<&str>| LinkStatus::Unlinked {
+            qr: None,
+            pair_code: code.map(str::to_owned),
+            pairing_phone: Some("15550001111".into()),
+        };
+        app.handle_link(code(Some("ABCD1234")), false);
+        let (seen, at) = app.pair_code_arrived.clone().expect("timed");
+        assert_eq!(seen, "ABCD1234");
+        app.handle_link(code(Some("ABCD1234")), false);
+        assert_eq!(app.pair_code_arrived, Some((seen, at)), "the same code");
+        app.handle_link(code(Some("EFGH5678")), false);
+        assert!(
+            app.pair_code_arrived
+                .as_ref()
+                .is_some_and(|(seen, _)| seen == "EFGH5678")
+        );
+        app.handle_link(code(None), false);
+        assert!(app.pair_code_arrived.is_none());
     }
 
     #[test]
@@ -25234,7 +25382,34 @@ mod window_title_tests {
         app.page = Page::Chats;
         app.link = LinkStatus::LoggedOut;
         app.chats.clear();
-        assert_eq!(app.window_title(false), "ZapFast", "the linking screen");
+        // The linking screen says what it is doing.
+        assert_eq!(
+            app.window_title(false),
+            "Link your WhatsApp account - ZapFast",
+            "the linking screen"
+        );
+        app.dialog = Some(crate::model::Dialog::PairWithPhone);
+        assert_eq!(
+            app.window_title(false),
+            "Link with a phone number - ZapFast"
+        );
+        app.dialog = None;
+        app.link = LinkStatus::Unlinked {
+            qr: None,
+            pair_code: Some("ABCD1234".into()),
+            pairing_phone: Some("15550001111".into()),
+        };
+        assert_eq!(
+            app.window_title(false),
+            "Enter the code on your phone - ZapFast"
+        );
+        // Linked, with the chats on their way: the title says so, as the
+        // empty chat list does, until they are in.
+        app.link = LinkStatus::Connected;
+        app.syncing = true;
+        assert_eq!(app.window_title(false), "Loading your chats - ZapFast");
+        app.syncing = false;
+        assert_eq!(app.window_title(false), "ZapFast");
     }
 
     /// The lock screen names nothing: no chat, no page, no account.
@@ -25280,7 +25455,11 @@ mod window_title_tests {
         let ctx = egui::Context::default();
         let first = app.account().id.clone();
         app.apply(Action::AddAccount, &ctx);
-        assert_eq!(app.window_title(false), "Account 2 - ZapFast", "linking it");
+        assert_eq!(
+            app.window_title(false),
+            "Connecting - Account 2 - ZapFast",
+            "linking it"
+        );
         app.apply(Action::SwitchAccount(first), &ctx);
         app.link = LinkStatus::Connected;
         assert!(app.has_several_accounts());

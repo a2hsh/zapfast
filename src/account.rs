@@ -24,6 +24,9 @@ pub struct Account {
     pub(crate) settings_dirty: bool,
     pub backend: Backend,
     pub link: LinkStatus,
+    /// The pairing code this account was given, and when: a code is timed
+    /// from then, whether or not a window was there to show it.
+    pub(crate) pair_code_arrived: Option<(String, Instant)>,
     pub syncing: bool,
     pub sync_percent: Option<u32>,
     pub me: Option<String>,
@@ -156,6 +159,7 @@ impl Account {
             settings_dirty: false,
             backend,
             link: LinkStatus::Starting,
+            pair_code_arrived: None,
             syncing: false,
             sync_percent: None,
             me: None,

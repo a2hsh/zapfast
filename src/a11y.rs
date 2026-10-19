@@ -198,8 +198,11 @@ pub enum TitlePlace<'a> {
     Call(Option<&'a str>),
     /// A call joined through a call link, which belongs to no chat.
     CallLink,
-    /// Anywhere else: the chat list with no chat open, the linking screen,
-    /// or a locked chat, whose name stays out of the title.
+    /// A screen named by what it is doing, such as the linking screen's
+    /// "Link your WhatsApp account"; already translated.
+    Screen(&'a str),
+    /// Anywhere else: the chat list with no chat open, or a locked chat,
+    /// whose name stays out of the title.
     Elsewhere,
 }
 
@@ -229,6 +232,7 @@ pub fn window_title(locale: Locale, place: TitlePlace<'_>, account: Option<&str>
         TitlePlace::IncomingCall(_) | TitlePlace::Call(_) | TitlePlace::CallLink => {
             Some(call_heading(locale, place))
         }
+        TitlePlace::Screen(name) => Some(title_text(name)),
         TitlePlace::Elsewhere => None,
     }
     .filter(|place| !place.is_empty());
