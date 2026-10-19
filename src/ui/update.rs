@@ -146,7 +146,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             ui.horizontal(|ui| {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if let Some((label, action)) = action
-                        && theme::soft_button(ui, &palette, None, label, true).clicked()
+                        && theme::soft_action_button(ui, &palette, None, label, true).clicked()
                     {
                         app.actions.push(action);
                     }

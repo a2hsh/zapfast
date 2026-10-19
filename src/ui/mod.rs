@@ -128,6 +128,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     overlay::finish(ctx);
     drop_target(app, ctx);
     toasts(app, ctx);
+    return_focus(app, ctx);
     focus_ring(app, ctx);
     announce(app, ctx);
     window_chrome(app, ui);
@@ -141,6 +142,26 @@ fn list_pane_only(app: &App) -> bool {
         Page::Chats => app.current_chat().is_none(),
         Page::Calls => app.current_chat().is_none() || !app.call_picked(),
         Page::Settings | Page::Wallpaper => false,
+    }
+}
+
+/// Gives focus back to the widget a page change remembered
+/// (`App::return_focus`), such as the gear once Settings close, in the pass
+/// that draws it: AccessKit must never hear of focus on a node missing from
+/// its tree. A widget no pass draws within a few frames is let go, and the
+/// message field takes focus instead, as when nothing was remembered. Each
+/// frame it waits is asked for: an idle window draws none otherwise.
+fn return_focus(app: &mut App, ctx: &egui::Context) {
+    let Some((id, frames)) = app.return_focus.take() else {
+        return;
+    };
+    if ctx.viewport(|viewport| viewport.this_pass.widgets.contains(id)) {
+        ctx.memory_mut(|memory| memory.request_focus(id));
+    } else if frames > 1 {
+        app.return_focus = Some((id, frames - 1));
+        ctx.request_repaint();
+    } else {
+        app.refocus_composer(ctx);
     }
 }
 
@@ -640,7 +661,7 @@ fn banner(app: &mut App, ui: &mut egui::Ui) {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(room.right);
                         if download.is_some() {
-                            if theme::soft_button(
+                            if theme::soft_action_button(
                                 ui,
                                 &palette,
                                 Some(Icon::ExternalLink),
@@ -651,7 +672,7 @@ fn banner(app: &mut App, ui: &mut egui::Ui) {
                             {
                                 app.actions.push(Action::ShowUpdate);
                             }
-                        } else if theme::soft_button(
+                        } else if theme::soft_action_button(
                             ui,
                             &palette,
                             Some(Icon::Refresh),
@@ -836,6 +857,28 @@ fn titlebar_strip(app: &App, ui: &mut egui::Ui) {
 /// platform does (fastframe-titlebar).
 pub fn titlebar_drag(ui: &mut egui::Ui, rect: egui::Rect) {
     fastframe_titlebar::drag(ui, rect);
+    quiet_drag_area(ui);
+}
+
+/// Keeps the window's drag area, where fastframe-titlebar made one in `ui`
+/// (always on macOS; with the drawn title bar elsewhere), out of the
+/// accessibility tree. The crate senses clicks there, which egui exposes as
+/// a focusable node with no name, and a screen reader reached it as
+/// "unknown"; yet only the pointer moves the window from it: no key or
+/// screen reader action does. The crate names the area after `ui`'s id.
+fn quiet_drag_area(ui: &egui::Ui) {
+    let id = ui.id().with("fastframe-titlebar-drag");
+    if !ui
+        .ctx()
+        .viewport(|viewport| viewport.this_pass.widgets.contains(id))
+    {
+        return;
+    }
+    ui.ctx().accesskit_node_builder(id, |node| {
+        node.remove_action(egui::accesskit::Action::Focus);
+        node.remove_action(egui::accesskit::Action::Click);
+        node.set_hidden();
+    });
 }
 
 /// Makes `rect` drag the window while ZapFast draws the title bar, for the
@@ -953,6 +996,42 @@ fn window_chrome(app: &App, ui: &mut egui::Ui) {
 #[cfg(test)]
 mod idle_tests {
     use super::*;
+
+    /// The window's drag area (fastframe-titlebar's, on macOS or under the
+    /// drawn title bar) is no stop for a screen reader: hidden, with no focus
+    /// or click action. The crate draws none in tests off macOS, so this
+    /// senses the area as the crate does. Where it drew none, nothing is
+    /// added to the tree.
+    #[test]
+    fn the_window_drag_area_is_hidden_from_screen_readers() {
+        use egui::accesskit::Action;
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let tree = |drawn: bool| {
+            let mut drag = None;
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let id = ui.id().with("fastframe-titlebar-drag");
+                if drawn {
+                    let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(300.0, 40.0));
+                    ui.interact(rect, id, egui::Sense::click_and_drag());
+                }
+                quiet_drag_area(ui);
+                drag = Some(id.accesskit_id());
+            });
+            output.textures_delta.clear();
+            let tree = output.platform_output.accesskit_update.expect("a tree");
+            let drag = drag.expect("the pass ran");
+            tree.nodes
+                .into_iter()
+                .find(|(id, _)| *id == drag)
+                .map(|(_, node)| node)
+        };
+        let node = tree(true).expect("the area's node");
+        assert!(node.is_hidden());
+        assert!(!node.supports_action(Action::Focus));
+        assert!(!node.supports_action(Action::Click));
+        assert!(tree(false).is_none(), "no node where no area was drawn");
+    }
 
     #[test]
     fn settings_uses_panel_background_not_wallpaper_color() {

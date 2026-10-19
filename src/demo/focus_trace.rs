@@ -621,6 +621,11 @@ fn adding_an_account_from_the_keys_lands_on_its_linking_screen() {
     let from = trace.mark();
     trace.press("Enter", egui::Key::Enter, egui::Modifiers::NONE);
     assert!(trace.app.adding_account);
+    assert!(
+        trace.last().name.ends_with("\"Cancel\""),
+        "{}",
+        trace.last().name
+    );
     trace.assert_clean(from, "adding an account");
     // Focus is on the way back, Cancel: Enter takes it.
     trace.press("Enter", egui::Key::Enter, egui::Modifiers::NONE);
@@ -664,6 +669,11 @@ fn choosing_an_unlinked_account_from_the_keys_lands_on_its_linking_screen() {
     trace.press("Enter", egui::Key::Enter, egui::Modifiers::NONE);
     assert_eq!(trace.app.account().id.as_str(), "2");
     assert!(!trace.app.adding_account);
+    assert!(
+        trace.last().name.ends_with("\"Use another account\""),
+        "{}",
+        trace.dump(from - 1)
+    );
     trace.assert_clean(from, "choosing an unlinked account");
     // Focus is on the way back, "Use another account": Enter opens the
     // switcher with focus in it.
@@ -2698,4 +2708,73 @@ fn alt_3_goes_to_the_first_unread_message() {
         Some("long-250")
     );
     assert!(trace.last().spoken.contains("Unread"));
+}
+
+/// A Settings drop-down is heard once per key, never as the window: Down
+/// on it closed says its new value, Enter opens its list on that value,
+/// the arrows move in the list, and Tab leaves the list, closed and
+/// unchanged, for the next control in the same frame.
+#[test]
+fn a_settings_dropdown_is_heard_once_per_key() {
+    let mut trace = Trace::new(app());
+    super::apply_flags(&mut trace.app, Some("settings"));
+    trace.settle("settings", 3);
+    let font = "ComboBox \"Font\"";
+    trace.press("Ctrl+F", egui::Key::F, egui::Modifiers::COMMAND);
+    for _ in 0..40 {
+        if trace.last().name == font {
+            break;
+        }
+        trace.press("Tab", egui::Key::Tab, egui::Modifiers::NONE);
+    }
+    assert_eq!(trace.last().name, font, "Tab reaches the Font drop-down");
+    let from = trace.mark();
+    trace.press("Down", egui::Key::ArrowDown, egui::Modifiers::NONE);
+    assert_eq!(trace.last().name, font, "{}", trace.dump(from));
+    assert!(trace.last().spoken.contains("Some(\"Inter\")"));
+    trace.press("Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    assert_eq!(trace.last().name, "ListBoxOption \"Inter\"");
+    trace.press("Up", egui::Key::ArrowUp, egui::Modifiers::NONE);
+    assert_eq!(trace.last().name, "ListBoxOption \"System\"");
+    trace.press("Tab", egui::Key::Tab, egui::Modifiers::NONE);
+    let left = trace.last().name.clone();
+    assert!(
+        left != font && !left.starts_with("ListBoxOption"),
+        "Tab moves on: {left}\n{}",
+        trace.dump(from)
+    );
+    assert_eq!(trace.app.settings.font, crate::settings::FontChoice::Inter);
+    trace.assert_clean(from, "a Settings drop-down from the keys");
+}
+
+/// A privacy drop-down writes to the phone, which the demo never confirms:
+/// Down on it is heard once, as its new value, and focus stays on it while
+/// the write is pending rather than falling to the window.
+#[test]
+fn a_saving_privacy_dropdown_keeps_focus() {
+    let mut trace = Trace::new(app());
+    super::apply_flags(&mut trace.app, Some("settings"));
+    trace.settle("settings", 3);
+    let profile = "ComboBox \"Profile photo\"";
+    trace.press("Ctrl+F", egui::Key::F, egui::Modifiers::COMMAND);
+    for _ in 0..150 {
+        if trace.last().name == profile {
+            break;
+        }
+        trace.press("Tab", egui::Key::Tab, egui::Modifiers::NONE);
+    }
+    assert_eq!(trace.last().name, profile, "Tab reaches Profile photo");
+    let from = trace.mark();
+    trace.press("Down", egui::Key::ArrowDown, egui::Modifiers::NONE);
+    trace.settle("saving", 6);
+    assert!(
+        trace
+            .app
+            .account_privacy
+            .pending(crate::privacy::PrivacyKind::Profile)
+    );
+    assert_eq!(trace.last().name, profile, "{}", trace.dump(from));
+    trace.press("Down", egui::Key::ArrowDown, egui::Modifiers::NONE);
+    assert_eq!(trace.last().name, profile);
+    trace.assert_clean(from, "a privacy drop-down while it saves");
 }

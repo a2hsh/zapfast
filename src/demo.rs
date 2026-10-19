@@ -1956,6 +1956,233 @@ fn starred_sample(app: &mut App, menu: Option<&str>) {
     app.open_list_menu = menu.map(|id| (chat, id.to_owned()));
 }
 
+/// Every page `apply_flags` draws, besides a sample chat's id and the
+/// `theme=` and `settings-search=` choices. A page must be listed here to be
+/// drawn at all, so the tests that walk every page, such as the screen
+/// reader name audit, cannot miss a new one.
+pub const DEMO_PAGES: &[&str] = &[
+    "chat",
+    "phone-menu",
+    "chat-menu",
+    "chat-header-menu",
+    "interactive-actions",
+    "interactive-list",
+    "interactive-list-dialog",
+    "carousel",
+    "carousel-pair",
+    "poll-empty",
+    "poll-voted",
+    "poll-results",
+    "photos",
+    "bubbles",
+    "drafts",
+    "attachment-draft-away",
+    "attachment-draft-return",
+    "video",
+    "video-playing",
+    "video-expanded",
+    "shared-contact",
+    "note-playing",
+    "interactive",
+    "interactive-media",
+    "empty",
+    "channel",
+    "meta-ai",
+    "locked",
+    "locked-prompt",
+    "locked-setup",
+    "app-lock",
+    "app-lock-wrong",
+    "app-lock-forgot",
+    "app-lock-settings",
+    "app-lock-setup",
+    "new-chat",
+    "unnamed-group",
+    "locked-open",
+    "keyring",
+    "message-info",
+    "message-info-unknown",
+    "message-info-partial",
+    "message-info-direct",
+    "receipts-off",
+    "receipts-played",
+    "motion",
+    "motion-playing",
+    "motion-preview",
+    "disappearing",
+    "disappearing-direct",
+    "disappearing-off",
+    "arabic-reply",
+    "rtl",
+    "rtl-self",
+    "settings",
+    "wallpaper",
+    "wallpaper-image",
+    "omarchy",
+    "omarchy-light",
+    "themes",
+    "update",
+    "update-downloading",
+    "update-ready",
+    "update-failed",
+    "update-managed",
+    "poll",
+    "poll-create",
+    "shortcuts",
+    "about",
+    "failed",
+    "info",
+    "group-info",
+    "group-info-rename",
+    "group-info-locked",
+    "group-info-saving",
+    "forward",
+    "unlink",
+    "leave-group",
+    "left-group",
+    "leave-channel",
+    "toasts",
+    "delete-chat",
+    "clear-chat",
+    "select",
+    "quotes",
+    "quote-jump",
+    "unread-divider",
+    "invite",
+    "delete-message",
+    "delete-message-mine",
+    "new-contact",
+    "accounts",
+    "accounts-closed",
+    "account-menu",
+    "light",
+    "login",
+    "pair",
+    "phone",
+    "offline",
+    "syncing",
+    "live",
+    "live-phone",
+    "typing",
+    "composer-tools",
+    "mention",
+    "mention-everyone",
+    "emoji-complete",
+    "reply",
+    "edit",
+    "scrolled",
+    "reactions",
+    "unsent-voice",
+    "typers",
+    "nosidebar",
+    "rail",
+    "wide",
+    "search",
+    "voice",
+    "recording",
+    "preview",
+    "compose-emoji",
+    "staged",
+    "archived",
+    "labels",
+    "label-chips",
+    "label-filter",
+    "labels-dialog",
+    "chat-search",
+    "chat-search-rtl",
+    "chat-search-day",
+    "unread",
+    "private",
+    "favorites",
+    "groups",
+    "picker",
+    "stickers",
+    "sticker-favorites",
+    "sticker-received",
+    "sticker-pack",
+    "sticker-search",
+    "sticker-animated",
+    "sticker-add",
+    "sticker-maker",
+    "sticker-pack-message",
+    "sticker-pack-view",
+    "gifs",
+    "gifs-badkey",
+    "voice-menu",
+    "react-menu",
+    "react-picker",
+    "react-picker-empty",
+    "react-custom",
+    "react-other",
+    "history-date",
+    "short-chat",
+    "carousel-viewer",
+    "motion-viewer",
+    "media-album",
+    "media-album-failed",
+    "media-album-partial",
+    "media-album-oversized",
+    "media-album-midnight",
+    "media-album-before",
+    "call",
+    "call-active",
+    "call-outgoing",
+    "call-connecting",
+    "call-failed",
+    "call-devices",
+    "call-ended",
+    "call-strip",
+    "call-group",
+    "call-group-active",
+    "call-group-video",
+    "call-group-muted",
+    "call-link",
+    "call-entries",
+    "calls",
+    "calls-chat",
+    "calls-info",
+    "calls-missed",
+    "calls-missed-none",
+    "calls-link",
+    "new-call",
+    "call-video",
+    "call-video-incoming",
+    "call-video-off",
+    "location",
+    "info-media",
+    "info-docs",
+    "info-links",
+    "forward-selected",
+    "forward-review",
+    "forward-full",
+    "forward-once",
+    "clear-media",
+    "remove-pack",
+    "select-delete",
+    "delete-selection",
+    "new-contact-number",
+    "pinned",
+    "messages",
+    "messages-light",
+    "private-reply",
+    "private-reply-menu",
+    "private-reply-locked-source",
+    "audio-types",
+    "forward-portuguese",
+    "crop",
+    "sticker-view",
+    "starred",
+    "star-menu",
+];
+
+/// Whether `apply_flags` takes `part`: a listed page, a choice, or nothing.
+fn listed_page(part: &str) -> bool {
+    part.is_empty()
+        || DEMO_PAGES.contains(&part)
+        || part.starts_with("theme=")
+        || part.starts_with("settings-search=")
+}
+
 /// Configures synthetic offline demo states and appearance for tests and screenshots.
 /// Audio fixtures vary voice-note and forwarding metadata independently without playback.
 pub fn apply_flags(app: &mut App, page: Option<&str>) {
@@ -1963,6 +2190,12 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
         return;
     };
     for part in page.split(',').map(str::trim) {
+        // An unlisted page is not drawn: listing it is what puts it in
+        // every test that walks the pages.
+        if !listed_page(part) && app.chat(part).is_none() {
+            log::warn!("unknown demo page {part}");
+            continue;
+        }
         match part {
             "history-date" => history_date_sample(app),
             "chat" | "" => {}
@@ -6318,6 +6551,43 @@ mod tests {
             ctx.memory_mut(|memory| memory.request_focus(control));
             render(&mut app, &ctx);
             assert_ne!(ctx.memory(|memory| memory.focused()), Some(control));
+        }
+    }
+
+    /// A reaction chip says what its click does with its emoji, then how
+    /// many reacted and who, the reader as "You"; its text still shows the
+    /// emoji and the count.
+    #[test]
+    fn reaction_chips_say_the_emoji_the_count_and_who() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let chat = app.open_chat.clone().unwrap();
+        let title = app.chat_title(app.chat(&chat).unwrap());
+        let reaction = |sender: &str, from_me: bool, emoji: &str| crate::model::Reaction {
+            sender: sender.to_owned(),
+            from_me,
+            emoji: emoji.to_owned(),
+        };
+        let newest = app
+            .conversations
+            .get_mut(&chat)
+            .unwrap()
+            .messages
+            .last_mut()
+            .unwrap();
+        newest.reactions = vec![
+            reaction(&chat, false, "👍"),
+            reaction(ME, true, "👍"),
+            reaction(&chat, false, "😂"),
+        ];
+        let labels = accessible_labels(&mut app, &ctx);
+        for expected in [
+            format!("Remove your reaction 👍, 2 reactions: {title}, You"),
+            format!("React with 😂, 1 reaction: {title}"),
+        ] {
+            assert!(labels.contains(&expected), "{expected}: {labels:?}");
         }
     }
 
@@ -11741,6 +12011,62 @@ mod tests {
         assert!(!leaks(&labels).is_empty());
     }
 
+    /// Every page `apply_flags` has an arm for is listed in `DEMO_PAGES`. An
+    /// unlisted page is never drawn, so one added upstream would otherwise
+    /// drop out of the demo and of every test that walks the pages.
+    #[test]
+    fn every_page_apply_flags_knows_is_listed() {
+        let source = include_str!("demo.rs");
+        let start = source.find("pub fn apply_flags(").expect("apply_flags");
+        let mut missing = Vec::new();
+        // Nothing but pages: `"a" | "b"`.
+        let pages_only = |text: &str| {
+            text.split(" | ").all(|page| {
+                page.len() > 2
+                    && page.starts_with('"')
+                    && page.ends_with('"')
+                    && page[1..page.len() - 1]
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-')
+            })
+        };
+        // An arm's pages can run over several lines, each line after the
+        // first starting with "| ": these are the pages of its lines so far.
+        let mut arm_start = String::new();
+        for line in source[start..].lines().skip(1) {
+            let line = line.trim_end_matches('\r');
+            if line == "}" {
+                break;
+            }
+            let text = line.trim();
+            let continued = text.strip_prefix("| ");
+            let Some((arm, _)) = text.split_once(" =>") else {
+                let pages = continued.unwrap_or(text);
+                if (continued.is_some() || arm_start.is_empty()) && pages_only(pages) {
+                    arm_start.push_str(pages);
+                    arm_start.push_str(" | ");
+                } else {
+                    arm_start.clear();
+                }
+                continue;
+            };
+            let arm = match arm.strip_prefix("| ") {
+                Some(rest) if !arm_start.is_empty() => format!("{arm_start}{rest}"),
+                _ => arm.to_owned(),
+            };
+            arm_start.clear();
+            if !arm.starts_with('"') {
+                continue;
+            }
+            for page in arm.split(" | ").map(|page| page.trim_matches('"')) {
+                if !page.is_empty() && !DEMO_PAGES.contains(&page) {
+                    missing.push(page.to_owned());
+                }
+            }
+        }
+        assert!(missing.is_empty(), "not in DEMO_PAGES: {missing:?}");
+    }
+
     /// Lays out each synthetic demo screen and checks that its controls fit the visible surface.
     #[test]
     fn keeping_a_crop_stages_the_cropped_picture_and_remembers_its_original() {
@@ -12001,219 +12327,7 @@ mod tests {
             apply_flags(&mut app, Some(id));
             render(&mut app, &ctx);
         }
-        for page in [
-            "chat-menu",
-            "chat-header-menu",
-            "channel",
-            "meta-ai",
-            "locked",
-            "locked-open",
-            "locked-prompt",
-            "locked-setup",
-            "app-lock",
-            "app-lock-wrong",
-            "app-lock-forgot",
-            "app-lock-settings",
-            "app-lock-setup",
-            "new-chat",
-            "new-contact-number",
-            "carousel-viewer",
-            "media-album",
-            "media-album-before",
-            "media-album-oversized",
-            "media-album-oversized,light",
-            "media-album-midnight",
-            "media-album-midnight,light",
-            "unnamed-group",
-            "keyring",
-            "interactive",
-            "interactive-actions",
-            "interactive-media",
-            "interactive-list",
-            "interactive-list-dialog",
-            "carousel",
-            "carousel-pair",
-            "poll-empty",
-            "poll-voted",
-            "poll-results",
-            "message-info",
-            "message-info-unknown",
-            "message-info-partial",
-            "message-info-direct",
-            "motion",
-            "motion-playing",
-            "motion-preview",
-            "motion-viewer",
-            "video",
-            "video-playing",
-            "video-expanded",
-            "shared-contact",
-            "note-playing",
-            "empty",
-            "rtl",
-            "disappearing",
-            "disappearing-direct",
-            "disappearing-off",
-            "disappearing,group-info",
-            "disappearing-direct,info",
-            "disappearing-off,info",
-            "settings",
-            "settings-search=Notifications",
-            "settings-search=System",
-            "settings-search=Storage",
-            "clear-media",
-            "wallpaper",
-            "wallpaper,light",
-            "wallpaper,wallpaper-image",
-            "wallpaper,wallpaper-image,light",
-            "wallpaper,theme=Nord.json",
-            "wallpaper-image",
-            "update",
-            "update-downloading",
-            "update-ready",
-            "update-failed",
-            "update-managed",
-            "themes",
-            "settings,omarchy",
-            "settings,omarchy-light",
-            "poll",
-            "poll-create",
-            "theme=Catppuccin.json",
-            "theme=Catppuccin Latte.json",
-            "theme=Nord.json",
-            "theme=Ristretto.json",
-            "theme=Rose Pine.json",
-            "theme=Rose Pine Moon.json",
-            "theme=Rose Pine Dawn.json",
-            "theme=Tokyo Night.json",
-            "shortcuts",
-            "about",
-            "failed",
-            "info",
-            "info-media",
-            "info-docs",
-            "info-links",
-            "group-info",
-            "group-info-rename",
-            "group-info-locked",
-            "group-info-saving",
-            "forward",
-            "forward-selected",
-            "forward-review",
-            "forward-full",
-            "forward-once",
-            "unlink",
-            "leave-group",
-            "left-group",
-            "leave-channel",
-            "toasts",
-            "delete-chat",
-            "clear-chat",
-            "invite",
-            "unread-divider",
-            "quotes",
-            "quote-jump",
-            "select",
-            "delete-message",
-            "delete-message-mine",
-            "remove-pack",
-            "delete-selection",
-            "select-delete",
-            "new-contact",
-            "accounts",
-            "accounts,light",
-            "accounts-closed",
-            "account-menu",
-            "light",
-            "archived",
-            "chat-search",
-            "chat-search-day",
-            "chat-search-rtl",
-            "unread",
-            "private",
-            "favorites",
-            "groups",
-            "offline",
-            "syncing",
-            "picker",
-            "stickers",
-            "sticker-favorites",
-            "sticker-received",
-            "sticker-pack",
-            "sticker-search",
-            "sticker-animated",
-            "sticker-add",
-            "sticker-view",
-            "sticker-pack-message",
-            "sticker-maker",
-            "sticker-pack-view",
-            "typing",
-            "composer-tools",
-            "mention",
-            "mention-everyone",
-            "emoji-complete",
-            "reply",
-            "private-reply",
-            "private-reply,light",
-            "private-reply-menu",
-            "private-reply-menu,light",
-            "private-reply-locked-source",
-            "private-reply-locked-source,light",
-            "edit",
-            "unsent-voice",
-            "scrolled",
-            "reactions",
-            "typers",
-            "nosidebar",
-            "wide",
-            "rail",
-            "search",
-            "forward-portuguese",
-            "staged",
-            "attachment-draft-away",
-            "attachment-draft-return",
-            "crop",
-            "compose-emoji",
-            "voice",
-            "voice,voice-menu",
-            "recording",
-            "preview",
-            "gifs",
-            "gifs-badkey",
-            "react-menu",
-            "starred",
-            "star-menu",
-            "react-picker",
-            "react-picker-empty",
-            "react-custom",
-            "react-other",
-            "calls",
-            "calls-chat",
-            "calls-info",
-            "calls-missed",
-            "calls-missed-none",
-            "new-call",
-            "call-entries",
-            "call",
-            "call-active",
-            "call-outgoing",
-            "call-connecting",
-            "call-failed",
-            "call-devices",
-            "call-ended",
-            "call-strip",
-            "call-group",
-            "call-group-active",
-            "call-group-video",
-            "call-group-muted",
-            "call-link",
-            "calls-link",
-            "call-video",
-            "call-video,light",
-            "call-video-incoming",
-            "call-video-off",
-            "pinned",
-        ] {
+        for page in SURFACES {
             let mut app = self::app();
             apply_flags(&mut app, Some(page));
             render(&mut app, &ctx);
@@ -12497,6 +12611,486 @@ mod tests {
             assert_eq!(room, crate::ui::CaptionRoom::default());
         });
         output.textures_delta.clear();
+    }
+
+    /// The pages the layout test draws beyond the sample chats, some of them
+    /// mixed (`wallpaper,light`); the name audit draws these and every page
+    /// of `DEMO_PAGES`.
+    const SURFACES: &[&str] = &[
+        "chat-menu",
+        "chat-header-menu",
+        "channel",
+        "meta-ai",
+        "locked",
+        "locked-open",
+        "locked-prompt",
+        "locked-setup",
+        "app-lock",
+        "app-lock-wrong",
+        "app-lock-forgot",
+        "app-lock-settings",
+        "app-lock-setup",
+        "new-chat",
+        "new-contact-number",
+        "carousel-viewer",
+        "media-album",
+        "media-album-before",
+        "media-album-oversized",
+        "media-album-oversized,light",
+        "media-album-midnight",
+        "media-album-midnight,light",
+        "unnamed-group",
+        "keyring",
+        "interactive",
+        "interactive-actions",
+        "interactive-media",
+        "interactive-list",
+        "interactive-list-dialog",
+        "carousel",
+        "carousel-pair",
+        "poll-empty",
+        "poll-voted",
+        "poll-results",
+        "message-info",
+        "message-info-unknown",
+        "message-info-partial",
+        "message-info-direct",
+        "motion",
+        "motion-playing",
+        "motion-preview",
+        "motion-viewer",
+        "video",
+        "video-playing",
+        "video-expanded",
+        "shared-contact",
+        "note-playing",
+        "empty",
+        "rtl",
+        "disappearing",
+        "disappearing-direct",
+        "disappearing-off",
+        "disappearing,group-info",
+        "disappearing-direct,info",
+        "disappearing-off,info",
+        "settings",
+        "settings-search=Notifications",
+        "settings-search=System",
+        "settings-search=Storage",
+        "clear-media",
+        "wallpaper",
+        "wallpaper,light",
+        "wallpaper,wallpaper-image",
+        "wallpaper,wallpaper-image,light",
+        "wallpaper,theme=Nord.json",
+        "wallpaper-image",
+        "update",
+        "update-downloading",
+        "update-ready",
+        "update-failed",
+        "update-managed",
+        "themes",
+        "settings,omarchy",
+        "settings,omarchy-light",
+        "poll",
+        "poll-create",
+        "theme=Catppuccin.json",
+        "theme=Catppuccin Latte.json",
+        "theme=Nord.json",
+        "theme=Ristretto.json",
+        "theme=Rose Pine.json",
+        "theme=Rose Pine Moon.json",
+        "theme=Rose Pine Dawn.json",
+        "theme=Tokyo Night.json",
+        "shortcuts",
+        "about",
+        "failed",
+        "info",
+        "info-media",
+        "info-docs",
+        "info-links",
+        "group-info",
+        "group-info-rename",
+        "group-info-locked",
+        "group-info-saving",
+        "forward",
+        "forward-selected",
+        "forward-review",
+        "forward-full",
+        "forward-once",
+        "unlink",
+        "leave-group",
+        "left-group",
+        "leave-channel",
+        "toasts",
+        "delete-chat",
+        "clear-chat",
+        "invite",
+        "unread-divider",
+        "quotes",
+        "quote-jump",
+        "select",
+        "delete-message",
+        "delete-message-mine",
+        "remove-pack",
+        "delete-selection",
+        "select-delete",
+        "new-contact",
+        "accounts",
+        "accounts,light",
+        "accounts-closed",
+        "account-menu",
+        "light",
+        "archived",
+        "chat-search",
+        "chat-search-day",
+        "chat-search-rtl",
+        "unread",
+        "private",
+        "favorites",
+        "groups",
+        "offline",
+        "syncing",
+        "picker",
+        "stickers",
+        "sticker-favorites",
+        "sticker-received",
+        "sticker-pack",
+        "sticker-search",
+        "sticker-animated",
+        "sticker-add",
+        "sticker-view",
+        "sticker-pack-message",
+        "sticker-maker",
+        "sticker-pack-view",
+        "typing",
+        "composer-tools",
+        "mention",
+        "mention-everyone",
+        "emoji-complete",
+        "reply",
+        "private-reply",
+        "private-reply,light",
+        "private-reply-menu",
+        "private-reply-menu,light",
+        "private-reply-locked-source",
+        "private-reply-locked-source,light",
+        "edit",
+        "unsent-voice",
+        "scrolled",
+        "reactions",
+        "typers",
+        "nosidebar",
+        "wide",
+        "rail",
+        "search",
+        "forward-portuguese",
+        "staged",
+        "attachment-draft-away",
+        "attachment-draft-return",
+        "crop",
+        "compose-emoji",
+        "voice",
+        "voice,voice-menu",
+        "recording",
+        "preview",
+        "gifs",
+        "gifs-badkey",
+        "react-menu",
+        "starred",
+        "star-menu",
+        "react-picker",
+        "react-picker-empty",
+        "react-custom",
+        "react-other",
+        "calls",
+        "calls-chat",
+        "calls-info",
+        "calls-missed",
+        "calls-missed-none",
+        "new-call",
+        "call-entries",
+        "call",
+        "call-active",
+        "call-outgoing",
+        "call-connecting",
+        "call-failed",
+        "call-devices",
+        "call-ended",
+        "call-strip",
+        "call-group",
+        "call-group-active",
+        "call-group-video",
+        "call-group-muted",
+        "call-link",
+        "calls-link",
+        "call-video",
+        "call-video,light",
+        "call-video-incoming",
+        "call-video-off",
+        "pinned",
+    ];
+
+    /// Roles a screen reader announces as something to operate: each needs a
+    /// name, or NVDA says only "unknown" or the bare role.
+    const CONTROL_ROLES: &[egui::accesskit::Role] = {
+        use egui::accesskit::Role;
+        &[
+            Role::Button,
+            Role::DefaultButton,
+            Role::Link,
+            Role::CheckBox,
+            Role::RadioButton,
+            Role::Switch,
+            Role::ComboBox,
+            Role::EditableComboBox,
+            Role::Slider,
+            Role::SpinButton,
+            Role::TextInput,
+            Role::MultilineTextInput,
+            Role::SearchInput,
+            Role::PasswordInput,
+            Role::MenuItem,
+            Role::MenuItemCheckBox,
+            Role::MenuItemRadio,
+            Role::ListBoxOption,
+            Role::MenuListOption,
+            Role::Tab,
+            Role::TreeItem,
+            Role::ColorWell,
+        ]
+    };
+
+    /// Nodes that a screen reader reaches without a name: focusable ones and
+    /// controls whose label is empty and that no other node labels. Each
+    /// entry names the role, the node, and the nearest named ancestor, so a
+    /// failure says where to look.
+    fn unnamed_controls(tree: &egui::accesskit::TreeUpdate) -> Vec<String> {
+        use egui::accesskit::{Action, Node, NodeId, Role};
+        let nodes: HashMap<NodeId, &Node> =
+            tree.nodes.iter().map(|(id, node)| (*id, node)).collect();
+        let mut parents = HashMap::new();
+        for (id, node) in &tree.nodes {
+            for child in node.children() {
+                parents.insert(*child, *id);
+            }
+        }
+        let text = |node: &Node| {
+            node.label()
+                .or_else(|| (node.role() == Role::Label).then(|| node.value()).flatten())
+                .is_some_and(|text| !text.trim().is_empty())
+        };
+        let named = |node: &Node| {
+            text(node)
+                || node
+                    .labelled_by()
+                    .iter()
+                    .any(|id| nodes.get(id).is_some_and(|label| text(label)))
+        };
+        let mut found = Vec::new();
+        for (id, node) in &tree.nodes {
+            let reached =
+                node.supports_action(Action::Focus) || CONTROL_ROLES.contains(&node.role());
+            if !reached || named(node) {
+                continue;
+            }
+            let mut ancestor = parents.get(id).copied();
+            let mut context = String::from("(no named ancestor)");
+            while let Some(parent) = ancestor {
+                if let Some(label) = nodes[&parent].label().filter(|label| !label.is_empty()) {
+                    context = format!("{:?} {label:?}", nodes[&parent].role());
+                    break;
+                }
+                ancestor = parents.get(&parent).copied();
+            }
+            let bounds = node
+                .bounds()
+                .map(|rect| {
+                    format!(
+                        " at ({:.0}, {:.0})-({:.0}, {:.0})",
+                        rect.x0, rect.y0, rect.x1, rect.y1
+                    )
+                })
+                .unwrap_or_default();
+            // A container's first child often says what it holds.
+            let first_child = node
+                .children()
+                .first()
+                .and_then(|child| nodes.get(child))
+                .map(|child| format!(", holding {:?} {:?}", child.role(), child.label()))
+                .unwrap_or_default();
+            found.push(format!(
+                "{:?} node {}{bounds}{first_child}, in {context}",
+                node.role(),
+                id.0
+            ));
+        }
+        found
+    }
+
+    /// The accessibility tree of `page` as drawn in the dark theme, after the
+    /// frames it takes to settle, in `ctx`, which pages share as the layout
+    /// test's do.
+    fn page_tree(ctx: &egui::Context, page: &str) -> egui::accesskit::TreeUpdate {
+        let mut app = self::app();
+        app.attach(ctx);
+        apply_flags(&mut app, Some(page));
+        render(&mut app, ctx);
+        settings_access_tests::tree(&mut app, ctx)
+    }
+
+    /// No demo page leaves a screen reader on a control without a name:
+    /// every focusable node, and every node that is a control, says what it
+    /// is. egui's fallback Tab order reaches anything focusable, so an
+    /// unnamed one is read as "unknown" (the reader's finding F10b).
+    #[test]
+    fn every_control_on_every_page_has_a_name() {
+        // Every page `apply_flags` draws, then the layout test's mixes of
+        // them, such as a page in the light theme.
+        let mut pages: Vec<&str> = sample_ids();
+        pages.extend_from_slice(DEMO_PAGES);
+        pages.extend(SURFACES.iter().filter(|page| !DEMO_PAGES.contains(page)));
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut failures = Vec::new();
+        for page in pages {
+            for unnamed in unnamed_controls(&page_tree(&ctx, page)) {
+                failures.push(format!("{page}: {unnamed}"));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// No text field on any page repeats its name as its placeholder: egui
+    /// gives a field its hint as the placeholder, and a screen reader reads
+    /// the name, then the placeholder ("Type a message to Ada, edit, Type a
+    /// message"). A hint that says more than the name, such as a sample
+    /// number, stays.
+    #[test]
+    fn no_field_repeats_its_name_as_its_placeholder() {
+        use egui::accesskit::Role;
+        let mut pages: Vec<&str> = sample_ids();
+        pages.extend_from_slice(DEMO_PAGES);
+        pages.extend(SURFACES.iter().filter(|page| !DEMO_PAGES.contains(page)));
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut failures = Vec::new();
+        let mut kept = Vec::new();
+        for page in pages {
+            let tree = page_tree(&ctx, page);
+            for (_, node) in &tree.nodes {
+                if !matches!(
+                    node.role(),
+                    Role::TextInput
+                        | Role::MultilineTextInput
+                        | Role::PasswordInput
+                        | Role::SearchInput
+                ) {
+                    continue;
+                }
+                // An empty placeholder, as egui gives a field with no hint,
+                // says nothing.
+                let (Some(label), Some(placeholder)) = (
+                    node.label(),
+                    node.placeholder().filter(|text| !text.trim().is_empty()),
+                ) else {
+                    continue;
+                };
+                if label.to_lowercase().contains(&placeholder.to_lowercase()) {
+                    failures.push(format!(
+                        "{page}: {label:?} with placeholder {placeholder:?}"
+                    ));
+                } else {
+                    kept.push(placeholder.to_owned());
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+        // The new contact's sample number says how to write it.
+        assert!(kept.iter().any(|kept| kept == "15551234567"), "{kept:?}");
+    }
+
+    /// Menus opened from the keyboard name every control too: the message
+    /// menu with its keyboard-only rows, on a plain chat and on a card's
+    /// buttons, and the chat menu with a submenu open. The pages above draw
+    /// the pointer's menus. The submenu's background passes because it is
+    /// named (`widgets::submenu`), not because it is gone: egui gives it a
+    /// focusable sense there is no way to change.
+    #[test]
+    fn every_control_in_an_open_menu_has_a_name() {
+        let mut failures = Vec::new();
+        for page in ["chat", "interactive-actions"] {
+            let mut app = self::app();
+            let ctx = egui::Context::default();
+            app.attach(&ctx);
+            ctx.enable_accesskit();
+            apply_flags(&mut app, Some(page));
+            open_menu_by_keys(&mut app, &ctx);
+            let tree = settings_access_tests::tree(&mut app, &ctx);
+            for unnamed in unnamed_controls(&tree) {
+                failures.push(format!("{page}, message menu: {unnamed}"));
+            }
+        }
+        let mut app = self::app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        ctx.enable_accesskit();
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        press_key(&mut app, &ctx, egui::Key::F10, egui::Modifiers::SHIFT);
+        walk_menu_to(&mut app, &ctx, "Notification sound");
+        press_key(&mut app, &ctx, egui::Key::ArrowRight, egui::Modifiers::NONE);
+        let tree = settings_access_tests::tree(&mut app, &ctx);
+        for unnamed in unnamed_controls(&tree) {
+            failures.push(format!("chat menu, submenu: {unnamed}"));
+        }
+        // The chat header's More and the composer's plus, opened from the
+        // keys, offline too, where Clear chat is reached though unavailable.
+        for (menu, toolbar, last, offline) in [
+            (
+                "header menu",
+                crate::ui::conversation::header_toolbar_id(),
+                true,
+                false,
+            ),
+            (
+                "header menu, offline",
+                crate::ui::conversation::header_toolbar_id(),
+                true,
+                true,
+            ),
+            (
+                "attach menu",
+                crate::ui::conversation::composer_toolbar_id(),
+                false,
+                false,
+            ),
+        ] {
+            let mut app = self::app();
+            if offline {
+                app.link = LinkStatus::Connecting;
+            }
+            let ctx = egui::Context::default();
+            app.attach(&ctx);
+            ctx.enable_accesskit();
+            render(&mut app, &ctx);
+            let buttons = crate::ui::toolbar::buttons(&ctx, toolbar);
+            let button = if last {
+                buttons.last()
+            } else {
+                buttons.first()
+            };
+            let button = *button.expect("the toolbar is drawn");
+            ctx.data_mut(|data| data.insert_temp(crate::theme::keyboard_focus_id(), true));
+            ctx.memory_mut(|memory| memory.request_focus(button));
+            render(&mut app, &ctx);
+            press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+            assert!(egui::Popup::is_any_open(&ctx), "{menu} is open");
+            let tree = settings_access_tests::tree(&mut app, &ctx);
+            for unnamed in unnamed_controls(&tree) {
+                failures.push(format!("{menu}: {unnamed}"));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[test]
@@ -26573,5 +27167,944 @@ mod rail_tests {
         assert_eq!(app.page, Page::Calls);
         assert!(app.open_chat.is_none());
         assert!(rail_rect(&ctx).is_some() && list_header(&ctx).is_some());
+    }
+}
+
+/// The Settings page with a screen reader and the keyboard: what each
+/// control says, and where focus goes.
+#[cfg(test)]
+mod settings_access_tests {
+    use super::tests::{app, press_key, render};
+    use super::*;
+    use egui::accesskit::{Action, ActionRequest, Node, NodeId, Role, Toggled, TreeId, TreeUpdate};
+
+    fn frame(app: &mut App, ctx: &egui::Context, events: Vec<egui::Event>) -> TreeUpdate {
+        ctx.enable_accesskit();
+        input_frame(app, ctx, events)
+            .platform_output
+            .accesskit_update
+            .expect("accessibility tree")
+    }
+
+    /// One frame with `events`, leaving AccessKit as it is.
+    fn input_frame(
+        app: &mut App,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 780.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                let ctx = ui.ctx().clone();
+                app.background_frame(&ctx);
+                app.frame_ui(ui);
+            },
+        );
+        output.textures_delta.clear();
+        output
+    }
+
+    pub(super) fn tree(app: &mut App, ctx: &egui::Context) -> TreeUpdate {
+        frame(app, ctx, Vec::new())
+    }
+
+    fn find(tree: &TreeUpdate, role: Role, label: &str) -> Option<(NodeId, Node)> {
+        tree.nodes
+            .iter()
+            .find(|(_, node)| node.role() == role && node.label() == Some(label))
+            .map(|(id, node)| (*id, node.clone()))
+    }
+
+    fn node(tree: &TreeUpdate, id: NodeId) -> Node {
+        tree.nodes
+            .iter()
+            .find(|(found, _)| *found == id)
+            .map(|(_, node)| node.clone())
+            .expect("the node is in the tree")
+    }
+
+    fn focused(tree: &TreeUpdate) -> Node {
+        node(tree, tree.focus)
+    }
+
+    /// Every node under `id`, at any depth.
+    fn descendants(tree: &TreeUpdate, id: NodeId) -> Vec<Node> {
+        let mut found = Vec::new();
+        let mut stack = node(tree, id).children().to_vec();
+        while let Some(child) = stack.pop() {
+            let child = node(tree, child);
+            stack.extend_from_slice(child.children());
+            found.push(child);
+        }
+        found
+    }
+
+    /// Focus moved to `id` as a screen reader moves it, then frames to settle.
+    fn focus(app: &mut App, ctx: &egui::Context, id: NodeId) {
+        frame(
+            app,
+            ctx,
+            vec![egui::Event::AccessKitActionRequest(ActionRequest {
+                action: Action::Focus,
+                target_tree: TreeId::ROOT,
+                target_node: id,
+                data: None,
+            })],
+        );
+        render(app, ctx);
+    }
+
+    fn key(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    fn settings(flag: &str) -> (App, egui::Context) {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        apply_flags(&mut app, Some(flag));
+        render(&mut app, &ctx);
+        (app, ctx)
+    }
+
+    fn spoke(app: &App, text: &str) -> bool {
+        app.announcer
+            .spoken()
+            .iter()
+            .any(|spoken| spoken.trim_end_matches('\u{200B}') == text)
+    }
+
+    #[test]
+    fn a_switch_reads_its_name_state_and_description_and_space_flips_it() {
+        let (mut app, ctx) = settings("settings");
+        assert!(app.settings.enter_sends);
+        let (id, switch) =
+            find(&tree(&mut app, &ctx), Role::CheckBox, "Enter sends").expect("the switch");
+        assert_eq!(switch.toggled(), Some(Toggled::True));
+        // The description names the keys as the platform does: Command
+        // on macOS.
+        let description = crate::ui::keys::label("When off, Ctrl+Enter sends.");
+        assert_eq!(switch.description(), Some(description.as_str()));
+        focus(&mut app, &ctx, id);
+        press_key(&mut app, &ctx, egui::Key::Space, egui::Modifiers::NONE);
+        assert!(!app.settings.enter_sends);
+        let tree = tree(&mut app, &ctx);
+        assert_eq!(tree.focus, id);
+        assert_eq!(focused(&tree).toggled(), Some(Toggled::False));
+    }
+
+    #[test]
+    fn a_dropdown_is_a_combo_box_named_by_its_row_with_its_value() {
+        let (mut app, ctx) = settings("settings");
+        let tree = tree(&mut app, &ctx);
+        for (label, value) in [("Font", "System"), ("Language", "Auto"), ("Theme", "Dark")] {
+            let (_, combo) = find(&tree, Role::ComboBox, label)
+                .unwrap_or_else(|| panic!("a combo box named {label}"));
+            assert_eq!(combo.value(), Some(value), "{label}");
+            assert_eq!(combo.is_expanded(), Some(false), "{label}");
+        }
+    }
+
+    /// The notification limit (#406) is one of these drop-downs too.
+    #[test]
+    fn the_notification_limit_is_a_named_dropdown() {
+        let (mut app, ctx) = settings("settings");
+        app.account_mut().settings.notifications = true;
+        render(&mut app, &ctx);
+        let tree = tree(&mut app, &ctx);
+        let label = "Limit repeat notifications";
+        let (_, combo) = find(&tree, Role::ComboBox, label)
+            .unwrap_or_else(|| panic!("a combo box named {label}"));
+        let value = app.account().settings.limit_notifications.label(app.locale);
+        assert_eq!(combo.value(), Some(value.as_ref()));
+        assert_eq!(combo.is_expanded(), Some(false));
+    }
+
+    #[test]
+    fn a_dropdown_opened_from_the_keys_chooses_and_returns_focus() {
+        use crate::settings::FontChoice;
+        let (mut app, ctx) = settings("settings");
+        let (id, _) = find(&tree(&mut app, &ctx), Role::ComboBox, "Font").expect("Font");
+        focus(&mut app, &ctx, id);
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        let tree_open = tree(&mut app, &ctx);
+        assert_eq!(
+            focused(&tree_open).label(),
+            Some("System"),
+            "the list opens on the current choice"
+        );
+        assert_eq!(node(&tree_open, id).is_expanded(), Some(true));
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        assert_eq!(focused(&tree(&mut app, &ctx)).label(), Some("Inter"));
+        // The pass that takes the choice hands focus back with the new
+        // value already on the drop-down, so the screen reader never hears
+        // the old one first.
+        let taken = frame(&mut app, &ctx, vec![key(egui::Key::Enter)]);
+        assert_eq!(taken.focus, id, "focus is back on the drop-down at once");
+        assert_eq!(node(&taken, id).value(), Some("Inter"));
+        render(&mut app, &ctx);
+        assert_eq!(app.settings.font, FontChoice::Inter);
+        let chosen = tree(&mut app, &ctx);
+        assert_eq!(chosen.focus, id, "focus is back on the drop-down");
+        assert_eq!(focused(&chosen).value(), Some("Inter"));
+        assert_eq!(focused(&chosen).is_expanded(), Some(false));
+
+        // Alt+Down opens it too; Escape closes the list and changes nothing.
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::ALT);
+        assert_eq!(focused(&tree(&mut app, &ctx)).label(), Some("Inter"));
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        assert_eq!(
+            focused(&tree(&mut app, &ctx)).label(),
+            Some("Inter"),
+            "Down stops at the last choice, as a Windows list does"
+        );
+        press_key(&mut app, &ctx, egui::Key::ArrowUp, egui::Modifiers::NONE);
+        assert_eq!(focused(&tree(&mut app, &ctx)).label(), Some("System"));
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert_eq!(app.settings.font, FontChoice::Inter);
+        assert_eq!(
+            app.page,
+            crate::model::Page::Settings,
+            "Escape only closes the list"
+        );
+        let closed = tree(&mut app, &ctx);
+        assert_eq!(closed.focus, id);
+        assert_eq!(focused(&closed).is_expanded(), Some(false));
+    }
+
+    /// The focused Font drop-down, closed.
+    fn font_dropdown() -> (App, egui::Context, NodeId) {
+        let (mut app, ctx) = settings("settings");
+        let (id, _) = find(&tree(&mut app, &ctx), Role::ComboBox, "Font").expect("Font");
+        focus(&mut app, &ctx, id);
+        (app, ctx, id)
+    }
+
+    fn key_with(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    /// On a closed drop-down, Up and Down take the previous and next choice
+    /// at once, as a Windows combo box does, and Home and End the first and
+    /// last: the drop-down keeps focus, stays closed, and says its new value
+    /// in the pass the key is pressed.
+    #[test]
+    fn up_and_down_on_a_closed_dropdown_change_its_value() {
+        use crate::settings::FontChoice;
+        let (mut app, ctx, id) = font_dropdown();
+        let mut press = |key: egui::Key, value: &str, font: FontChoice| {
+            let pressed = frame(&mut app, &ctx, vec![key_with(key, egui::Modifiers::NONE)]);
+            assert_eq!(pressed.focus, id, "{key:?} keeps focus on the drop-down");
+            assert_eq!(node(&pressed, id).value(), Some(value), "{key:?}");
+            assert_eq!(node(&pressed, id).is_expanded(), Some(false), "{key:?}");
+            render(&mut app, &ctx);
+            assert_eq!(app.settings.font, font, "{key:?}");
+            let settled = tree(&mut app, &ctx);
+            assert_eq!(settled.focus, id);
+            assert_eq!(focused(&settled).value(), Some(value));
+        };
+        press(egui::Key::ArrowDown, "Inter", FontChoice::Inter);
+        press(egui::Key::ArrowDown, "Inter", FontChoice::Inter);
+        press(egui::Key::ArrowUp, "System", FontChoice::System);
+        press(egui::Key::End, "Inter", FontChoice::Inter);
+        press(egui::Key::Home, "System", FontChoice::System);
+        assert!(!egui::Popup::is_any_open(&ctx), "nothing opened");
+    }
+
+    /// Enter, Space and Alt+Down open the list on the current choice, not
+    /// the first, and change nothing. The open list is a list box named as
+    /// the drop-down, whose options say where they are and which is
+    /// highlighted.
+    #[test]
+    fn opening_a_dropdown_changes_nothing_and_starts_on_its_value() {
+        use crate::settings::FontChoice;
+        for (key, modifiers) in [
+            (egui::Key::Enter, egui::Modifiers::NONE),
+            (egui::Key::Space, egui::Modifiers::NONE),
+            (egui::Key::ArrowDown, egui::Modifiers::ALT),
+        ] {
+            let (mut app, ctx, id) = font_dropdown();
+            press_key(&mut app, &ctx, egui::Key::End, egui::Modifiers::NONE);
+            assert_eq!(app.settings.font, FontChoice::Inter);
+            press_key(&mut app, &ctx, key, modifiers);
+            assert_eq!(app.settings.font, FontChoice::Inter, "{key:?} changed it");
+            let open = tree(&mut app, &ctx);
+            assert_eq!(node(&open, id).is_expanded(), Some(true), "{key:?}");
+            assert_eq!(node(&open, id).value(), Some("Inter"), "{key:?}");
+            let option = focused(&open);
+            assert_eq!(option.label(), Some("Inter"), "{key:?} opens on the value");
+            assert_eq!(option.role(), Role::ListBoxOption, "{key:?}");
+            assert_eq!(option.position_in_set(), Some(1));
+            assert_eq!(option.size_of_set(), Some(2));
+            assert_eq!(option.is_selected(), Some(true), "the highlighted option");
+            assert_eq!(option.toggled(), None);
+            let (list, _) = find(&open, Role::ListBox, "Font").expect("a list box named Font");
+            let options: Vec<Node> = descendants(&open, list)
+                .into_iter()
+                .filter(|node| node.role() == Role::ListBoxOption)
+                .collect();
+            assert_eq!(options.len(), 2, "{key:?}");
+            let system = options
+                .iter()
+                .find(|node| node.label() == Some("System"))
+                .expect("System");
+            assert_eq!(system.position_in_set(), Some(0));
+            assert_eq!(system.is_selected(), None, "only the highlight is selected");
+        }
+    }
+
+    /// In the open list, Up and Down move the highlight and change nothing;
+    /// Enter takes the highlighted option and closes the list, focus back on
+    /// the drop-down with its new value in the same pass.
+    #[test]
+    fn arrows_in_an_open_dropdown_move_and_enter_takes() {
+        use crate::settings::FontChoice;
+        let (mut app, ctx, id) = font_dropdown();
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        let moved = tree(&mut app, &ctx);
+        assert_eq!(focused(&moved).label(), Some("Inter"));
+        assert_eq!(focused(&moved).is_selected(), Some(true));
+        assert_eq!(
+            app.settings.font,
+            FontChoice::System,
+            "Down commits nothing"
+        );
+        assert_eq!(node(&moved, id).value(), Some("System"));
+        press_key(&mut app, &ctx, egui::Key::ArrowUp, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        assert_eq!(app.settings.font, FontChoice::System, "Up commits nothing");
+        let taken = frame(&mut app, &ctx, vec![key(egui::Key::Enter)]);
+        assert_eq!(taken.focus, id);
+        assert_eq!(node(&taken, id).value(), Some("Inter"));
+        assert_eq!(node(&taken, id).is_expanded(), Some(false));
+        render(&mut app, &ctx);
+        assert_eq!(app.settings.font, FontChoice::Inter);
+    }
+
+    /// Escape and Alt+Up close the open list and change nothing, focus back
+    /// on the drop-down.
+    #[test]
+    fn escape_and_alt_up_close_an_open_dropdown_unchanged() {
+        use crate::settings::FontChoice;
+        for (key, modifiers) in [
+            (egui::Key::Escape, egui::Modifiers::NONE),
+            (egui::Key::ArrowUp, egui::Modifiers::ALT),
+        ] {
+            let (mut app, ctx, id) = font_dropdown();
+            press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+            press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+            let closed = frame(&mut app, &ctx, vec![key_with(key, modifiers)]);
+            assert_eq!(closed.focus, id, "{key:?}");
+            assert_eq!(node(&closed, id).value(), Some("System"), "{key:?}");
+            assert_eq!(node(&closed, id).is_expanded(), Some(false), "{key:?}");
+            render(&mut app, &ctx);
+            assert_eq!(app.settings.font, FontChoice::System, "{key:?}");
+            assert_eq!(app.page, crate::model::Page::Settings, "{key:?}");
+            assert_eq!(tree(&mut app, &ctx).focus, id, "{key:?}");
+        }
+    }
+
+    /// Tab in the open list closes it unchanged and moves on as Tab from
+    /// the closed drop-down would, in the same frame; Shift+Tab moves back.
+    #[test]
+    fn tab_leaves_an_open_dropdown_unchanged() {
+        use crate::settings::FontChoice;
+        for modifiers in [egui::Modifiers::NONE, egui::Modifiers::SHIFT] {
+            let (mut app, ctx, id) = font_dropdown();
+            // Where Tab goes from the closed drop-down.
+            let expected = frame(&mut app, &ctx, vec![key_with(egui::Key::Tab, modifiers)]);
+            let expected = if expected.focus == id {
+                tree(&mut app, &ctx).focus
+            } else {
+                expected.focus
+            };
+            assert_ne!(expected, id);
+            focus(&mut app, &ctx, id);
+            press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+            press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+            let left = frame(&mut app, &ctx, vec![key_with(egui::Key::Tab, modifiers)]);
+            assert_eq!(left.focus, expected, "{modifiers:?} moves on at once");
+            assert_eq!(node(&left, id).is_expanded(), Some(false));
+            assert_eq!(node(&left, id).value(), Some("System"));
+            render(&mut app, &ctx);
+            assert_eq!(app.settings.font, FontChoice::System);
+            assert!(!egui::Popup::is_any_open(&ctx));
+            assert_eq!(tree(&mut app, &ctx).focus, expected, "{modifiers:?}");
+        }
+    }
+
+    /// "Choose a file…" in a sound list acts rather than becoming the value:
+    /// Up and Down on the closed drop-down skip it, so they never open a
+    /// file dialog, but the open list still reaches it.
+    #[test]
+    fn closed_dropdown_arrows_skip_an_option_that_acts() {
+        use crate::settings::NotificationSound;
+        let (mut app, ctx) = settings("settings");
+        let (id, combo) =
+            find(&tree(&mut app, &ctx), Role::ComboBox, "Message sound").expect("Message sound");
+        assert_eq!(combo.value(), Some("Pidgin"));
+        focus(&mut app, &ctx, id);
+        let picked = |app: &App| {
+            app.actions
+                .iter()
+                .any(|action| matches!(action, crate::model::Action::PickNotificationSound { .. }))
+        };
+        for key in [egui::Key::End, egui::Key::ArrowDown, egui::Key::ArrowDown] {
+            let pressed = frame(&mut app, &ctx, vec![key_with(key, egui::Modifiers::NONE)]);
+            assert!(!picked(&app), "{key:?} asked for a file");
+            assert_eq!(node(&pressed, id).value(), Some("None"), "{key:?}");
+            assert_eq!(pressed.focus, id);
+            render(&mut app, &ctx);
+            assert_eq!(app.settings.message_sound, NotificationSound::None);
+        }
+        press_key(&mut app, &ctx, egui::Key::ArrowUp, egui::Modifiers::NONE);
+        assert_eq!(app.settings.message_sound, NotificationSound::System);
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::ALT);
+        assert_eq!(
+            focused(&tree(&mut app, &ctx)).label(),
+            Some("System default")
+        );
+        press_key(&mut app, &ctx, egui::Key::End, egui::Modifiers::NONE);
+        let open = tree(&mut app, &ctx);
+        assert_eq!(focused(&open).label(), Some("Choose a file…"));
+        assert_eq!(focused(&open).position_in_set(), Some(4));
+        assert_eq!(focused(&open).size_of_set(), Some(5));
+        assert!(!picked(&app));
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert_eq!(app.settings.message_sound, NotificationSound::System);
+    }
+
+    /// The focused Profile photo drop-down, an account privacy setting the
+    /// demo's phone holds as "My contacts", with the phone writes recorded.
+    fn privacy_dropdown() -> (App, egui::Context, NodeId) {
+        let (mut app, ctx) = settings("settings");
+        app.backend.record_demo_commands();
+        let (id, combo) =
+            find(&tree(&mut app, &ctx), Role::ComboBox, "Profile photo").expect("Profile photo");
+        assert_eq!(combo.value(), Some("My contacts"));
+        // Reached from the keys, so focus scrolls it into view.
+        ctx.data_mut(|data| data.insert_temp(crate::theme::keyboard_focus_id(), true));
+        focus(&mut app, &ctx, id);
+        (app, ctx, id)
+    }
+
+    fn privacy_writes(app: &mut App) -> usize {
+        app.backend
+            .take_demo_commands()
+            .iter()
+            .filter(|command| {
+                matches!(
+                    command,
+                    crate::backend::Command::SetAccountPrivacy {
+                        kind: crate::privacy::PrivacyKind::Profile,
+                        ..
+                    }
+                )
+            })
+            .count()
+    }
+
+    fn saving_said(app: &App) -> usize {
+        app.announcer
+            .spoken()
+            .iter()
+            .filter(|spoken| spoken.trim_end_matches('\u{200B}') == "Saving…")
+            .count()
+    }
+
+    /// A privacy drop-down writes to the phone. While the write is pending
+    /// the focused drop-down keeps focus, says it is busy and "Saving…" once,
+    /// and takes no other value until the phone answers; then it takes the
+    /// arrows again.
+    #[test]
+    fn a_privacy_dropdown_keeps_focus_while_it_saves() {
+        use crate::privacy::{PrivacyChoice, PrivacyKind};
+        let (mut app, ctx, id) = privacy_dropdown();
+        let stepped = frame(&mut app, &ctx, vec![key(egui::Key::ArrowDown)]);
+        assert_eq!(node(&stepped, id).value(), Some("Nobody"));
+        render(&mut app, &ctx);
+        assert!(app.account_privacy.pending(PrivacyKind::Profile));
+        assert_eq!(privacy_writes(&mut app), 1);
+        let saving = tree(&mut app, &ctx);
+        assert_eq!(saving.focus, id, "focus stays on the saving drop-down");
+        assert_eq!(focused(&saving).value(), Some("Nobody"));
+        assert!(focused(&saving).is_busy());
+        assert_eq!(saving_said(&app), 1, "{:?}", app.announcer.spoken());
+        // While it saves, the keys that would change or open it do nothing.
+        for (key, modifiers) in [
+            (egui::Key::ArrowUp, egui::Modifiers::NONE),
+            (egui::Key::Home, egui::Modifiers::NONE),
+            (egui::Key::Enter, egui::Modifiers::NONE),
+            (egui::Key::Space, egui::Modifiers::NONE),
+            (egui::Key::ArrowDown, egui::Modifiers::ALT),
+        ] {
+            press_key(&mut app, &ctx, key, modifiers);
+            render(&mut app, &ctx);
+            let tree = tree(&mut app, &ctx);
+            assert_eq!(tree.focus, id, "{key:?}");
+            assert_eq!(focused(&tree).value(), Some("Nobody"), "{key:?}");
+            assert_eq!(focused(&tree).is_expanded(), Some(false), "{key:?}");
+            assert!(!egui::Popup::is_any_open(&ctx), "{key:?}");
+        }
+        assert_eq!(privacy_writes(&mut app), 0, "no second write");
+        assert_eq!(saving_said(&app), 1, "said once");
+        assert_eq!(
+            app.account_privacy.get(PrivacyKind::Profile),
+            Some(PrivacyChoice::Nobody)
+        );
+        // The phone confirms: the drop-down takes the arrows again.
+        assert!(app.account_privacy.finish_set(PrivacyKind::Profile));
+        render(&mut app, &ctx);
+        let done = tree(&mut app, &ctx);
+        assert_eq!(done.focus, id);
+        assert!(!focused(&done).is_busy());
+        press_key(&mut app, &ctx, egui::Key::ArrowUp, egui::Modifiers::NONE);
+        render(&mut app, &ctx);
+        assert_eq!(privacy_writes(&mut app), 1);
+        let again = tree(&mut app, &ctx);
+        assert_eq!(again.focus, id);
+        assert_eq!(focused(&again).value(), Some("My contacts"));
+    }
+
+    /// Enter on an option of a privacy drop-down's list starts the write and
+    /// leaves focus on the drop-down, which says the new value.
+    #[test]
+    fn a_privacy_dropdown_keeps_focus_after_enter_in_its_list() {
+        let (mut app, ctx, id) = privacy_dropdown();
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(focused(&tree(&mut app, &ctx)).label(), Some("My contacts"));
+        press_key(&mut app, &ctx, egui::Key::ArrowUp, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        render(&mut app, &ctx);
+        assert_eq!(privacy_writes(&mut app), 1);
+        let saving = tree(&mut app, &ctx);
+        assert_eq!(saving.focus, id, "focus stays on the saving drop-down");
+        assert_eq!(focused(&saving).value(), Some("Everyone"));
+        assert_eq!(focused(&saving).is_expanded(), Some(false));
+        assert!(focused(&saving).is_busy());
+    }
+
+    /// What the next frame paints over the drop-down `id`: each
+    /// tessellated vertex within its bounds, relative to them, with its
+    /// colour. The focus ring is the one difference a focused control may
+    /// show, so it is left out: keyboard navigation, which shows it, is off.
+    fn painted(app: &mut App, ctx: &egui::Context, id: NodeId) -> Vec<(i32, i32, egui::Color32)> {
+        ctx.data_mut(|data| data.insert_temp(crate::theme::keyboard_focus_id(), false));
+        let output = input_frame(app, ctx, Vec::new());
+        let tree = output
+            .platform_output
+            .accesskit_update
+            .clone()
+            .expect("accessibility tree");
+        let bounds = node(&tree, id).bounds().expect("the drop-down's bounds");
+        let ppp = ctx.pixels_per_point();
+        let rect = egui::Rect::from_min_max(
+            egui::pos2(bounds.x0 as f32 / ppp, bounds.y0 as f32 / ppp),
+            egui::pos2(bounds.x1 as f32 / ppp, bounds.y1 as f32 / ppp),
+        )
+        .expand(2.0);
+        ctx.tessellate(output.shapes, ppp)
+            .into_iter()
+            .filter_map(|clipped| match clipped.primitive {
+                egui::epaint::Primitive::Mesh(mesh) => Some(mesh),
+                egui::epaint::Primitive::Callback(_) => None,
+            })
+            .flat_map(|mesh| mesh.vertices)
+            .filter(|vertex| rect.contains(vertex.pos))
+            .map(|vertex| {
+                let at = vertex.pos - rect.min;
+                // Hundredths of a point: the same paint after a scroll that
+                // lands on another fraction of a pixel.
+                (
+                    (at.x * 100.0).round() as i32,
+                    (at.y * 100.0).round() as i32,
+                    vertex.color,
+                )
+            })
+            .collect()
+    }
+
+    /// A focused privacy drop-down that is saving stays enabled so it keeps
+    /// focus, but it paints exactly as the disabled one did before: the same
+    /// shapes and colours over its bounds, the focus ring aside.
+    #[test]
+    fn a_saving_privacy_dropdown_looks_disabled_when_focused() {
+        use crate::privacy::{PrivacyChoice, PrivacyKind};
+        // Disabled the old way: saving without focus. Focus first scrolls the
+        // drop-down into view, as in the focused case, then leaves it.
+        let (mut app, ctx, id) = privacy_dropdown();
+        assert!(
+            app.account_privacy
+                .begin_set(PrivacyKind::Profile, PrivacyChoice::Nobody)
+        );
+        ctx.memory_mut(|memory| {
+            if let Some(focused) = memory.focused() {
+                memory.surrender_focus(focused);
+            }
+        });
+        render(&mut app, &ctx);
+        let disabled = tree(&mut app, &ctx);
+        assert_ne!(disabled.focus, id);
+        assert!(!node(&disabled, id).is_busy());
+        let disabled = painted(&mut app, &ctx, id);
+        // Busy: saving with focus on it.
+        let (mut app, ctx, id) = privacy_dropdown();
+        assert!(
+            app.account_privacy
+                .begin_set(PrivacyKind::Profile, PrivacyChoice::Nobody)
+        );
+        render(&mut app, &ctx);
+        let busy = tree(&mut app, &ctx);
+        assert_eq!(busy.focus, id);
+        assert!(node(&busy, id).is_busy());
+        let busy = painted(&mut app, &ctx, id);
+        assert!(!disabled.is_empty(), "the drop-down is painted");
+        assert_eq!(busy, disabled, "busy paints as disabled");
+    }
+
+    #[test]
+    fn each_settings_section_is_a_named_group_holding_its_controls() {
+        let (mut app, ctx) = settings("settings");
+        let tree = tree(&mut app, &ctx);
+        let (chats, _) = find(&tree, Role::Group, "Chats").expect("a Chats group");
+        let (appearance, _) = find(&tree, Role::Group, "Appearance").expect("an Appearance group");
+        let holds = |group: NodeId, role: Role, label: &str| {
+            descendants(&tree, group)
+                .iter()
+                .any(|node| node.role() == role && node.label() == Some(label))
+        };
+        assert!(holds(chats, Role::CheckBox, "Enter sends"));
+        assert!(holds(appearance, Role::ComboBox, "Font"));
+        assert!(!holds(appearance, Role::CheckBox, "Enter sends"));
+    }
+
+    #[test]
+    fn down_from_the_settings_search_reaches_the_first_control() {
+        let (mut app, ctx) = settings("settings");
+        press_key(&mut app, &ctx, egui::Key::F, egui::Modifiers::COMMAND);
+        let search = egui::Id::new(crate::ui::settings::SEARCH_ID);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(search));
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        let tree = tree(&mut app, &ctx);
+        let first = focused(&tree);
+        assert_eq!(first.role(), Role::ComboBox);
+        assert_eq!(first.label(), Some("Theme"));
+    }
+
+    /// Text and Down typed in one frame: Down reaches the first setting the
+    /// new text leaves, as when Down comes after it.
+    #[test]
+    fn down_typed_with_the_search_reaches_a_setting_it_leaves() {
+        let search = egui::Id::new(crate::ui::settings::SEARCH_ID);
+        let down = || egui::Event::Key {
+            key: egui::Key::ArrowDown,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let typed = || egui::Event::Text("sound".into());
+        // The events in one frame each, or all in one frame.
+        let focus_after = |frames: Vec<Vec<egui::Event>>| {
+            let (mut app, ctx) = settings("settings");
+            press_key(&mut app, &ctx, egui::Key::F, egui::Modifiers::COMMAND);
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(search));
+            for events in frames {
+                frame(&mut app, &ctx, events);
+            }
+            assert_eq!(app.settings_search, "sound");
+            let tree = tree(&mut app, &ctx);
+            focused(&tree).label().map(str::to_owned)
+        };
+        let apart = focus_after(vec![vec![typed()], vec![down()]]);
+        assert_ne!(
+            apart.as_deref(),
+            Some("Theme"),
+            "a setting the search leaves"
+        );
+        assert_eq!(focus_after(vec![vec![typed(), down()]]), apart);
+    }
+
+    /// A remembered widget not drawn yet is waited for frame by frame, and
+    /// each of those frames is asked for: an idle window draws none
+    /// otherwise, and focus would never come back.
+    #[test]
+    fn a_focus_return_waiting_for_its_widget_asks_for_the_next_frame() {
+        // What `ui::return_focus` asked for in the frame before the last
+        // one, by where it asked from: the page asks for frames of its own
+        // in tests too.
+        let asked = |ctx: &egui::Context| {
+            ctx.repaint_causes()
+                .iter()
+                .any(|cause| std::path::Path::new(cause.file).ends_with("src/ui/mod.rs"))
+        };
+        let (mut app, ctx) = settings("settings");
+        for _ in 0..2 {
+            frame(&mut app, &ctx, Vec::new());
+        }
+        assert!(!asked(&ctx), "{:?}", ctx.repaint_causes());
+        app.return_focus = Some((egui::Id::new("drawn later"), 3));
+        for _ in 0..2 {
+            frame(&mut app, &ctx, Vec::new());
+        }
+        assert_eq!(app.return_focus, Some((egui::Id::new("drawn later"), 1)));
+        assert!(asked(&ctx), "the next frame is asked for");
+    }
+
+    #[test]
+    fn escape_clears_the_settings_search_says_so_and_keeps_the_field() {
+        let (mut app, ctx) = settings("settings-search=sound");
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(app.settings_search.is_empty());
+        assert_eq!(app.page, crate::model::Page::Settings);
+        render(&mut app, &ctx);
+        assert!(
+            spoke(&app, "Search cleared"),
+            "{:?}",
+            app.announcer.spoken()
+        );
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(egui::Id::new(crate::ui::settings::SEARCH_ID))
+        );
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert_eq!(app.page, crate::model::Page::Chats);
+    }
+
+    #[test]
+    fn ctrl_comma_focuses_the_settings_search_and_closing_returns_focus() {
+        let (mut app, ctx) = settings("chat");
+        let composer = egui::Id::new("composer-text");
+        ctx.memory_mut(|memory| memory.request_focus(composer));
+        render(&mut app, &ctx);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(composer));
+        press_key(&mut app, &ctx, egui::Key::Comma, egui::Modifiers::COMMAND);
+        assert_eq!(app.page, crate::model::Page::Settings);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(egui::Id::new(crate::ui::settings::SEARCH_ID))
+        );
+        press_key(&mut app, &ctx, egui::Key::Comma, egui::Modifiers::COMMAND);
+        assert_eq!(app.page, crate::model::Page::Chats);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(composer));
+    }
+
+    /// From the Calls page, Settings start in their search as from the
+    /// chats. Closing them goes to the chats, which do not draw the call
+    /// history that had focus: the message field takes it instead.
+    #[test]
+    fn settings_from_the_calls_page_start_in_the_search_and_end_in_the_chat() {
+        let (mut app, ctx) = settings("calls-chat");
+        assert_eq!(app.page, crate::model::Page::Calls);
+        let history = crate::ui::calls::history_list_id();
+        ctx.memory_mut(|memory| memory.request_focus(history));
+        render(&mut app, &ctx);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(history));
+        press_key(&mut app, &ctx, egui::Key::Comma, egui::Modifiers::COMMAND);
+        assert_eq!(app.page, crate::model::Page::Settings);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(egui::Id::new(crate::ui::settings::SEARCH_ID))
+        );
+        press_key(&mut app, &ctx, egui::Key::Comma, egui::Modifiers::COMMAND);
+        render(&mut app, &ctx);
+        assert_eq!(app.page, crate::model::Page::Chats);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(egui::Id::new("composer-text"))
+        );
+    }
+
+    /// The app lock form says why it refused the password each time it
+    /// does, the same reason again too.
+    #[test]
+    fn the_lock_form_says_every_refusal() {
+        let (mut app, ctx) = settings("app-lock-setup");
+        let reason = format!(
+            "The password needs at least {} characters.",
+            crate::app_lock::MIN_PASSWORD_CHARS
+        );
+        assert!(spoke(&app, &reason), "{:?}", app.announcer.spoken());
+        for attempt in 0..3 {
+            let before: Vec<String> = app.announcer.spoken().map(str::to_owned).into();
+            app.actions.push(crate::model::Action::SubmitAppLockForm);
+            render(&mut app, &ctx);
+            let after: Vec<String> = app.announcer.spoken().map(str::to_owned).into();
+            assert_ne!(after, before, "attempt {attempt}: said again");
+            assert!(spoke(&app, &reason), "attempt {attempt}: {after:?}");
+        }
+    }
+
+    /// Soft buttons that act, rather than toggle, read as plain buttons:
+    /// neither "not pressed" nor, for the emphasised Update button,
+    /// "pressed".
+    #[test]
+    fn action_soft_buttons_expose_no_toggle_state() {
+        for (flag, label) in [
+            ("offline", "Retry"),
+            ("update-ready", "Restart to update"),
+            // Send location's and the media cache's.
+            ("location", "Cancel"),
+            ("settings", "Clear…"),
+        ] {
+            let (mut app, ctx) = settings(flag);
+            let (_, button) = find(&tree(&mut app, &ctx), Role::Button, label)
+                .unwrap_or_else(|| panic!("a {label} button"));
+            assert_eq!(button.toggled(), None, "{label}");
+        }
+    }
+
+    /// Send location's field is described by what its check read, the line
+    /// under it: the spot, or why there is none. Send, while unavailable,
+    /// says why too.
+    #[test]
+    fn the_location_field_describes_what_it_read() {
+        let (mut app, ctx) = settings("location");
+        let hint = "Paste a map link or coordinates";
+        let described = |app: &mut App, ctx: &egui::Context, role: Role, label: &str| {
+            find(&tree(app, ctx), role, label)
+                .unwrap_or_else(|| panic!("{label}"))
+                .1
+                .description()
+                .map(str::to_owned)
+        };
+        let connected = app.link.is_connected();
+        let offline = (!connected).then(|| "Not connected to WhatsApp".to_owned());
+        let spot = crate::geo::spot(&app.location_draft)
+            .expect("the demo's spot")
+            .text();
+        assert_eq!(described(&mut app, &ctx, Role::TextInput, hint), Some(spot));
+        assert_eq!(described(&mut app, &ctx, Role::Button, "Send"), offline);
+        app.location_draft = "nonsense".into();
+        render(&mut app, &ctx);
+        let wrong = Some("That is not a location.".to_owned());
+        assert_eq!(described(&mut app, &ctx, Role::TextInput, hint), wrong);
+        assert_eq!(
+            described(&mut app, &ctx, Role::Button, "Send"),
+            offline.clone().or(wrong)
+        );
+        app.location_draft.clear();
+        render(&mut app, &ctx);
+        assert_eq!(described(&mut app, &ctx, Role::TextInput, hint), None);
+        assert_eq!(
+            described(&mut app, &ctx, Role::Button, "Send"),
+            offline.or(Some(hint.to_owned()))
+        );
+    }
+
+    /// A pointer click at `pos`: pressed in one frame, released in the next.
+    fn click(app: &mut App, ctx: &egui::Context, pos: egui::Pos2) {
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        input_frame(app, ctx, vec![egui::Event::PointerMoved(pos), button(true)]);
+        input_frame(app, ctx, vec![button(false)]);
+        render(app, ctx);
+    }
+
+    /// Opened with the pointer and no screen reader, Settings keep the
+    /// focus and the scroll position they had: no caret, no jump.
+    #[test]
+    fn the_gear_clicked_with_the_pointer_leaves_the_search_and_the_scroll_alone() {
+        let (mut app, ctx) = settings("chat");
+        // Found once in the tree; AccessKit is then off, as without a
+        // screen reader.
+        let (gear, _) = find(&tree(&mut app, &ctx), Role::Button, &gear_label()).expect("the gear");
+        ctx.disable_accesskit();
+        let gear = ctx
+            .viewport(|viewport| {
+                viewport
+                    .prev_pass
+                    .widgets
+                    .layers()
+                    .flat_map(|(_, widgets)| widgets.iter())
+                    .find(|widget| widget.id.accesskit_id() == gear)
+                    .map(|widget| widget.rect.center())
+            })
+            .expect("the gear was drawn");
+        let search = egui::Id::new(crate::ui::settings::SEARCH_ID);
+        let field_top =
+            |ctx: &egui::Context| ctx.read_response(search).expect("the field").rect.top();
+        click(&mut app, &ctx, gear);
+        assert_eq!(app.page, crate::model::Page::Settings);
+        assert_ne!(ctx.memory(|memory| memory.focused()), Some(search));
+        // Scrolled down, closed and opened again with the pointer.
+        let page = egui::pos2(800.0, 400.0);
+        input_frame(
+            &mut app,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(page),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -300.0),
+                    modifiers: egui::Modifiers::NONE,
+                    phase: egui::TouchPhase::Move,
+                },
+            ],
+        );
+        for _ in 0..30 {
+            input_frame(&mut app, &ctx, Vec::new());
+        }
+        let scrolled = field_top(&ctx);
+        assert!(scrolled < 0.0, "the page scrolled: {scrolled}");
+        click(&mut app, &ctx, gear);
+        assert_eq!(app.page, crate::model::Page::Chats);
+        click(&mut app, &ctx, gear);
+        assert_eq!(app.page, crate::model::Page::Settings);
+        for _ in 0..30 {
+            input_frame(&mut app, &ctx, Vec::new());
+        }
+        assert_ne!(ctx.memory(|memory| memory.focused()), Some(search));
+        assert_eq!(
+            field_top(&ctx),
+            scrolled,
+            "the page keeps its scroll position"
+        );
+    }
+
+    /// The rail's gear as a screen reader names it: with Command on macOS.
+    fn gear_label() -> String {
+        crate::ui::keys::label("Settings (Ctrl+,)")
+    }
+
+    #[test]
+    fn the_gear_opens_settings_on_the_search_and_escape_returns_to_it() {
+        let (mut app, ctx) = settings("chat");
+        let (gear, _) = find(&tree(&mut app, &ctx), Role::Button, &gear_label()).expect("the gear");
+        focus(&mut app, &ctx, gear);
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(app.page, crate::model::Page::Settings);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(egui::Id::new(crate::ui::settings::SEARCH_ID))
+        );
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert_eq!(app.page, crate::model::Page::Chats);
+        let tree = tree(&mut app, &ctx);
+        assert_eq!(tree.focus, gear, "focus is back on the gear");
     }
 }

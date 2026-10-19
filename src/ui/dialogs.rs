@@ -325,17 +325,20 @@ fn unlock_locked_chats(app: &mut App, ui: &mut egui::Ui) {
             .hint_text("Local code")
             .desired_width(f32::INFINITY),
     );
+    // The placeholders are all the fields show of what they are for.
+    super::widgets::name_field(&entry, &crate::i18n::gettext(app.locale, "Local code"));
     if ui.memory(|memory| memory.focused().is_none()) {
         entry.request_focus();
     }
     if setup {
-        ui.add(
+        let confirm = ui.add(
             egui::TextEdit::singleline(&mut app.chat_lock_confirm)
                 .id(confirm_id)
                 .password(true)
                 .hint_text("Confirm code")
                 .desired_width(f32::INFINITY),
         );
+        super::widgets::name_field(&confirm, &crate::i18n::gettext(app.locale, "Confirm code"));
     }
     if app.chat_lock_error {
         theme::paragraph(
@@ -405,7 +408,8 @@ fn new_chat(app: &mut App, ui: &mut egui::Ui) {
     title(ui, app, "New chat");
     // "Message yourself" heads the contact list below, as on the phone.
     ui.horizontal_wrapped(|ui| {
-        if theme::soft_button(ui, &palette, Some(Icon::Plus), "Add contact", false).clicked() {
+        if theme::soft_action_button(ui, &palette, Some(Icon::Plus), "Add contact", false).clicked()
+        {
             app.actions.push(Action::ShowDialog(Dialog::NewContact));
         }
     });
@@ -583,12 +587,13 @@ fn forward(app: &mut App, ui: &mut egui::Ui, messages: &[String]) {
                 let (rect, response) =
                     ui.allocate_exact_size(vec2(ui.available_width(), row_height), Sense::click());
                 theme::reveal_focus(&response);
+                // Named by the chat it forwards to, as the row shows it.
                 response.widget_info(|| {
                     egui::WidgetInfo::selected(
                         egui::WidgetType::SelectableLabel,
                         ui.is_enabled(),
                         app.forward_recipients.contains(&chat.id),
-                        &title,
+                        crate::a11y::without_push_marker(&title),
                     )
                 });
                 #[cfg(any(test, feature = "demo"))]
@@ -1120,8 +1125,10 @@ fn sticker_maker(app: &mut App, ui: &mut egui::Ui) {
         cancel_row(app, ui);
         return;
     };
+    // `Sense::DRAG` is not focusable: a drag needs the pointer, and a
+    // focusable area is a nameless Tab stop. The slider below sizes the crop.
     let (area, response) =
-        ui.allocate_exact_size(vec2(ui.available_width(), MAKER_VIEW), Sense::drag());
+        ui.allocate_exact_size(vec2(ui.available_width(), MAKER_VIEW), Sense::DRAG);
     let scale = (area.width() / draft.width as f32).min(area.height() / draft.height as f32);
     let picture = egui::Rect::from_center_size(
         area.center(),
@@ -1184,20 +1191,18 @@ fn sticker_maker(app: &mut App, ui: &mut egui::Ui) {
             palette.secondary,
         );
         ui.spacing_mut().slider_width = ui.available_width() - 8.0;
-        ui.add(egui::Slider::new(&mut side, smallest..=largest).show_value(false));
+        let slider = ui.add(egui::Slider::new(&mut side, smallest..=largest).show_value(false));
+        // Named by the word drawn before it.
+        super::widgets::name_field(&slider, &crate::i18n::gettext(locale, "Size"));
     });
     if side != draft.crop.side {
         draft.crop = draft.crop.resized(side, draft.width, draft.height);
     }
     if draft.transparent {
         ui.horizontal(|ui| {
-            super::widgets::switch(ui, &palette, &mut draft.keep_transparent);
-            theme::text(
-                ui,
-                crate::i18n::gettext(locale, "Keep the transparent background"),
-                theme::regular(13.0),
-                palette.text,
-            );
+            let label = crate::i18n::gettext(locale, "Keep the transparent background");
+            super::widgets::switch(ui, &palette, &mut draft.keep_transparent, &label);
+            theme::text(ui, label, theme::regular(13.0), palette.text);
         });
     }
     Frame::new()
@@ -1205,22 +1210,22 @@ fn sticker_maker(app: &mut App, ui: &mut egui::Ui) {
         .corner_radius(CornerRadius::same(theme::RADIUS))
         .inner_margin(Margin::symmetric(10, 6))
         .show(ui, |ui| {
-            ui.add(
+            let hint = crate::i18n::gettext(locale, "Emojis that describe it, like 😂 or ❤️");
+            let field = ui.add(
                 egui::TextEdit::singleline(&mut draft.emojis)
                     .id(egui::Id::new("sticker-maker-emojis"))
                     .hint_text(
-                        egui::RichText::new(crate::i18n::gettext(
-                            locale,
-                            "Emojis that describe it, like 😂 or ❤️",
-                        ))
-                        .color(palette.dim)
-                        .font(theme::regular(13.0)),
+                        egui::RichText::new(hint.as_ref())
+                            .color(palette.dim)
+                            .font(theme::regular(13.0)),
                     )
                     .font(theme::regular(13.0))
                     .text_color(palette.text)
                     .frame(Frame::NONE)
                     .desired_width(f32::INFINITY),
             );
+            // The placeholder is all the field shows of what it is for.
+            super::widgets::name_field(&field, &hint);
         });
     app.sticker_draft = Some(draft);
     ui.add_space(10.0);
@@ -1568,6 +1573,12 @@ fn pair_with_phone(app: &mut App, ui: &mut egui::Ui) {
                         .frame(egui::Frame::NONE)
                         .desired_width(f32::INFINITY),
                 );
+                // A sample number is all the field shows of what it is for.
+                // It stays the placeholder: it shows the number's form.
+                super::widgets::name_field_keeping_hint(
+                    &response,
+                    &crate::i18n::gettext(app.locale, "Phone number"),
+                );
                 if !response.has_focus() && app.pair_phone.is_empty() {
                     response.request_focus();
                 }
@@ -1704,6 +1715,18 @@ fn new_contact(app: &mut App, ui: &mut egui::Ui) {
             (first, last)
         })
         .inner;
+    // A sample number and the placeholders are all the fields show of what
+    // they are for. The sample number stays the phone field's placeholder:
+    // it shows the number's form.
+    super::widgets::name_field_keeping_hint(
+        &phone_field,
+        &crate::i18n::gettext(app.locale, "Phone number"),
+    );
+    super::widgets::name_field(
+        &first_field,
+        &crate::i18n::gettext(app.locale, "First name"),
+    );
+    super::widgets::name_field(&last_field, &crate::i18n::gettext(app.locale, "Surname"));
     // A leading plus, spaces, hyphens and brackets are formatting; anything
     // else (an extension, a letter) would change the number, so it is refused.
     let digits = crate::util::international_phone(&app.new_contact_phone).unwrap_or_default();

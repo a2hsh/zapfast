@@ -1210,6 +1210,23 @@ pub fn soft_button(
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// A [`soft_button`] that runs an action rather than toggling a state:
+/// a screen reader hears a plain button, without "not pressed" or
+/// "pressed". It paints exactly as `soft_button` with the same `active`,
+/// which here only gives the button the accent tint for emphasis.
+pub fn soft_action_button(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    icon: Option<Icon>,
+    label: &str,
+    active: bool,
+) -> Response {
+    let response = soft_button(ui, palette, icon, label, active);
+    ui.ctx()
+        .accesskit_node_builder(response.id, |node| node.clear_toggled());
+    response
+}
+
 /// Calculates [`soft_button`] width before layout.
 pub fn soft_button_width(ui: &egui::Ui, label: &str, icon: bool) -> f32 {
     let galley = ui
@@ -1367,12 +1384,19 @@ pub fn link(
     font: egui::FontId,
     color: Color32,
 ) -> Response {
+    let text = text.into();
     let response = ui.add(
-        egui::Label::new(egui::RichText::new(text).font(font).color(color))
+        egui::Label::new(egui::RichText::new(&text).font(font).color(color))
             .truncate()
             .selectable(false)
             .sense(Sense::click()),
     );
+    // A Label's node is static text; a screen reader should hear a link.
+    ui.ctx().accesskit_node_builder(response.id, |node| {
+        node.set_role(egui::accesskit::Role::Link);
+        node.clear_value();
+        node.set_label(text);
+    });
     if response.hovered() {
         let rect = response.rect;
         ui.painter()

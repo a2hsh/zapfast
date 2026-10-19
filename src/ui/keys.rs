@@ -336,7 +336,7 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
         } else if app.page == Page::Wallpaper {
             actions.push(Action::Open(Page::Settings));
         } else if app.page == Page::Settings && !app.settings_search.is_empty() {
-            actions.push(Action::SearchSettings(String::new()));
+            actions.push(Action::ClearSettingsSearch);
         } else if app.page == Page::Calls && app.new_call {
             actions.push(Action::ShowNewCall(false));
         } else if app.page == Page::Calls && super::narrow(ctx) && app.call_picked() {
@@ -373,16 +373,18 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
     // Ctrl+Shift+[ and Ctrl+Shift+], WhatsApp's own keys. With Shift held,
     // US-style layouts report the brackets as braces, so both spellings
     // count; a layout with another character on the shifted key has Alt.
+    // A focused drop-down takes Alt+Down to open its list.
+    let dropdown = crate::ui::widgets::dropdown_focused(ctx);
     let step = ctx.input_mut(|input| {
         let brackets = Modifiers::COMMAND | Modifiers::SHIFT;
         let mut pressed = |modifiers: Modifiers, keys: &[Key]| {
             keys.iter().any(|key| input.consume_key(modifiers, *key))
         };
-        if pressed(Modifiers::ALT, &[Key::ArrowDown])
+        if (!dropdown && pressed(Modifiers::ALT, &[Key::ArrowDown]))
             || pressed(brackets, &[Key::CloseBracket, Key::CloseCurlyBracket])
         {
             1
-        } else if pressed(Modifiers::ALT, &[Key::ArrowUp])
+        } else if (!dropdown && pressed(Modifiers::ALT, &[Key::ArrowUp]))
             || pressed(brackets, &[Key::OpenBracket, Key::OpenCurlyBracket])
         {
             -1
@@ -2848,9 +2850,10 @@ mod tests {
         app.settings_search = "sound".into();
         let ctx = egui::Context::default();
         escape(&mut app, &ctx);
-        assert!(
-            matches!(app.actions.as_slice(), [Action::SearchSettings(text)] if text.is_empty())
-        );
+        assert!(matches!(
+            app.actions.as_slice(),
+            [Action::ClearSettingsSearch]
+        ));
         app.actions.clear();
         app.settings_search.clear();
         escape(&mut app, &ctx);

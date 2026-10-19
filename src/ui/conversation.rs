@@ -693,7 +693,10 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
                         .menu(crate::i18n::gettext(app.locale, "Chat"));
                         let from_keys = key_menu.from_keys();
                         let mut first = None;
+                        // egui gives a popup's background a focusable sense,
+                        // a nameless Tab stop; it only needs the clicks.
                         let shown = egui::Popup::menu(&more)
+                            .sense(Sense::CLICK)
                             .width(width)
                             .frame(widgets::menu_frame(&palette))
                             .show(|ui| {
@@ -1220,6 +1223,9 @@ fn emoji_suggestions(app: &mut App, ui: &mut egui::Ui, field: egui::Id) {
         for (index, candidate) in candidates.iter().enumerate() {
             let (rect, response) =
                 ui.allocate_exact_size(vec2(ui.available_width(), row_height), Sense::click());
+            widgets::name_button_with(&response, || {
+                format!("{} {}", candidate.emoji, candidate.name)
+            });
             if index == app.emoji_selected {
                 ui.painter().rect_filled(
                     rect,
@@ -1342,6 +1348,7 @@ fn mention_picker(app: &mut App, ui: &mut egui::Ui, chat: &Chat, field: egui::Id
                         vec2(ui.available_width(), row_height),
                         Sense::click(),
                     );
+                    widgets::name_button(&response, crate::a11y::without_push_marker(label));
                     if index == app.mention_selected || response.hovered() {
                         ui.painter().rect_filled(
                             rect,
@@ -2166,7 +2173,9 @@ fn composer_tools_menu(app: &mut App, chat: &Chat, plus: &egui::Response) {
     let mut first = None;
     let mut shown = None;
     if draw_open && !picker_open {
+        // Its background takes clicks, not focus (see `header`).
         shown = egui::Popup::menu(plus)
+            .sense(Sense::CLICK)
             .id(id)
             .open_bool(&mut draw_open)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
@@ -3001,10 +3010,12 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat, under: f32) {
             // the next keystroke should go straight to the composer. Register
             // this before the message controls so text, links, media, and
             // selection interactions remain in front of the background.
+            // `Sense::CLICK` is not focusable: the background is for the
+            // pointer, and a focusable one reads as "unknown" in Tab order.
             let background = ui.interact(
                 viewport,
                 ui.id().with(("message-background", &chat.id)),
-                Sense::click(),
+                Sense::CLICK,
             );
             // Only a drag that has moved past a click, such as selecting
             // text, scrolls; a click near an edge does not.
@@ -4363,12 +4374,13 @@ fn bubble(
     // Register the empty strip beside the bubble from its previous rect, before
     // the row, so the avatar, the bubble, and the reactions win clicks, and the
     // text wins drags. A drag that starts here, off the text, sweeps messages
-    // into a selection (#246).
+    // into a selection (#246). Like the bubble, it is not focusable: the
+    // message list's keys and menu reach what its clicks do.
     let id = bubble_id(&view.chat.id, &message.id);
     let previous = ui.ctx().data(|data| data.get_temp::<Rect>(id.with("rect")));
     if let Some(rect) = previous {
         let strip = Rect::from_x_y_ranges(ui.max_rect().x_range(), rect.y_range());
-        let strip = ui.interact(strip, id.with("row"), Sense::click_and_drag());
+        let strip = ui.interact(strip, id.with("row"), Sense::CLICK | Sense::DRAG);
         if strip.clicked() {
             actions.push(Action::FocusComposer);
         }
@@ -5607,6 +5619,9 @@ fn quote_block(
             Sense::click(),
         )
         .on_hover_cursor(egui::CursorIcon::PointingHand);
+    widgets::name_button_with(&response, || {
+        crate::i18n::gettext(view.locale, "Go to replied message").into_owned()
+    });
     if response.clicked() {
         actions.push(quote_jump_action(quoted));
     }
@@ -6129,6 +6144,39 @@ fn reactions(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: &mu
             );
             line.paint(ui, rect.center() - line.size() / 2.0, palette.text);
         }
+        // What the click does with the emoji, then how many reacted and
+        // who, as the tooltip shows: "React with 👍, 2 reactions: Ana, You".
+        widgets::name_button_with(&response, || {
+            use crate::i18n::{gettext, ngettext};
+            let does = if mine {
+                gettext(view.locale, "Remove your reaction {emoji}")
+            } else {
+                gettext(view.locale, "React with {emoji}")
+            };
+            let who: Vec<String> = message
+                .reactions
+                .iter()
+                .filter(|reaction| reaction.emoji == emoji)
+                .map(|reaction| {
+                    if reaction.from_me {
+                        gettext(view.locale, "You").into_owned()
+                    } else {
+                        let name = (view.names_or)(&reaction.sender, None);
+                        crate::a11y::without_push_marker(&name).to_owned()
+                    }
+                })
+                .collect();
+            let reacted = crate::a11y::fill(
+                &ngettext(
+                    view.locale,
+                    "{count} reaction: {names}",
+                    "{count} reactions: {names}",
+                    count,
+                ),
+                &[("count", &count.to_string()), ("names", &who.join(", "))],
+            );
+            [crate::a11y::fill(&does, &[("emoji", &emoji)]), reacted].join(", ")
+        });
         let response = response
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(names.join(", "));
@@ -9713,6 +9761,13 @@ fn preview_card(
             Sense::click(),
         )
         .on_hover_cursor(egui::CursorIcon::PointingHand);
+    let page = preview.title.as_deref().unwrap_or(&domain);
+    widgets::name_button_with(&response, || {
+        crate::a11y::fill(
+            &crate::i18n::gettext(view.locale, "Open link: {page}"),
+            &[("page", &crate::a11y::spoken(page))],
+        )
+    });
     if response.clicked() {
         preview_clicked(preview, actions);
     }
@@ -9848,6 +9903,16 @@ fn frame_size(
     fit_picture(w, h, max_width, max_height)
 }
 
+/// A screen reader's name for an attachment's control in the bubble: what
+/// it holds and, until it opens, where its file is, in the words of the
+/// message's own label: "Photo", "Video, not downloaded".
+fn media_control_label(view: &View<'_>, content: &Content, media: &Media) -> String {
+    let auto = download_starts_by_itself(content, view.auto_download);
+    let mut parts = vec![crate::a11y::file_kind(view.locale, content)];
+    parts.extend(crate::a11y::media_state(view.locale, media, auto));
+    parts.join(", ")
+}
+
 /// Draws an image or sticker, using its preview until downloaded. Returns its width.
 fn picture(
     ui: &mut egui::Ui,
@@ -9864,6 +9929,7 @@ fn picture(
         Some(_) => (STICKER_SIDE, STICKER_SIDE),
         None => (width.min(PICTURE_WIDTH), PICTURE_HEIGHT),
     };
+    let name = || media_control_label(view, &message.content, media);
     if let Some(path) = &media.path {
         // Phones often leave a sticker's animated flag out, so a downloaded
         // file that says it moves is played as well.
@@ -9874,6 +9940,7 @@ fn picture(
                 media.height.unwrap_or(180) as f32,
             );
             let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+            widgets::name_button_with(&response, name);
             if ui.is_rect_visible(rect) {
                 match animation::frame(ui, path, rect, view.animate && response.hovered()) {
                     animation::Frame::Ready(texture) => {
@@ -9934,6 +10001,7 @@ fn picture(
                         .corner_radius(if sticker.is_some() { 0.0 } else { radius })
                         .sense(Sense::click()),
                 );
+                widgets::name_button_with(&response, name);
                 let rect = response.rect;
                 if response
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -9964,6 +10032,7 @@ fn picture(
                     frame_size(media, None, max_width, max_height)
                 };
                 let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+                widgets::name_button_with(&response, name);
                 if ui.is_rect_visible(rect) {
                     ui.painter().rect_filled(rect, radius, palette.surface);
                     theme::paint_icon(ui, Icon::CircleAlert, rect, 24.0, palette.danger);
@@ -9987,6 +10056,7 @@ fn picture(
     }
     let size = frame_size(media, None, max_width, max_height);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    widgets::name_button_with(&response, name);
     if ui.is_rect_visible(rect) {
         let thumbnail = message
             .thumbnail
@@ -10096,6 +10166,13 @@ fn motion_clip(
             Sense::click(),
         )
         .on_hover_cursor(egui::CursorIcon::PointingHand);
+    widgets::name_button_with(&response, || {
+        if playing {
+            crate::i18n::gettext(view.locale, "Pause").into_owned()
+        } else {
+            crate::i18n::gettext(view.locale, "Play").into_owned()
+        }
+    });
     if response.clicked() {
         actions.push(toggle());
     }
@@ -10204,6 +10281,9 @@ fn video(
         PICTURE_HEIGHT.min(limit * 1.3),
     );
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    widgets::name_button_with(&response, || {
+        media_control_label(view, &message.content, media)
+    });
     let playing = match (&media.path, gif) {
         (Some(path), true) => Some(animation::frame(
             ui,
@@ -10475,8 +10555,9 @@ pub(crate) fn video_controls(
     } else {
         crate::i18n::gettext(controls.locale, "Play")
     };
-    if ui
-        .interact(toggle, id.with("toggle"), Sense::click())
+    let response = ui.interact(toggle, id.with("toggle"), Sense::click());
+    widgets::name_button(&response, &tooltip);
+    if response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(tooltip.as_ref())
         .clicked()
@@ -10506,8 +10587,9 @@ pub(crate) fn video_controls(
     } else {
         crate::i18n::gettext(controls.locale, "Fill the window")
     };
-    if ui
-        .interact(window, id.with("window"), Sense::click())
+    let response = ui.interact(window, id.with("window"), Sense::click());
+    widgets::name_button(&response, &tooltip);
+    if response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(tooltip.as_ref())
         .clicked()
@@ -10535,8 +10617,9 @@ pub(crate) fn video_controls(
     } else {
         crate::i18n::gettext(controls.locale, "Mute")
     };
-    if ui
-        .interact(sound, id.with("sound"), Sense::click())
+    let response = ui.interact(sound, id.with("sound"), Sense::click());
+    widgets::name_button(&response, &tooltip);
+    if response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(tooltip.as_ref())
         .clicked()
@@ -10546,7 +10629,7 @@ pub(crate) fn video_controls(
     // The playback speed, cycled by a click as the voice message chip is.
     let speed_label = crate::audio::speed_label(controls.player.speed());
     let speed_galley = ui.painter().layout_no_wrap(
-        speed_label,
+        speed_label.clone(),
         theme::tabular(fastframe_fonts::Weight::Medium, 11.5),
         Color32::WHITE,
     );
@@ -10564,8 +10647,12 @@ pub(crate) fn video_controls(
         speed_galley,
         Color32::WHITE,
     );
-    if ui
-        .interact(speed, id.with("speed"), Sense::click())
+    let response = ui.interact(speed, id.with("speed"), Sense::click());
+    // Named by the speed it shows, as the voice message's chip is said.
+    widgets::name_button_with(&response, || {
+        crate::i18n::gettext(controls.locale, "Speed {}").replace("{}", &speed_label)
+    });
+    if response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .clicked()
     {
@@ -10590,8 +10677,10 @@ pub(crate) fn video_controls(
     if track.width() < 12.0 {
         return;
     }
+    // A seek needs a pointer position, so the track is not focusable: the
+    // focused message's arrows seek from the keyboard.
     let response = ui
-        .interact(track, id.with("seek"), Sense::click_and_drag())
+        .interact(track, id.with("seek"), Sense::CLICK | Sense::DRAG)
         .on_hover_cursor(egui::CursorIcon::PointingHand);
     let pointed = response
         .interact_pointer_pos()
@@ -10637,6 +10726,9 @@ fn video_note(
     use crate::video::State;
     let palette = view.palette;
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(NOTE_SIDE), Sense::click());
+    widgets::name_button_with(&response, || {
+        media_control_label(view, &message.content, media)
+    });
     let status = media
         .path
         .as_ref()
@@ -10879,6 +10971,27 @@ fn attachment(
             Sense::click(),
         )
         .on_hover_cursor(egui::CursorIcon::PointingHand);
+    // The card's title, a file name, follows what kind of file it is.
+    widgets::name_button_with(&response, || {
+        let kind = crate::a11y::file_kind(view.locale, &message.content);
+        let state = crate::a11y::media_state(
+            view.locale,
+            media,
+            download_starts_by_itself(&message.content, view.auto_download),
+        );
+        let title = crate::a11y::spoken(title);
+        let mut parts: Vec<&str> = Vec::new();
+        for part in [Some(kind.as_str()), Some(title.as_str()), state.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            // A video card's title is the kind itself: said once.
+            if !part.is_empty() && !parts.contains(&part) {
+                parts.push(part);
+            }
+        }
+        parts.join(", ")
+    });
     if response.clicked() && !auto {
         attachment_clicked(&view.chat.id, message, media, actions);
     }
@@ -10997,8 +11110,10 @@ fn voice_player(
             let mut wave_middle = None;
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
+                // A seek needs a pointer position, so the waveform is not
+                // focusable: the focused message's arrows seek instead.
                 let (rect, response) =
-                    ui.allocate_exact_size(vec2(wave_width, bar_height), Sense::click());
+                    ui.allocate_exact_size(vec2(wave_width, bar_height), Sense::CLICK);
                 wave_middle = Some(rect.center().y);
                 let pitch = 3.0;
                 let count = (rect.width() / pitch).floor() as usize;
@@ -11329,7 +11444,10 @@ fn selection_bar(app: &mut App, ui: &mut egui::Ui, chat: &str, selected: &[Strin
             });
             let width = widgets::menu_width(ui, &["Delete for everyone", "Delete for me"], true);
             let mut actions = Vec::new();
+            // The background takes clicks, not focus: a focusable one is a
+            // nameless Tab stop.
             egui::Popup::menu(&delete)
+                .sense(Sense::CLICK)
                 .width(width)
                 .frame(widgets::menu_frame(&palette))
                 .show(|ui| {
@@ -12783,6 +12901,15 @@ fn pending_strip(app: &mut App, ui: &mut egui::Ui) {
                 Sense::hover()
             };
             let (rect, response) = ui.allocate_exact_size(Vec2::splat(tile), sense);
+            // A picture that opens the cropper is named by what it opens.
+            if editable {
+                widgets::name_button_with(&response, || {
+                    crate::a11y::fill(
+                        &crate::i18n::gettext(app.locale, "Edit picture {number}"),
+                        &[("number", &(index + 1).to_string())],
+                    )
+                });
+            }
             if ui.is_rect_visible(rect) {
                 // Lifted off the chat like a bubble, with a bubble's corners.
                 let radius = CornerRadius::same(widgets::BUBBLE_RADIUS);
@@ -12902,6 +13029,12 @@ fn pending_strip(app: &mut App, ui: &mut egui::Ui) {
                     Rect::from_center_size(rect.right_top() + vec2(-10.0, 10.0), Vec2::splat(18.0));
                 let close_response =
                     ui.interact(close, ui.id().with(("unstage", item.id)), Sense::click());
+                widgets::name_button_with(&close_response, || {
+                    crate::a11y::fill(
+                        &crate::i18n::gettext(app.locale, "Remove attachment {number}"),
+                        &[("number", &(index + 1).to_string())],
+                    )
+                });
                 ui.painter()
                     .circle_filled(close.center(), 9.0, palette.overlay);
                 theme::paint_icon(ui, Icon::X, close, 12.0, palette.text);

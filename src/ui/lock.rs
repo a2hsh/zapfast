@@ -66,6 +66,8 @@ fn password(app: &mut App, ui: &mut egui::Ui) {
             .hint_text(gettext(locale, "Password"))
             .desired_width(f32::INFINITY),
     );
+    // The placeholder is all the field shows of what it is for.
+    super::widgets::name_field(&field, &gettext(locale, "Password"));
     if ui.memory(|memory| memory.focused().is_none()) && !checking {
         field.request_focus();
     }

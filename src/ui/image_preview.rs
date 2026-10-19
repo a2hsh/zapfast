@@ -352,7 +352,7 @@ fn header(
                         Action::FitImage,
                     )
                 };
-                if theme::soft_button(ui, &palette, None, &label, false)
+                if theme::soft_action_button(ui, &palette, None, &label, false)
                     .on_hover_text(hint)
                     .clicked()
                 {
@@ -621,15 +621,14 @@ fn still(
                         |ui| {
                             let image_response =
                                 ui.add(image.fit_to_exact_size(size).sense(egui::Sense::click()));
-                            if let Some(name) = name {
-                                image_response.widget_info(|| {
-                                    egui::WidgetInfo::labeled(
-                                        egui::WidgetType::Image,
-                                        ui.is_enabled(),
-                                        name,
-                                    )
-                                });
-                            }
+                            // Named as the arrows say the item, or
+                            // "Picture" without an album; its menu key
+                            // opens Copy, Save and Open.
+                            let picture = crate::i18n::gettext(app.locale, "Picture");
+                            crate::ui::widgets::name_field(
+                                &image_response,
+                                name.unwrap_or(&picture),
+                            );
                             // The download the reader was on brought this
                             // picture: focus moves on to it rather than to
                             // the window.
@@ -649,7 +648,10 @@ fn still(
                                 true,
                             )
                             .max(180.0);
+                            // The background takes clicks, not focus: a
+                            // focusable one is a nameless Tab stop.
                             egui::Popup::context_menu(&image_response)
+                                .sense(egui::Sense::CLICK)
                                 .width(menu_width)
                                 .frame(crate::ui::widgets::menu_frame(&palette))
                                 .show(|ui| {
@@ -1426,7 +1428,7 @@ pub fn show_sticker(app: &mut App, ctx: &egui::Context) {
                     ),
                 };
                 let label = crate::i18n::gettext(app.locale, label);
-                let button = theme::soft_button(ui, &palette, Some(icon), &label, false);
+                let button = theme::soft_action_button(ui, &palette, Some(icon), &label, false);
                 ui.ctx()
                     .data_mut(|data| data.insert_temp(sticker_favorite_id(), button.rect));
                 if button.clicked() {

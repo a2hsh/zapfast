@@ -63,11 +63,12 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             };
             ui.painter().rect_filled(screen, 0.0, backdrop);
             // Clicks and scrolling stop here rather than reaching the chat
-            // drawn underneath.
+            // drawn underneath. They take the pointer only: a focusable
+            // backdrop would be a nameless Tab stop.
             ui.interact(
                 screen,
                 egui::Id::new(SURFACE).with("backdrop"),
-                egui::Sense::click_and_drag(),
+                egui::Sense::CLICK | egui::Sense::DRAG,
             );
             // Where ZapFast draws the title bar, the screen's top drags the
             // window, beneath the corner's buttons.
@@ -694,7 +695,10 @@ impl Picker<'_> {
                 theme::icon(ui, self.icon, 13.0, self.palette.secondary);
                 theme::text(ui, self.title, theme::medium(12.0), self.palette.secondary);
             });
-            egui::ComboBox::from_id_salt(self.salt)
+            // Named by the title drawn above it, with the device as its value.
+            let title = self.title.to_owned();
+            let value = label.clone();
+            let shown = egui::ComboBox::from_id_salt(self.salt)
                 .selected_text(label)
                 .width(PICKER)
                 .truncate()
@@ -714,6 +718,15 @@ impl Picker<'_> {
                         }
                     }
                 });
+            shown.response.widget_info(|| {
+                let mut info = egui::WidgetInfo::labeled(
+                    egui::WidgetType::ComboBox,
+                    shown.response.enabled(),
+                    title.as_str(),
+                );
+                info.current_text_value = Some(value.clone());
+                info
+            });
         });
     }
 }
