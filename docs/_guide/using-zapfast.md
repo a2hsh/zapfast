@@ -130,7 +130,9 @@ chat holds three pins at a time, and ZapFast refuses a fourth instead of
 quietly replacing one. A line under the chat's header shows the newest pin,
 with a small bar at its left marking how many pins there are and which one is
 shown. Click the line to open that message; the line then moves on to the next
-pin, so repeated clicks walk through them all.
+pin, so repeated clicks walk through them all. From the keyboard the line is
+the Tab stop after the chat's header: Enter opens its message, which becomes
+the message list's current message, and the line moves on to the next pin.
 A pinned message carries a pin beside its time, and the chat shows a notice
 where the pin was made, naming who made it. Pins made on your phone or by
 others arrive the same way. A pin leaves when it expires, and a message
@@ -864,11 +866,58 @@ a group call's menu says that group calls happen on the phone, and a call
 link's row says it has nothing to open. In the New call list, Enter or
 Shift+F10 opens a menu with Voice call and Video call.
 
-In the chat view, Tab moves through the message input and its buttons, chat
-search, the chat info panel, the message list, the rail, the chat list's
-header, search, the chat filters and the chat list, then returns to the
-input. Shift+Tab goes back; hidden controls are skipped. Single messages,
-their links and phone numbers, reactions and chat rows are not stops. The
-React and Reply buttons that appear beside a hovered message are for the
-pointer only; keyboard and screen-reader users reach both from the message
-menu. Alt+Up/Down switches conversations.
+Groups of buttons are toolbars, each a single Tab stop that a screen reader
+names on the way in: Navigation (the rail: Chats, Calls, Starred, the button
+that shows a hidden chat list, Archived, Locked, Settings and your picture),
+Chat list actions (Back, New chat, or New call on the Calls page, and hide
+the chat list), Filters (All, Unread, the other filters
+and the label chips, or All and Missed on the Calls page), Chat actions (the
+chat's info, search in the chat, the chat's menu, a one-to-one chat's voice
+and video call and, in a narrow window, Back to chats), which is named by
+what the chat header shows, the chat's name and the line under it, such as
+online or typing, and Message actions (plus, emoji, and send or record). In a
+toolbar, Left and Right move between its buttons (Up and Down in Navigation,
+which runs down the window's left edge), Home and End go to the first and
+the last, and Tab leaves it at once; coming back lands on the button you
+left. The active filter, and the rail's destination on screen, read as
+pressed. The chats' avatars between the rail's buttons are not part of
+Navigation: while the list is hidden they are the chat list, the next stop.
+Enter or Space on your picture, the last button of Navigation, opens the
+account switcher with focus on the first account; Up and Down move through the accounts and Add account, and Escape
+returns to your picture. Choosing an account moves focus to its message
+field, and Add account to the new account's linking screen.
+
+The chat view has four sections: the chat list (the rail, the list's
+toolbars, search and the list, or the call history on the Calls page), the
+conversation (Chat actions, the pinned message line, the chat's search pane
+and the message list), the chat info panel while it is open, and the
+composer (the message input and Message actions). F6 moves to the next
+section and Shift+F6 to the previous one, skipping sections that are not
+shown: with no chat open only the chat list is left, and a read-only chat
+has no composer. The chat list, the conversation and the info panel are
+entered where you left them, or on their list (the info panel on its Close
+button) the first time; the composer is always entered on the message
+input. Alt+3 (Control+3 on macOS) moves to the open chat's first unread
+message, the one read as "Unread", in the message list. When that message is
+older than what is loaded, the screen reader says "Loading unread messages"
+and focus moves there once older history has loaded; if the phone is
+offline, or history does not arrive within 15 seconds, it says so and focus
+stays, and any key you press meanwhile cancels the wait. With nothing unread
+or no chat open, focus stays where it is and the screen reader says so. On
+macOS, Control+1 to Control+3 can also be Mission Control's "Switch to
+Desktop" shortcuts, which are off by default; while they are on, macOS takes
+these keys first.
+
+In the chat view, Tab cycles through the message input, the Message actions
+toolbar, then from the top left of the window the Navigation toolbar (the
+rail), the Chat list actions toolbar, search, the Filters toolbar, the chat
+list (the rail's avatars while the list is hidden), the Chat actions
+toolbar, the pinned message line while the chat has pins, the chat's
+search pane while it is open, the chat info panel and the message list, and
+back to the input: the composer comes last, as in the
+window. Shift+Tab reverses that order; hidden controls are skipped. Single
+messages, their links and phone numbers, reactions and chat rows are not
+stops in this cycle. The React and Reply
+buttons that appear beside a hovered message are for the pointer only;
+keyboard and screen-reader users reach both from the message menu.
+Alt+Up/Down switches conversations.

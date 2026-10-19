@@ -14,6 +14,7 @@ use crate::i18n::{Locale, gettext};
 use crate::model::{Action, CallFilter, CallStatus, Content, Message};
 use crate::theme::{self, Icon};
 use crate::ui::focus::{Stop, TabStop};
+use crate::ui::toolbar::{ToolbarButton, toolbar};
 use crate::ui::widgets;
 
 /// One call, as its entry reads it.
@@ -615,28 +616,39 @@ pub fn filter_chip_id(filter: CallFilter) -> egui::Id {
 pub fn filter_chips(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     ui.add_space(8.0);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing = vec2(4.0, 6.0);
-        for filter in CallFilter::EVERY {
-            let selected = app.call_filter == filter;
-            let chip =
-                widgets::filter_chip(ui, &palette, filter.label(app.locale).as_ref(), 0, selected)
-                    .tab_stop(match filter {
-                        CallFilter::All => Stop::All,
-                        CallFilter::Missed => Stop::Missed,
-                    });
-            ui.ctx()
-                .data_mut(|data| data.insert_temp(filter_chip_id(filter), chip.rect));
-            if chip.clicked() {
-                // A second click on Missed returns to every call, as the
-                // chat list's chips do.
-                let next = if selected { CallFilter::All } else { filter };
-                if next != app.call_filter {
-                    app.actions.push(Action::SetCallFilter(next));
+    // One toolbar, as the chat list's filters are.
+    let label = gettext(app.locale, "Filters");
+    toolbar(ui, filters_toolbar_id(), &label, Stop::Filters, |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = vec2(4.0, 6.0);
+            for filter in CallFilter::EVERY {
+                let selected = app.call_filter == filter;
+                let chip = widgets::filter_chip(
+                    ui,
+                    &palette,
+                    filter.label(app.locale).as_ref(),
+                    0,
+                    selected,
+                )
+                .in_toolbar(filters_toolbar_id());
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(filter_chip_id(filter), chip.rect));
+                if chip.clicked() {
+                    // A second click on Missed returns to every call, as the
+                    // chat list's chips do.
+                    let next = if selected { CallFilter::All } else { filter };
+                    if next != app.call_filter {
+                        app.actions.push(Action::SetCallFilter(next));
+                    }
                 }
             }
-        }
+        });
     });
+}
+
+/// The Calls page's filter chips' toolbar.
+pub(crate) fn filters_toolbar_id() -> egui::Id {
+    egui::Id::new("call-filters-toolbar")
 }
 
 /// Stable id of a history row, for tests.

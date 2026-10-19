@@ -6,7 +6,7 @@ use super::{Cue, Gesture, Target, command};
 use crate::{
     app::App,
     model::{Content, StickerShelf},
-    ui::focus::Stop as Control,
+    ui::{conversation::composer_toolbar_id, focus::Stop as Control},
 };
 use egui::{Key as K, Modifiers, PointerButton};
 use std::time::Duration;
@@ -156,7 +156,7 @@ pub(super) fn script() -> Vec<Cue> {
     let esc = |label| Key(K::Escape, Modifiers::NONE, label);
 
     // The rounded composer and its plus menu.
-    add(0.8, Move(Stop(Control::Attach)));
+    add(0.8, Move(Tool(composer_toolbar_id, 0)));
     add(1.2, Click(left));
     add(2.4, Move(Label("Create poll")));
     add(2.8, Click(left));
@@ -225,7 +225,8 @@ pub(super) fn script() -> Vec<Cue> {
     add(55.0, esc("Esc · Close the menu"));
 
     // Record a voice message, then pick a playback speed.
-    add(55.6, Move(Stop(Control::Send)));
+    // Record closes the composer's toolbar: plus, emoji, record.
+    add(55.6, Move(Tool(composer_toolbar_id, 2)));
     add(56.0, Click(left));
     add(
         59.0,

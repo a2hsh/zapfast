@@ -374,6 +374,40 @@ pub struct UnreadDivider {
     pub placed: bool,
 }
 
+impl UnreadDivider {
+    /// The first unread message among the chat's `messages`, which the
+    /// divider stands above: the count-th incoming one from the end. None
+    /// while it is not loaded.
+    pub fn first_unread<'a>(&self, messages: &'a [Message]) -> Option<&'a Message> {
+        messages
+            .iter()
+            .rev()
+            .filter(|message| !message.from_me)
+            .nth(self.count.saturating_sub(1) as usize)
+    }
+}
+
+/// How long Alt+3 waits for older history without any arriving.
+const UNREAD_JUMP_WAIT: Duration = Duration::from_secs(15);
+
+/// Alt+3 asked for a first unread message that was not loaded yet.
+#[derive(Clone, Debug, PartialEq)]
+struct UnreadJump {
+    chat: ChatId,
+    /// The widget focused when it was asked. Focus moved on by the reader
+    /// cancels the jump, so a page arriving later does not take it back.
+    focus: Option<egui::Id>,
+    /// When the wait ends if no older history arrives before then.
+    deadline: Instant,
+    /// The time of the chat's oldest loaded message when older history last
+    /// arrived. A new message at the bottom is not older history, so it
+    /// does not move the wait on.
+    oldest: Option<i64>,
+    /// The frame Alt+3 was taken in. A key or text in a later one cancels
+    /// the jump: the reader has gone on typing or moving.
+    frame: u64,
+}
+
 /// A replied message the keys asked to go to while it was not loaded. It
 /// ends quietly as soon as the reader moves on, as Alt+3's jump does.
 #[derive(Clone)]
@@ -391,6 +425,15 @@ struct PendingFollow {
     /// request that failed answers with its error instead
     /// (`Event::HistoryUnavailable`), and ends the wait.
     answered: bool,
+}
+
+/// How long until the phone may be asked for older history again, as it
+/// backs off after empty answers; None when it may be asked now.
+fn phone_cooldown_left(conversation: &Conversation) -> Option<Duration> {
+    let cooldown =
+        (PHONE_COOLDOWN * 2u32.pow(conversation.phone_misses)).min(Duration::from_secs(600));
+    let elapsed = conversation.phone_answered?.elapsed();
+    cooldown.checked_sub(elapsed).filter(|left| !left.is_zero())
 }
 
 pub struct App {
@@ -514,6 +557,8 @@ pub struct App {
     pub invite: Option<crate::model::GroupInvite>,
     /// Where the unread messages began when the open chat was opened.
     pub unread_divider: Option<UnreadDivider>,
+    /// Alt+3's first unread message, while older history loads toward it.
+    unread_jump: Option<UnreadJump>,
     /// Messages selected in a chat, in the chat's order.
     pub selection: Option<(ChatId, Vec<String>)>,
     /// The message a Shift-click range starts from.
@@ -1431,6 +1476,7 @@ impl App {
             receipts_watch: None,
             invite: None,
             unread_divider: None,
+            unread_jump: None,
             selection: None,
             selection_anchor: None,
             sweep: None,
@@ -1824,6 +1870,8 @@ impl App {
         // A chat menu asked for and not drawn yet was for the previous
         // account's chat: the next one can hold a chat with the same id.
         self.open_chat_menu = None;
+        // Alt+3's wait for older history is the previous account's chat's.
+        self.unread_jump = None;
     }
 
     fn add_account(&mut self) {
@@ -5418,12 +5466,7 @@ impl App {
         if !matches!(account.link, LinkStatus::Connected) {
             return;
         }
-        let cooldown =
-            (PHONE_COOLDOWN * 2u32.pow(conversation.phone_misses)).min(Duration::from_secs(600));
-        if conversation
-            .phone_answered
-            .is_some_and(|answered| answered.elapsed() < cooldown)
-        {
+        if phone_cooldown_left(conversation).is_some() {
             return;
         }
         conversation.fetching_phone = true;
@@ -5589,6 +5632,8 @@ impl App {
                 self.store_draft(&previous, &draft);
             }
             self.selection = None;
+            // Alt+3's pending jump belongs to the chat it was pressed in.
+            self.unread_jump = None;
             self.unread_divider =
                 self.chat(&id)
                     .filter(|chat| chat.unread > 0)
@@ -8482,6 +8527,46 @@ impl App {
                     data.insert_temp(crate::theme::keyboard_focus_id(), true);
                 });
             }
+            Action::FocusFirstUnread => {
+                let chat = self.current_chat().map(|chat| chat.id.clone());
+                let divider = chat.as_ref().is_some_and(|chat| {
+                    self.unread_divider
+                        .as_ref()
+                        .is_some_and(|divider| divider.chat == *chat)
+                });
+                let (Some(chat), true) = (chat.clone(), divider) else {
+                    // Focus stays where it was, and the reader hears why.
+                    let refusal = if chat.is_none() {
+                        crate::i18n::gettext(self.locale, "No chat open")
+                    } else {
+                        crate::i18n::gettext(self.locale, "No unread messages")
+                    };
+                    self.announcer
+                        .say(crate::announcer::Category::Status, refusal);
+                    return;
+                };
+                // Lands now when the message is loaded; otherwise older
+                // history loads toward it, frame by frame.
+                let oldest = self
+                    .conversations
+                    .get(&chat)
+                    .and_then(|conversation| conversation.messages.first())
+                    .map(|message| message.timestamp);
+                self.unread_jump = Some(UnreadJump {
+                    chat,
+                    focus: ctx.memory(|memory| memory.focused()),
+                    deadline: Instant::now() + UNREAD_JUMP_WAIT,
+                    oldest,
+                    frame: ctx.cumulative_frame_nr(),
+                });
+                self.follow_unread_jump(ctx);
+                if self.unread_jump.is_some() {
+                    self.announcer.say(
+                        crate::announcer::Category::Status,
+                        crate::i18n::gettext(self.locale, "Loading unread messages"),
+                    );
+                }
+            }
             Action::OpenChatMenu(id) => {
                 // The row opens its menu when it is next drawn; the chat is
                 // brought into view so that it is.
@@ -9142,6 +9227,8 @@ impl App {
         for uri in std::mem::take(&mut self.stale_images) {
             crate::image_cache::forget(ctx, &uri);
         }
+        // Older pages that arrived may hold Alt+3's first unread message.
+        self.follow_unread_jump(ctx);
         self.tick(ctx);
         self.tick_audio(ctx);
         self.tick_video(ctx);
@@ -9250,6 +9337,8 @@ impl App {
         self.recording = None;
         self.player.stop();
         self.video.stop();
+        // Alt+3's jump must not take focus after the unlock.
+        self.unread_jump = None;
         self.voice_chat = None;
         self.voice_wanted = None;
         self.video_wanted = None;
@@ -9720,6 +9809,132 @@ impl App {
             self.focus_composer = false;
             self.focus_messages = true;
         }
+    }
+
+    /// Moves Alt+3's jump on: to the first unread message once it is loaded,
+    /// else one older page at a time, the archive's and then the phone's.
+    /// Runs on the frame Alt+3 is pressed and on each frame after, as pages
+    /// arrive. History running out first means nothing more is unread here.
+    /// The wait is short: an offline phone ends it at once, and history not
+    /// arriving for `UNREAD_JUMP_WAIT` ends it then, each said once.
+    fn follow_unread_jump(&mut self, ctx: &egui::Context) {
+        let Some(mut jump) = self.unread_jump.clone() else {
+            return;
+        };
+        let chat = jump.chat.clone();
+        let chat = chat.as_str();
+        // Another chat, a divider gone, the lock, a key, typing, or focus
+        // the reader moved on ends it quietly: they have gone on with
+        // something else, which a page arriving later must not interrupt.
+        // Keys of the frame Alt+3 was taken in are Alt+3's own.
+        let typed = ctx.cumulative_frame_nr() > jump.frame
+            && ctx.input(|input| {
+                input.raw.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        egui::Event::Key { pressed: true, .. }
+                            | egui::Event::Text(_)
+                            | egui::Event::Paste(_)
+                    )
+                })
+            });
+        if self.current_chat().map(|open| open.id.as_str()) != Some(chat)
+            || ctx.memory(|memory| memory.focused()) != jump.focus
+            || self.app_lock.is_locked()
+            || typed
+        {
+            self.unread_jump = None;
+            return;
+        }
+        let Some(divider) = self
+            .unread_divider
+            .as_ref()
+            .filter(|divider| divider.chat == chat)
+        else {
+            self.unread_jump = None;
+            return;
+        };
+        // The account's field directly, so the jump's own state can change
+        // while the conversation is borrowed.
+        let Some(conversation) = self.accounts[self.active].conversations.get(chat) else {
+            return;
+        };
+        // The message the divider stands above, which the list reads as
+        // unread.
+        if let Some(first) = divider.first_unread(&conversation.messages) {
+            let first = first.id.clone();
+            self.unread_jump = None;
+            self.message_cursor.insert(jump.chat, first);
+            // A page load's own anchor would scroll elsewhere first.
+            self.scroll_anchor = None;
+            // Brought into view as the list takes focus.
+            self.reveal_cursor = true;
+            // The Calls tab keeps its history beside the chat, as for Alt+2,
+            // unless a narrow window shows only the history.
+            if self.page != Page::Calls || (crate::ui::narrow(ctx) && !self.call_picked()) {
+                self.page = Page::Chats;
+            }
+            self.focus_search = false;
+            self.focus_composer = false;
+            // The list takes focus when it is next drawn, as for Alt+2.
+            self.focus_messages = true;
+            // Shown as after Tab: the ring goes around the message.
+            ctx.data_mut(|data| {
+                data.insert_temp(crate::theme::keyboard_focus_id(), true);
+            });
+            return;
+        }
+        let now = Instant::now();
+        // The time limit counts from the last older history that arrived:
+        // an older first message, or the first page.
+        let oldest = conversation
+            .messages
+            .first()
+            .map(|message| message.timestamp);
+        if oldest.is_some_and(|oldest| jump.oldest.is_none_or(|before| oldest < before)) {
+            jump.oldest = oldest;
+            jump.deadline = now + UNREAD_JUMP_WAIT;
+            self.unread_jump = Some(jump.clone());
+        }
+        let locale = self.locale;
+        let timed_out =
+            || crate::i18n::gettext(locale, "Couldn't load the unread messages").into_owned();
+        let refusal = if now >= jump.deadline {
+            Some(timed_out())
+        } else if conversation.loading_older
+            || conversation.fetching_phone
+            || (conversation.messages.is_empty() && !conversation.complete)
+        {
+            // A page on its way, or the first page still loading.
+            None
+        } else if !conversation.complete {
+            self.load_older(chat, true);
+            None
+        } else if conversation.phone_exhausted {
+            Some(crate::i18n::gettext(locale, "No unread messages").into_owned())
+        } else if !matches!(self.link, LinkStatus::Connected) {
+            Some(crate::i18n::gettext(locale, "Can't load older messages now").into_owned())
+        } else {
+            self.fetch_older(chat, true);
+            // Between two phone requests: asked when the pause ends, unless
+            // that is past the time limit.
+            match phone_cooldown_left(&self.conversations[chat]) {
+                Some(left) if now + left >= jump.deadline => Some(timed_out()),
+                Some(left) => {
+                    ctx.request_repaint_after(left);
+                    None
+                }
+                None => None,
+            }
+        };
+        if let Some(refusal) = refusal {
+            self.unread_jump = None;
+            self.announcer
+                .say(crate::announcer::Category::Status, refusal);
+            return;
+        }
+        // Woken by history arriving, or at the time limit to give up.
+        ctx.request_repaint_after(jump.deadline.saturating_duration_since(now));
     }
 
     /// Scrolls the open chat to message `id`, loading older history toward it
@@ -12334,6 +12549,24 @@ mod tests {
         app.open_chat_menu = Some("15550001111@s.whatsapp.net".into());
         app.apply(Action::SwitchAccount(AccountId::parse("2").unwrap()), &ctx);
         assert!(app.open_chat_menu.is_none());
+    }
+
+    /// Alt+3 waiting for older history stops with its account: history the
+    /// previous account receives later never moves the list.
+    #[test]
+    fn switching_accounts_ends_the_alt_3_wait() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _commands) = two_accounts(directory.path());
+        let ctx = egui::Context::default();
+        app.unread_jump = Some(UnreadJump {
+            chat: "15550007777@s.whatsapp.net".into(),
+            focus: None,
+            deadline: Instant::now() + UNREAD_JUMP_WAIT,
+            oldest: None,
+            frame: 0,
+        });
+        app.apply(Action::SwitchAccount(AccountId::parse("2").unwrap()), &ctx);
+        assert!(app.unread_jump.is_none());
     }
 
     #[test]
@@ -17461,6 +17694,302 @@ mod tests {
             app.conversations[chat].loading_older,
             "Home on the oldest asks for more"
         );
+    }
+
+    /// A chat with more unread messages than its first page: the fixture
+    /// loads `loaded` of its incoming messages, `ts` 100 on, with the divider
+    /// `unread` from the end, and records what the app asks the backend for.
+    fn unread_beyond_the_page(
+        loaded: i64,
+        unread: u32,
+        conversation: Conversation,
+    ) -> (
+        App,
+        tokio::sync::mpsc::UnboundedReceiver<Command>,
+        std::sync::mpsc::Sender<Event>,
+    ) {
+        let mut app = app();
+        let (backend, commands, events) = Backend::recording_with_events();
+        app.backend = backend;
+        app.link = LinkStatus::Connected;
+        let chat = "fixture@s.whatsapp.net";
+        app.chats = vec![Chat::new(chat.into(), "Fixture".into())];
+        app.open_chat = Some(chat.into());
+        app.page = Page::Chats;
+        app.conversations.insert(
+            chat.into(),
+            Conversation {
+                messages: (100..100 + loaded)
+                    .map(|n| message(chat, &format!("m{n}"), n))
+                    .collect(),
+                ..conversation
+            },
+        );
+        app.unread_divider = Some(UnreadDivider {
+            chat: chat.into(),
+            count: unread,
+            placed: true,
+        });
+        (app, commands, events)
+    }
+
+    fn older_page(chat: &str, from: i64, to: i64, complete: bool) -> Event {
+        Event::Messages {
+            chat: chat.into(),
+            messages: (from..to)
+                .map(|n| message(chat, &format!("m{n}"), n))
+                .collect(),
+            older: true,
+            complete,
+        }
+    }
+
+    /// The history requests sent since the last call. A frame also sends
+    /// presence and update checks, which these tests do not follow.
+    fn sent(commands: &mut tokio::sync::mpsc::UnboundedReceiver<Command>) -> Vec<Command> {
+        std::iter::from_fn(|| commands.try_recv().ok())
+            .filter(|command| {
+                matches!(
+                    command,
+                    Command::LoadChat { .. }
+                        | Command::LoadUntil { .. }
+                        | Command::FetchOlder { .. }
+                )
+            })
+            .collect()
+    }
+
+    /// Alt+3 with the first unread message beyond the loaded page says so,
+    /// pages back through the archive and then the phone, and lands on it
+    /// once it is loaded, as when it already was.
+    #[test]
+    fn alt_3_loads_older_history_up_to_the_first_unread_message() {
+        let chat = "fixture@s.whatsapp.net";
+        let (mut app, mut commands, events) =
+            unread_beyond_the_page(10, 15, Conversation::default());
+        let ctx = egui::Context::default();
+        app.apply(Action::FocusFirstUnread, &ctx);
+        app.announcer.show(&ctx, true);
+        assert!(
+            app.announcer.spoken().contains(&"Loading unread messages"),
+            "{:?}",
+            app.announcer.spoken()
+        );
+        assert!(!app.announcer.spoken().contains(&"No unread messages"));
+        assert!(!app.focus_messages, "nothing to land on yet");
+        assert!(matches!(
+            sent(&mut commands)[..],
+            [Command::LoadChat {
+                before: Some((100, _)),
+                ..
+            }]
+        ));
+        // The archive has two more and ends there: the phone is asked.
+        events.send(older_page(chat, 98, 100, true)).unwrap();
+        app.background_frame(&ctx);
+        assert!(!app.focus_messages);
+        assert!(matches!(
+            sent(&mut commands)[..],
+            [Command::FetchOlder { .. }]
+        ));
+        // The phone's history reaches the archive, which is read again.
+        events
+            .send(Event::OlderFetched {
+                chat: chat.into(),
+                more: true,
+                silent: false,
+            })
+            .unwrap();
+        app.background_frame(&ctx);
+        assert!(matches!(
+            sent(&mut commands)[..],
+            [Command::LoadChat {
+                before: Some((98, _)),
+                ..
+            }]
+        ));
+        events.send(older_page(chat, 90, 98, false)).unwrap();
+        app.background_frame(&ctx);
+        // 90 to 109 are loaded; the 15th incoming from the end is 95.
+        assert!(app.focus_messages);
+        assert_eq!(app.message_cursor[chat], "m95");
+        assert!(app.reveal_cursor);
+        assert!(sent(&mut commands).is_empty(), "no more history asked for");
+    }
+
+    /// When history runs out before the first unread message, nothing more
+    /// can be found: Alt+3 says there is nothing unread.
+    #[test]
+    fn alt_3_says_nothing_is_unread_when_history_runs_out() {
+        let (mut app, mut commands, _events) = unread_beyond_the_page(
+            10,
+            15,
+            Conversation {
+                complete: true,
+                phone_exhausted: true,
+                ..Default::default()
+            },
+        );
+        let ctx = egui::Context::default();
+        app.apply(Action::FocusFirstUnread, &ctx);
+        app.announcer.show(&ctx, true);
+        assert!(app.announcer.spoken().contains(&"No unread messages"));
+        assert!(!app.announcer.spoken().contains(&"Loading unread messages"));
+        assert!(!app.focus_messages);
+        assert!(sent(&mut commands).is_empty());
+    }
+
+    /// With the archive read to its start and the phone offline, nothing more
+    /// can load now: Alt+3 says so at once and nothing waits.
+    #[test]
+    fn alt_3_offline_says_so_at_once() {
+        let (mut app, mut commands, _events) = unread_beyond_the_page(
+            10,
+            15,
+            Conversation {
+                complete: true,
+                ..Default::default()
+            },
+        );
+        app.link = LinkStatus::Connecting;
+        let ctx = egui::Context::default();
+        app.apply(Action::FocusFirstUnread, &ctx);
+        app.announcer.show(&ctx, true);
+        assert!(
+            app.announcer
+                .spoken()
+                .contains(&"Can't load older messages now"),
+            "{:?}",
+            app.announcer.spoken()
+        );
+        assert!(!app.announcer.spoken().contains(&"Loading unread messages"));
+        assert!(app.unread_jump.is_none(), "nothing waits");
+        assert!(sent(&mut commands).is_empty());
+        assert!(!app.focus_messages);
+    }
+
+    /// History that never comes ends the wait after a while, said once; a
+    /// page arriving after that takes no focus.
+    #[test]
+    fn alt_3_gives_up_when_history_does_not_come() {
+        let chat = "fixture@s.whatsapp.net";
+        let (mut app, _commands, events) = unread_beyond_the_page(10, 15, Conversation::default());
+        let ctx = egui::Context::default();
+        app.apply(Action::FocusFirstUnread, &ctx);
+        app.background_frame(&ctx);
+        // "Loading unread messages" is heard in that frame.
+        app.announcer.show(&ctx, true);
+        assert!(app.unread_jump.is_some(), "waiting for the archive");
+        app.unread_jump.as_mut().unwrap().deadline = Instant::now() - Duration::from_secs(1);
+        app.background_frame(&ctx);
+        app.announcer.show(&ctx, true);
+        assert!(
+            app.announcer
+                .spoken()
+                .contains(&"Couldn't load the unread messages"),
+            "{:?}",
+            app.announcer.spoken()
+        );
+        assert!(app.unread_jump.is_none(), "said once, then done");
+        events.send(older_page(chat, 90, 100, false)).unwrap();
+        app.background_frame(&ctx);
+        assert!(!app.focus_messages);
+    }
+
+    /// Only older history moves the wait on: a new message arriving at the
+    /// bottom of the chat meanwhile does not start the time limit again.
+    #[test]
+    fn alt_3_waits_longer_only_for_older_history() {
+        let chat = "fixture@s.whatsapp.net";
+        let (mut app, _commands, events) = unread_beyond_the_page(10, 15, Conversation::default());
+        let ctx = egui::Context::default();
+        app.apply(Action::FocusFirstUnread, &ctx);
+        app.background_frame(&ctx);
+        app.announcer.show(&ctx, true);
+        let expire = |app: &mut App| {
+            app.unread_jump.as_mut().unwrap().deadline = Instant::now() - Duration::from_secs(1);
+        };
+        // An older page, still short of the first unread one: waited for again.
+        expire(&mut app);
+        events.send(older_page(chat, 97, 100, false)).unwrap();
+        app.background_frame(&ctx);
+        app.announcer.show(&ctx, true);
+        assert!(app.unread_jump.is_some(), "older history moves the wait on");
+        // A new message at the bottom: the time is up all the same.
+        expire(&mut app);
+        events
+            .send(Event::Messages {
+                chat: chat.into(),
+                messages: vec![message(chat, "m200", 200)],
+                older: false,
+                complete: false,
+            })
+            .unwrap();
+        app.background_frame(&ctx);
+        app.announcer.show(&ctx, true);
+        assert!(
+            app.unread_jump.is_none(),
+            "a new message is not older history"
+        );
+        assert!(
+            app.announcer
+                .spoken()
+                .contains(&"Couldn't load the unread messages"),
+            "{:?}",
+            app.announcer.spoken()
+        );
+    }
+
+    /// Locking ends a pending jump: after the unlock, a page arriving takes
+    /// no focus.
+    #[test]
+    fn locking_ends_a_pending_unread_jump() {
+        let chat = "fixture@s.whatsapp.net";
+        let (mut app, _commands, events) = unread_beyond_the_page(10, 15, Conversation::default());
+        app.settings.app_lock_hash = Some(crate::app_lock::verifier("fixture"));
+        let ctx = egui::Context::default();
+        app.apply(Action::FocusFirstUnread, &ctx);
+        assert!(app.unread_jump.is_some());
+        app.lock_app();
+        assert!(app.unread_jump.is_none());
+        app.app_lock.unlocked(true);
+        events.send(older_page(chat, 90, 100, false)).unwrap();
+        app.background_frame(&ctx);
+        assert!(!app.focus_messages);
+    }
+
+    /// A jump still loading ends when another chat opens or focus moves:
+    /// the history arriving later takes no focus.
+    #[test]
+    fn a_pending_unread_jump_ends_with_the_chat_or_a_focus_move() {
+        let chat = "fixture@s.whatsapp.net";
+        let other = "other@s.whatsapp.net";
+        for focus_moves in [false, true] {
+            let (mut app, _commands, events) =
+                unread_beyond_the_page(10, 15, Conversation::default());
+            app.chats.push(Chat::new(other.into(), "Other".into()));
+            let ctx = egui::Context::default();
+            app.apply(Action::FocusFirstUnread, &ctx);
+            if focus_moves {
+                ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("elsewhere")));
+            } else {
+                app.apply(Action::OpenChat(other.into()), &ctx);
+                app.apply(Action::OpenChat(chat.into()), &ctx);
+                app.unread_divider = Some(UnreadDivider {
+                    chat: chat.into(),
+                    count: 15,
+                    placed: true,
+                });
+            }
+            events.send(older_page(chat, 90, 100, false)).unwrap();
+            app.background_frame(&ctx);
+            assert!(!app.focus_messages, "focus moves: {focus_moves}");
+            assert_ne!(
+                app.message_cursor.get(chat).map(String::as_str),
+                Some("m95"),
+                "focus moves: {focus_moves}"
+            );
+        }
     }
 
     #[test]

@@ -4,6 +4,11 @@
 //! switcher) at the bottom. While the chat list is hidden, the chats'
 //! avatars fill the rail between the two, so every chat is still one click
 //! away. Beside the list they would only repeat it.
+//!
+//! From the keyboard the rail is one Tab stop, a vertical toolbar named
+//! Navigation whose buttons Up and Down walk, top to bottom. The chats'
+//! avatars are not among them: while the list is hidden they are the
+//! keyboard's chat list (`chats.rs`), the stop after the rail.
 
 use egui::{Frame, Margin, Rect, Sense, Vec2, vec2};
 
@@ -12,7 +17,8 @@ use crate::i18n::gettext;
 use crate::model::{Action, Page};
 use crate::theme::{self, Icon, Palette};
 
-use super::focus::{Stop, TabStop};
+use super::focus::Stop;
+use super::toolbar::{self, ToolbarButton};
 use super::widgets;
 
 /// Width of the rail, on every platform.
@@ -46,6 +52,18 @@ pub(crate) fn rect_id() -> egui::Id {
 /// Stable id of a destination's button, for tests and the demo.
 pub fn destination_id(destination: Destination) -> egui::Id {
     egui::Id::new(("nav-rail-destination", destination as u8))
+}
+
+/// The rail's toolbar: every button of the rail, the one Tab stop.
+pub fn toolbar_id() -> egui::Id {
+    egui::Id::new("nav-rail-toolbar")
+}
+
+/// The rail's buttons as last drawn, top to bottom: our picture, the
+/// account switcher, is always the last.
+#[cfg(test)]
+pub(crate) fn buttons(ctx: &egui::Context) -> Vec<egui::Id> {
+    toolbar::buttons(ctx, toolbar_id())
 }
 
 /// How far the macOS traffic lights reach past the rail: what a header
@@ -163,81 +181,92 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, hidden: bool) {
         .exact_size(WIDTH)
         .show_separator_line(false)
         .frame(Frame::new().fill(palette.rail()).inner_margin(Margin::ZERO));
+    // One Tab stop for the whole rail, named on the way in.
+    let label = gettext(app.locale, "Navigation").into_owned();
     let response = panel.show(ui, |ui| {
-        // The avatars keep the spacing they always had; the rest is tight.
-        let row_gap = ui.spacing().item_spacing.y;
-        ui.spacing_mut().item_spacing.y = 0.0;
-        let width = ui.available_width();
-        if theme::traffic_light_inset(ui.ctx()) > 0.0 {
-            // The traffic lights, or the caption buttons ZapFast draws where
-            // the desktop puts them on the left (GNOME's round ones end 42
-            // points down), take the rail's top; it starts under them.
-            let (strip, _) = ui.allocate_exact_size(vec2(width, LIGHTS_CLEARANCE), Sense::hover());
-            super::titlebar_drag(ui, strip);
-        } else {
-            ui.add_space(GAP);
-        }
-        let bottom: Vec<Destination> = [
-            Destination::Archived,
-            Destination::Locked,
-            Destination::Settings,
-        ]
-        .into_iter()
-        .filter(|destination| destination.offered(app))
-        .collect();
-        let foot = bottom.len() as f32 * (PLATE + GAP) + GAP + AVATAR + GAP;
-        let minimum = 3.0 * CELL
-            + foot
-            + if hidden {
-                CELL + GAP + MIN_AVATARS
+        toolbar::vertical_toolbar(ui, toolbar_id(), &label, Stop::Rail, |ui| {
+            // The avatars keep the spacing they always had; the rest is tight.
+            let row_gap = ui.spacing().item_spacing.y;
+            ui.spacing_mut().item_spacing.y = 0.0;
+            let width = ui.available_width();
+            if theme::traffic_light_inset(ui.ctx()) > 0.0 {
+                // The traffic lights, or the caption buttons ZapFast draws where
+                // the desktop puts them on the left (GNOME's round ones end 42
+                // points down), take the rail's top; it starts under them.
+                let (strip, _) =
+                    ui.allocate_exact_size(vec2(width, LIGHTS_CLEARANCE), Sense::hover());
+                super::titlebar_drag(ui, strip);
             } else {
-                0.0
-            };
-        let height = ui.available_height().max(minimum);
-        egui::ScrollArea::vertical()
-            .id_salt("navigation-rail")
-            .auto_shrink([false, false])
-            .min_scrolled_height(0.0)
-            .show(ui, |ui| {
-                // Keep the usual spacing in a tall window. In a short one
-                // the content keeps its minimum height and scrolls instead
-                // of leaving the bottom buttons beyond the window.
-                ui.set_height(height);
-                for destination in [Destination::Chats, Destination::Calls, Destination::Starred] {
-                    destination_button(app, ui, &palette, destination, CELL);
-                }
-                if hidden {
-                    // A cell of its own under Starred: nothing above it moves
-                    // when the list comes and goes.
-                    show_list_button(app, ui, &palette);
-                    ui.add_space(GAP / 2.0);
-                    let line = Rect::from_center_size(
-                        ui.cursor().min + vec2(width / 2.0, 0.0),
-                        vec2(DIVIDER, 1.0),
-                    );
-                    ui.painter().rect_filled(line, 0.0, palette.outline);
-                    ui.add_space(GAP / 2.0);
-                    let middle = (ui.available_height() - foot).max(MIN_AVATARS);
-                    ui.allocate_ui_with_layout(
-                        vec2(width, middle),
-                        egui::Layout::top_down(egui::Align::Center),
-                        |ui| {
-                            ui.spacing_mut().item_spacing.y = row_gap;
-                            super::chats::compact_list(app, ui);
-                        },
-                    );
-                }
-                let rest = (ui.available_height() - foot).max(0.0);
-                ui.add_space(rest);
-                for destination in bottom {
-                    ui.add_space(GAP);
-                    destination_button(app, ui, &palette, destination, PLATE);
-                }
                 ui.add_space(GAP);
-                ui.vertical_centered(|ui| {
-                    super::accounts::avatar_button(app, ui, AVATAR).tab_stop(Stop::Profile);
+            }
+            let bottom: Vec<Destination> = [
+                Destination::Archived,
+                Destination::Locked,
+                Destination::Settings,
+            ]
+            .into_iter()
+            .filter(|destination| destination.offered(app))
+            .collect();
+            let foot = bottom.len() as f32 * (PLATE + GAP) + GAP + AVATAR + GAP;
+            let minimum = 3.0 * CELL
+                + foot
+                + if hidden {
+                    CELL + GAP + MIN_AVATARS
+                } else {
+                    0.0
+                };
+            let height = ui.available_height().max(minimum);
+            egui::ScrollArea::vertical()
+                .id_salt("navigation-rail")
+                .auto_shrink([false, false])
+                .min_scrolled_height(0.0)
+                .show(ui, |ui| {
+                    // Keep the usual spacing in a tall window. In a short one
+                    // the content keeps its minimum height and scrolls instead
+                    // of leaving the bottom buttons beyond the window.
+                    ui.set_height(height);
+                    for destination in
+                        [Destination::Chats, Destination::Calls, Destination::Starred]
+                    {
+                        destination_button(app, ui, &palette, destination, CELL);
+                    }
+                    if hidden {
+                        // A cell of its own under Starred: nothing above it
+                        // moves when the list comes and goes.
+                        show_list_button(app, ui, &palette);
+                        ui.add_space(GAP / 2.0);
+                        let line = Rect::from_center_size(
+                            ui.cursor().min + vec2(width / 2.0, 0.0),
+                            vec2(DIVIDER, 1.0),
+                        );
+                        ui.painter().rect_filled(line, 0.0, palette.outline);
+                        ui.add_space(GAP / 2.0);
+                        let middle = (ui.available_height() - foot).max(MIN_AVATARS);
+                        ui.allocate_ui_with_layout(
+                            vec2(width, middle),
+                            egui::Layout::top_down(egui::Align::Center),
+                            |ui| {
+                                ui.spacing_mut().item_spacing.y = row_gap;
+                                // The avatars' list is the next stop, not
+                                // buttons of the toolbar around it.
+                                toolbar::beside(ui, toolbar_id(), |ui| {
+                                    super::chats::compact_list(app, ui);
+                                });
+                            },
+                        );
+                    }
+                    let rest = (ui.available_height() - foot).max(0.0);
+                    ui.add_space(rest);
+                    for destination in bottom {
+                        ui.add_space(GAP);
+                        destination_button(app, ui, &palette, destination, PLATE);
+                    }
+                    ui.add_space(GAP);
+                    ui.vertical_centered(|ui| {
+                        super::accounts::avatar_button(app, ui, AVATAR).in_toolbar(toolbar_id());
+                    });
                 });
-            });
+        });
     });
     let rect = response.response.rect;
     ui.ctx().data_mut(|data| data.insert_temp(rect_id(), rect));
@@ -262,7 +291,7 @@ fn show_list_button(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                 palette.text,
                 &super::keys::label("Show the chat list (Ctrl+B)"),
             )
-            .tab_stop(Stop::Sidebar)
+            .in_toolbar(toolbar_id())
             .clicked()
             {
                 app.actions.push(Action::ToggleSidebar);
@@ -283,10 +312,9 @@ fn destination_button(
 ) {
     let lit = destination.lit(app);
     let mut badge = 0;
-    let (icon, stop, label) = match destination {
+    let (icon, label) = match destination {
         Destination::Chats => (
             Icon::MessageCircle,
-            Stop::Chats,
             format!(
                 "{} ({})",
                 gettext(app.locale, "Chats"),
@@ -295,7 +323,6 @@ fn destination_button(
         ),
         Destination::Calls => (
             Icon::Phone,
-            Stop::Calls,
             format!(
                 "{} ({})",
                 gettext(app.locale, "Calls"),
@@ -304,27 +331,17 @@ fn destination_button(
         ),
         Destination::Starred => (
             Icon::Star,
-            Stop::Starred,
             gettext(app.locale, "Starred messages").into_owned(),
         ),
         Destination::Archived => {
             // The count the Archived chip carried: archived chats unread.
             badge = app.archived_unread() as u32;
-            (
-                Icon::Archive,
-                Stop::Archived,
-                gettext(app.locale, "Archived").into_owned(),
-            )
+            (Icon::Archive, gettext(app.locale, "Archived").into_owned())
         }
-        Destination::Locked => (
-            Icon::Lock,
-            Stop::Locked,
-            gettext(app.locale, "Locked").into_owned(),
-        ),
+        Destination::Locked => (Icon::Lock, gettext(app.locale, "Locked").into_owned()),
         // Same as before the rail: the label says what the click does now.
         Destination::Settings => (
             Icon::Settings,
-            Stop::Settings,
             super::keys::label(if lit {
                 "Close settings (Ctrl+,)"
             } else {
@@ -380,7 +397,7 @@ fn destination_button(
             );
         }
     }
-    let response = response.on_hover_text(label).tab_stop(stop);
+    let response = response.on_hover_text(label).in_toolbar(toolbar_id());
     if response.clicked() {
         let actions = destination.actions(app);
         app.actions.extend(actions);

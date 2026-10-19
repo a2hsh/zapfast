@@ -1,19 +1,40 @@
 //! Deliberate Tab navigation for the main chat view. Message content and chat
-//! rows remain pointer/accessibility targets, not stops in the primary cycle:
-//! the message list and the chat list as a whole are one stop each, and the
-//! message list's keys reach a message's links and phone numbers.
+//! rows remain pointer/accessibility targets, not stops in the primary cycle;
+//! the message list and the chat list as a whole are one stop each, and so
+//! is each toolbar (`toolbar.rs`). The message list's keys reach a message's
+//! links and phone numbers.
 
 use egui::{Context, FocusDirection, Id, Response};
 
+/// The Tab order is this order: the window from the top left, so the rail
+/// comes first, then the chat list's stops, and the composer's last.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Stop {
-    Composer,
-    Send,
-    Attach,
-    Emoji,
-    /// The chat header's Search, then the search pane's controls in reading
-    /// order. The arrows walk its results from the field.
-    ChatSearch,
+    /// The rail on the left, the window's first stop: one vertical toolbar
+    /// of Chats, Calls and Starred, Show the chat list while the list is
+    /// hidden, then Archived, Locked, Settings and our picture. The chats'
+    /// avatars between them are not its buttons: while the list is hidden
+    /// they are the chat list, the next stop.
+    Rail,
+    /// The chat list header's toolbar: Back, New chat (New call on the
+    /// Calls page) and hide the list.
+    ChatListActions,
+    Search,
+    /// The filter chips' toolbar: the built-in filters and the label chips,
+    /// or the Calls page's All and Missed.
+    Filters,
+    /// The chat list, full or collapsed to the rail's avatars: one stop
+    /// below the chips, whose arrows walk its chats. The open chat's stops
+    /// follow it.
+    ChatList,
+    /// The chat header's toolbar: chat info, search and the chat's menu,
+    /// and Back in a narrow window.
+    ChatActions,
+    /// The pinned message line under the chat header, while the chat has a
+    /// pin: Enter goes to the pin shown and shows the next.
+    PinBanner,
+    /// The search pane's controls in reading order. The arrows walk its
+    /// results from the field.
     ChatSearchClose,
     ChatSearchDate,
     ChatSearchField,
@@ -25,35 +46,10 @@ pub enum Stop {
     InfoControl(u8),
     /// The open chat's message list: one stop, the arrows walk its messages.
     Messages,
-    /// The rail on the left, top to bottom, then the list header's Back
-    /// and buttons. Show the chat list takes the rail's top while the
-    /// list is hidden, and keeps Hide the chat list's place in the order.
-    Chats,
-    Calls,
-    Starred,
-    Archived,
-    Locked,
-    Settings,
-    Profile,
-    Back,
-    NewChat,
-    Sidebar,
-    Search,
-    /// The first chip, All, on the chat list and on the Calls page.
-    All,
-    /// The Calls page's Missed chip.
-    Missed,
-    Unread,
-    Private,
-    Favorites,
-    Groups,
-    Channels,
-    /// One chip in the label row, by its position among the labels.
-    Label(u8),
-    ManageLabels,
-    /// The chat list, full or collapsed to the rail's avatars: one stop
-    /// below the chips, the arrows walk its chats.
-    ChatList,
+    /// The message field, after the messages, as it is drawn.
+    Composer,
+    /// The composer's toolbar: plus, emoji, and send or record.
+    MessageActions,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -213,7 +209,8 @@ fn next(controls: &[(Stop, Id)], movement: Move) -> Option<Id> {
     Some(controls[index.rem_euclid(controls.len() as i32) as usize].1)
 }
 
-#[cfg(test)]
+/// The stops registered so far: in `begin`, before this pass draws any,
+/// those the last pass drew, in Tab order. `sections.rs` reads them there.
 pub fn stops(ctx: &Context) -> Vec<(Stop, Id)> {
     ctx.data(|data| {
         data.get_temp::<Order>(order_id())
@@ -226,21 +223,40 @@ pub fn stops(ctx: &Context) -> Vec<(Stop, Id)> {
 mod tests {
     use super::*;
 
+    /// The stops follow the window from the top left: the rail's, the chat
+    /// list's, then the conversation's, and the composer's last.
+    #[test]
+    fn the_composer_comes_last() {
+        let order = [
+            Stop::Rail,
+            Stop::ChatListActions,
+            Stop::Search,
+            Stop::Filters,
+            Stop::ChatList,
+            Stop::ChatActions,
+            Stop::ChatSearchClose,
+            Stop::Messages,
+            Stop::Composer,
+            Stop::MessageActions,
+        ];
+        assert!(order.is_sorted(), "{order:?}");
+    }
+
     #[test]
     fn navigation_wraps_and_skips_missing_controls_in_both_directions() {
-        let controls = [Stop::Composer, Stop::Send, Stop::Search]
+        let controls = [Stop::Search, Stop::Composer, Stop::MessageActions]
             .map(|stop| (stop, Id::new(format!("{stop:?}"))));
         for (from, steps, expected) in [
-            (Some(Stop::Composer), 1, 1),
-            (Some(Stop::Search), 1, 0),
-            (Some(Stop::Composer), -1, 2),
-            (Some(Stop::Attach), 1, 2),
-            (Some(Stop::Attach), -1, 1),
-            (Some(Stop::Channels), 1, 0),
+            (Some(Stop::Search), 1, 1),
+            (Some(Stop::MessageActions), 1, 0),
+            (Some(Stop::Search), -1, 2),
+            (Some(Stop::ChatActions), 1, 1),
+            (Some(Stop::ChatActions), -1, 0),
+            (Some(Stop::ChatListActions), 1, 0),
             (None, 1, 0),
             (None, -1, 2),
-            (Some(Stop::Composer), 5, 2),
-            (Some(Stop::Composer), -5, 1),
+            (Some(Stop::Search), 5, 2),
+            (Some(Stop::Search), -5, 1),
         ] {
             assert_eq!(
                 next(&controls, Move { from, steps }),
@@ -264,7 +280,7 @@ mod tests {
         let ctx = Context::default();
         let draw = |ui: &mut egui::Ui| {
             begin(ui.ctx(), true);
-            for stop in [Stop::Composer, Stop::Send, Stop::Attach] {
+            for stop in [Stop::Composer, Stop::MessageActions, Stop::ChatActions] {
                 ui.button(format!("{stop:?}")).tab_stop(stop);
             }
             finish(ui.ctx(), true);

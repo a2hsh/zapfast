@@ -32,6 +32,7 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
         // Each digit is checked on its own.
         let chats_key_free = list_digit_alone(&input.events, Key::Num1);
         let messages_key_free = list_digit_alone(&input.events, Key::Num2);
+        let unread_key_free = list_digit_alone(&input.events, Key::Num3);
         let mut key = |modifiers: Modifiers, key: Key, action: Action| {
             if input.consume_key(modifiers, key) {
                 actions.push(action);
@@ -97,10 +98,10 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
         key(Modifiers::COMMAND, Key::Minus, Action::ZoomBy(-0.1));
         key(Modifiers::COMMAND, Key::Num0, Action::ResetZoom);
         key(Modifiers::COMMAND, Key::End, Action::ScrollToBottom);
-        // Alt+1 and Alt+2 go to the chat list and the message list. On
-        // macOS they are Control+1 and Control+2: Command+1 to 9 open chats
-        // there, and Option with a digit types characters some keyboard
-        // layouts need, such as # and €.
+        // Alt+1, Alt+2 and Alt+3 go to the chat list, the message list and
+        // the open chat's first unread message. On macOS they are Control+1,
+        // 2 and 3: Command+1 to 9 open chats there, and Option with a digit
+        // types characters some keyboard layouts need, such as # and €.
         if app.dialog.is_none()
             && !app.show_update
             && app.picker.is_none()
@@ -119,6 +120,9 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
             }
             if messages_key_free {
                 key(modifiers, Key::Num2, Action::FocusMessages);
+            }
+            if unread_key_free {
+                key(modifiers, Key::Num3, Action::FocusFirstUnread);
             }
         }
         // The rail's Chats and Calls, by the digit's place on the keyboard:
@@ -230,6 +234,17 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
             ctx.data_mut(|data| data.insert_temp(crate::theme::keyboard_focus_id(), true));
             actions.extend(taken);
         }
+    }
+    // A focused toolbar button takes the arrows, Home and End to move along
+    // its toolbar, ahead of the scrolling below.
+    if app.dialog.is_none()
+        && !app.show_update
+        && app.picker.is_none()
+        && app.reaction_target.is_none()
+        && app.recording.is_none()
+        && !menu_open
+    {
+        crate::ui::toolbar::keys(ctx);
     }
     // PgUp/PgDn/Home/End scroll the open chat. PgUp/PgDn also work while the
     // composer has focus, since egui's TextEdit does not handle them itself;
@@ -1437,6 +1452,13 @@ const CHATS_KEYS: &str = if cfg!(target_os = "macos") {
     "Alt+1"
 };
 
+/// The first unread message's shortcut, as [`MESSAGES_KEYS`].
+const UNREAD_KEYS: &str = if cfg!(target_os = "macos") {
+    "Control+3"
+} else {
+    "Alt+3"
+};
+
 /// Shortcuts shown in the help dialog.
 pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+K / Ctrl+Shift+F", "Search chats"),
@@ -1447,6 +1469,10 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
         "Walk the open chat's search results and jump to one",
     ),
     ("Ctrl+L", "Focus the message input"),
+    (
+        "F6 / Shift+F6",
+        "Next / previous section: chat list, conversation, chat info, message input",
+    ),
     ("Alt+↑ / Alt+↓", "Previous / next chat"),
     ("Ctrl+Shift+[ / ]", "Previous / next chat, as in WhatsApp"),
     ("Ctrl+1..9", "Open a chat by its position in the chat list"),
@@ -1510,6 +1536,9 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
         "M",
         "Mute or unmute the video that is playing or paused (in the message list)",
     ),
+    (UNREAD_KEYS, "Go to the first unread message"),
+    ("← / →, Home / End", "Move within a toolbar"),
+    ("↑ / ↓, Home / End", "Move within the rail on the left"),
     ("PgUp / PgDn", "Scroll the open chat by a page"),
     (
         "Home / End",
@@ -4015,6 +4044,21 @@ mod tests {
             "{:?}",
             app.actions
         );
+    }
+
+    /// Alt+3 asks for the first unread message even with no chat open: the
+    /// action says why it cannot go there.
+    #[test]
+    fn the_unread_shortcut_asks_for_the_first_unread_message() {
+        let (_root, mut app, _ids) = app_with_chats(1);
+        let ctx = egui::Context::default();
+        let modifiers = if cfg!(target_os = "macos") {
+            Modifiers::CTRL
+        } else {
+            Modifiers::ALT
+        };
+        assert!(!press(&mut app, &ctx, Key::Num3, modifiers));
+        assert_eq!(app.actions, [Action::FocusFirstUnread]);
     }
 
     #[test]

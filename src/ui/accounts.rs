@@ -23,6 +23,12 @@ pub fn button_id() -> egui::Id {
     egui::Id::new("account-switcher")
 }
 
+/// The frame the keys chose an account with no chat open in: the switcher
+/// drawn for that account takes focus.
+fn refocus_id() -> egui::Id {
+    egui::Id::new("account-switcher-refocus")
+}
+
 /// Our avatar as the switcher's button. A dot on it says another account has
 /// unread chats.
 pub fn avatar_button(app: &mut App, ui: &mut egui::Ui, size: f32) -> egui::Response {
@@ -36,6 +42,12 @@ pub fn avatar_button(app: &mut App, ui: &mut egui::Ui, size: f32) -> egui::Respo
             widgets::clickable_avatar(ui, &palette, &name, &me, size, picture.as_deref(), &label)
         })
         .inner;
+    let ctx = ui.ctx();
+    if let Some(chosen) = ctx.data_mut(|data| data.remove_temp::<u64>(refocus_id()))
+        && ctx.cumulative_frame_nr() <= chosen + 2
+    {
+        response.request_focus();
+    }
     let elsewhere = app.unread_chat_count_elsewhere();
     if elsewhere > 0 {
         // Ringed in the panel colour so it reads on any picture.
@@ -64,6 +76,10 @@ struct Entry {
     picture: Option<std::path::PathBuf>,
     unread: u32,
     current: bool,
+    linked: bool,
+    /// Whether the account has a chat open, whose message field takes focus
+    /// when it comes on screen.
+    chat_open: bool,
 }
 
 fn entries(app: &mut App) -> Vec<Entry> {
@@ -75,7 +91,8 @@ fn entries(app: &mut App) -> Vec<Entry> {
             let me = account.me.clone().unwrap_or_default();
             let picture = (!me.is_empty()).then(|| account.avatar(&me)).flatten();
             let name = account.display_label(locale);
-            let detail = if account.is_linked() {
+            let linked = account.is_linked();
+            let detail = if linked {
                 account
                     .phone()
                     .filter(|phone| *phone != name)
@@ -91,6 +108,8 @@ fn entries(app: &mut App) -> Vec<Entry> {
                 picture,
                 unread: account.unread_chat_count(),
                 current: index == active,
+                linked,
+                chat_open: account.open_chat.is_some(),
             }
         })
         .collect()
@@ -98,20 +117,45 @@ fn entries(app: &mut App) -> Vec<Entry> {
 
 fn menu(app: &mut App, button: &egui::Response) {
     let palette = app.palette;
+    let ctx = button.ctx.clone();
     let popup_id = button.id.with("popup");
-    if app.account_menu {
-        app.account_menu = false;
-        egui::Popup::open_id(&button.ctx, popup_id);
+    // Asked for elsewhere, as by the linking screen's "Use another
+    // account": from the keys, focus goes into it as below.
+    let asked = std::mem::take(&mut app.account_menu);
+    if asked {
+        egui::Popup::open_id(&ctx, popup_id);
     }
+    // Opened from the keys (Enter or Space on the button) or by a screen
+    // reader, focus goes into the menu, stays in it, and returns to the
+    // button when it closes, as in the other menus. The pointer's menu is
+    // unchanged.
+    let mut key_menu = super::list_nav::KeyMenu::for_button(&ctx, popup_id, button, asked)
+        .menu(gettext(app.locale, "Switch account").into_owned());
     let entries = entries(app);
-    egui::Popup::menu(button)
+    let mut first = None;
+    let mut chosen = false;
+    // Whether what was chosen opens a linking screen: Add account, or an
+    // account the phone has not linked.
+    let mut linking = false;
+    // Whether what was chosen takes focus itself: a linking screen, or an
+    // account's open chat. Otherwise focus returns to the button.
+    let mut leads = false;
+    // egui gives a popup's background a focusable sense, a nameless Tab
+    // stop; it only needs the clicks.
+    let shown = egui::Popup::menu(button)
         .id(popup_id)
+        .sense(Sense::CLICK)
         .width(MENU_WIDTH)
         .frame(widgets::menu_frame(&palette))
         .show(|ui| {
             for entry in &entries {
-                if account_row(app, ui, entry) && !entry.current {
+                let (clicked, row) = account_row(app, ui, entry);
+                first.get_or_insert(row);
+                if clicked && !entry.current {
                     app.actions.push(Action::SwitchAccount(entry.id.clone()));
+                    chosen = true;
+                    linking = !entry.linked;
+                    leads = linking || entry.chat_open;
                     ui.close();
                 }
             }
@@ -123,13 +167,40 @@ fn menu(app: &mut App, button: &egui::Response) {
                 &gettext(app.locale, "Add account"),
             ) {
                 app.actions.push(Action::AddAccount);
+                chosen = true;
+                linking = true;
+                leads = true;
             }
         });
+    // Another account, or a new one, takes focus where it opens: a linking
+    // screen, a new account's or one the phone has not linked, on its first
+    // link, which nothing else focuses. An account with no chat open has
+    // nothing to take focus: the button takes it back once it is drawn for
+    // that account, which can place it elsewhere in the rail, under another
+    // id, so not by the menu's own return.
+    if chosen {
+        if linking && key_menu.from_keys() {
+            ctx.data_mut(|data| data.insert_temp(login_focus_id(), true));
+        }
+        if !leads && key_menu.from_keys() {
+            let frame = ctx.cumulative_frame_nr();
+            ctx.data_mut(|data| data.insert_temp(refocus_id(), frame));
+        }
+        key_menu.moves_on();
+    }
+    key_menu.finish(
+        &ctx,
+        shown.map(|shown| shown.response.layer_id),
+        false,
+        first,
+        button.id,
+    );
 }
 
 /// One account in the switcher: its picture, name and number, its unread
-/// chats, and a check on the one on screen. Returns whether it was clicked.
-fn account_row(app: &App, ui: &mut egui::Ui, entry: &Entry) -> bool {
+/// chats, and a check on the one on screen. Returns whether it was clicked,
+/// and its id.
+fn account_row(app: &App, ui: &mut egui::Ui, entry: &Entry) -> (bool, egui::Id) {
     let palette = app.palette;
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(vec2(width, ROW), Sense::click());
@@ -213,10 +284,11 @@ fn account_row(app: &App, ui: &mut egui::Ui, entry: &Entry) -> bool {
         }
     }
     let clicked = response.clicked();
+    let id = response.id;
     if !entry.current {
         response.on_hover_cursor(egui::CursorIcon::PointingHand);
     }
-    clicked
+    (clicked, id)
 }
 
 /// What a screen reader says for an account row.
@@ -253,6 +325,13 @@ fn single_line(
     crate::bidi::layout_job(ui, job)
 }
 
+/// Set when Add account, or an account that is not linked, was taken from
+/// the keys: its linking screen puts focus on its way back once that is
+/// drawn.
+fn login_focus_id() -> egui::Id {
+    egui::Id::new("account-switcher-login-focus")
+}
+
 /// The account being linked, when others are already here: a way back, and
 /// for a number the phone unlinked, a way to remove it.
 pub fn login_choices(app: &mut App, ui: &mut egui::Ui) {
@@ -281,7 +360,18 @@ pub fn login_choices(app: &mut App, ui: &mut egui::Ui) {
                     .x
             });
         ui.add_space((ui.available_width() - width).max(0.0) / 2.0);
-        if theme::link(ui, &back, theme::medium(13.0), palette.link).clicked() {
+        let back = theme::link(ui, &back, theme::medium(13.0), palette.link);
+        if back.visible()
+            && ui
+                .ctx()
+                .data(|data| data.get_temp::<bool>(login_focus_id()))
+                .unwrap_or(false)
+        {
+            ui.ctx()
+                .data_mut(|data| data.remove::<bool>(login_focus_id()));
+            back.request_focus();
+        }
+        if back.clicked() {
             if app.adding_account {
                 app.actions.push(Action::CancelAddAccount);
             } else {

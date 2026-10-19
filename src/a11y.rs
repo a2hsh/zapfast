@@ -104,6 +104,15 @@ pub fn messages_list_label(locale: Locale, title: &str, group: bool) -> String {
     fill(&template, &[("name", &spoken(without_push_marker(title)))])
 }
 
+/// The chat header's name for a screen reader: the chat's name, then the
+/// line under it when there is one ("online", "last seen today at 10:32",
+/// "typing…", a group's members), as the header shows them.
+pub fn chat_header_label(title: &str, subtitle: &str) -> String {
+    let mut parts = vec![spoken(without_push_marker(title)), spoken(subtitle)];
+    parts.retain(|part| !part.is_empty());
+    parts.join(", ")
+}
+
 /// Joins the parts a screen reader announces for a message with ", ".
 pub fn message_label(locale: Locale, label: &MessageLabel<'_>) -> String {
     let mut parts: Vec<String> = Vec::new();
@@ -904,6 +913,18 @@ mod tests {
         assert_eq!(
             messages_list_label(Locale::English, "~Ana", false),
             "Messages with Ana"
+        );
+    }
+
+    /// The chat header's toolbar reads what the header shows: the name, then
+    /// the line under it when there is one.
+    #[test]
+    fn the_chat_header_reads_its_name_and_subtitle() {
+        assert_eq!(chat_header_label("Ana", "online"), "Ana, online");
+        assert_eq!(chat_header_label("~Ana", ""), "Ana");
+        assert_eq!(
+            chat_header_label("Family", "Ana, Bob, You"),
+            "Family, Ana, Bob, You"
         );
     }
 

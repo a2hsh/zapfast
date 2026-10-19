@@ -507,6 +507,8 @@ pub struct KeyMenu {
     /// The name a screen reader hears the menu by; None for a popup that is
     /// not a menu, such as a drop-down's list.
     label: Option<std::borrow::Cow<'static, str>>,
+    /// Whether focus goes back to where the menu came from when it closes.
+    hand_back: bool,
 }
 
 impl KeyMenu {
@@ -514,11 +516,35 @@ impl KeyMenu {
     /// opens once, and from there on closes as any menu does. `hold` keeps
     /// focus on a layer beside the menu, such as the reaction picker.
     pub fn begin(ctx: &egui::Context, popup: egui::Id, requested: bool, hold: bool) -> Self {
-        let pending = popup.with("from-keys");
-        let was_open = egui::Popup::is_id_open(ctx, popup);
         // Only after keyboard navigation: a demo page that opens the menu
         // moves no focus.
-        if requested && keyboard(ctx) {
+        Self::start(ctx, popup, requested && keyboard(ctx), hold)
+    }
+
+    /// As [`KeyMenu::begin`], for the menu a button opens, such as the chat
+    /// header's More: Enter or Space on the button opens it as the keys open
+    /// a list's menu, and so does a screen reader's own activation, which
+    /// reaches egui as a click with no pointer event (`overlay::followed`).
+    /// A click opens the pointer's menu, as it always did. `asked` is a
+    /// request for the menu from elsewhere, such as the linking screen's
+    /// "Use another account", taken as the keys' after keyboard navigation.
+    pub fn for_button(
+        ctx: &egui::Context,
+        popup: egui::Id,
+        button: &egui::Response,
+        asked: bool,
+    ) -> Self {
+        let activated = button.clicked()
+            && !ctx.input(|input| input.pointer.any_click())
+            && super::overlay::followed(ctx);
+        Self::start(ctx, popup, (asked && keyboard(ctx)) || activated, false)
+    }
+
+    /// A menu opened in this pass from the keys when `opened`.
+    fn start(ctx: &egui::Context, popup: egui::Id, opened: bool, hold: bool) -> Self {
+        let pending = popup.with("from-keys");
+        let was_open = egui::Popup::is_id_open(ctx, popup);
+        if opened {
             ctx.data_mut(|data| data.insert_temp(pending, true));
         }
         let state = ctx.data(|data| data.get_temp::<bool>(pending));
@@ -531,6 +557,7 @@ impl KeyMenu {
             state,
             was_open,
             label: None,
+            hand_back: true,
         }
     }
 
@@ -538,6 +565,13 @@ impl KeyMenu {
     pub fn menu(mut self, label: impl Into<std::borrow::Cow<'static, str>>) -> Self {
         self.label = Some(label.into());
         self
+    }
+
+    /// An item that takes the reader elsewhere was chosen, such as another
+    /// account: focus moves once, straight to where that item leads, not
+    /// back to the menu's opener first.
+    pub fn moves_on(&mut self) {
+        self.hand_back = false;
     }
 
     /// The keys that move within a menu the keys opened, taken before egui
@@ -779,6 +813,7 @@ impl KeyMenu {
             // (another chat, Settings), returns nothing: focus has moved on
             // since.
             if self.was_open
+                && self.hand_back
                 && !ctx.input(|input| input.pointer.any_pressed() || input.pointer.any_click())
             {
                 let item = ctx.memory(|memory| memory.focused());

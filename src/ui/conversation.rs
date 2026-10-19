@@ -21,6 +21,7 @@ use crate::theme::{self, Icon, Palette};
 use crate::wallpaper;
 
 use super::focus::{Stop, TabStop};
+use super::toolbar::{ToolbarButton, beside, toolbar};
 use super::widgets;
 
 /// Group-message avatar size.
@@ -235,24 +236,23 @@ fn pin_banner(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
     theme::paint_icon(ui, Icon::Pin, icon, 14.0, palette.accent);
     let text_left = icon_left + PIN_ICON + 8.0;
     let text_width = (bar.right() - PIN_ROW_INSET - text_left).max(1.0);
-    let label = widgets::line(
-        ui,
-        &crate::markup::plain(&app.resolve_mention_tokens(&row.text), &[]),
-        theme::regular(13.0),
-        palette.text,
-        text_width,
-        1,
-    );
+    // What the line shows: the plain text, its mentions by name. The
+    // screen reader hears the same, never markup or a mention's number.
+    let text = crate::markup::plain(&app.resolve_mention_tokens(&row.text), &[]);
+    let label = widgets::line(ui, &text, theme::regular(13.0), palette.text, text_width, 1);
     label.paint(
         ui,
         pos2(text_left, bar.center().y - label.size().y / 2.0),
         palette.text,
     );
     theme::reveal_focus(&response);
+    // A Tab stop of its own, after the chat header's toolbar: Enter or
+    // Space opens the pin as a click does.
+    let response = response.tab_stop(Stop::PinBanner);
     let described = crate::i18n::gettext(app.locale, "Pinned message {index} of {count}: {text}")
         .replace("{index}", &(shown + 1).to_string())
         .replace("{count}", &rows.len().to_string())
-        .replace("{text}", &row.text);
+        .replace("{text}", &text);
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &described)
     });
@@ -261,6 +261,14 @@ fn pin_banner(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
             chat: chat.id.clone(),
             message: row.id.clone(),
         });
+        // Opened from the keys with a screen reader, the reader goes on to
+        // the pinned message in the message list, now its current message,
+        // rather than to the message field a click leaves focus in.
+        if !ui.input(|input| input.pointer.any_click())
+            && crate::a11y::screen_reader_active(ui.ctx(), response.id)
+        {
+            app.actions.push(Action::FocusMessages);
+        }
         let next = rows[next_pin(rows.len(), shown)].id.clone();
         ui.ctx().data_mut(|data| data.insert_temp(cursor_id, next));
     }
@@ -434,421 +442,492 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
                 ui.add_space(room.left);
                 let picture = app.avatar(&chat.id);
                 let (subtitle, color) = subtitle(app, chat);
-                let call_here = app.call_live_here(&chat.id);
-                // More and Search, and Back in a narrow window, and the call
-                // buttons in a one-to-one chat, each on its own glass with
-                // room around it on a vibrant window.
-                let call_buttons = if chat.kind == crate::model::ChatKind::Direct
-                    && app.me.as_deref() != Some(chat.id.as_str())
-                {
-                    if call_here { 1.0 } else { 2.0 }
+                // Named by what the header shows: the chat and the line under
+                // its name, so the way in says whose chat this is and whether
+                // they are online or typing. The header is drawn only while
+                // the app is unlocked.
+                // Only the names of group members typing read otherwise.
+                let typing_in_group = chat.is_group()
+                    && app
+                        .typing
+                        .get(&chat.id)
+                        .is_some_and(|typers| !typers.is_empty());
+                let label = if typing_in_group {
+                    crate::a11y::chat_header_label(&title, &subtitle_as(app, chat, true).0)
                 } else {
-                    0.0
+                    crate::a11y::chat_header_label(&title, &subtitle)
                 };
-                let buttons = if narrow { 3.0 } else { 2.0 } + call_buttons;
-                let right_controls = if palette.vibrant() {
-                    buttons * 36.0 + (buttons - 0.5) * BUTTON_GAP + (BUTTON_GLASS - 30.0)
-                } else {
-                    buttons * 36.0
-                } + room.right;
-                // On a vibrant window the name and the buttons sit on glass
-                // pills, drawn beneath them once they are measured.
-                let name_pill = ui.painter().add(egui::Shape::Noop);
-                let mut text = Rect::NOTHING;
-                let mut avatar = Rect::NOTHING;
-                // Treat the avatar, name, and subtitle as one info button.
-                let block = ui
-                    .scope(|ui| {
-                        // Fix the child height before centering its contents.
-                        ui.allocate_ui_with_layout(
-                            vec2(
-                                (ui.available_width() - right_controls).max(80.0),
-                                HEADER_ROW,
-                            ),
-                            Layout::left_to_right(Align::Center),
-                            |ui| {
-                                let avatar_response = widgets::avatar(
-                                    ui,
-                                    &palette,
-                                    &title,
-                                    &chat.id,
-                                    40.0,
-                                    picture.as_deref(),
-                                );
-                                avatar = avatar_response.rect;
-                                if chat.disappearing_timer().is_some() {
-                                    widgets::paint_disappearing_badge(
+                toolbar(ui, header_toolbar_id(), &label, Stop::ChatActions, |ui| {
+                    let call_here = app.call_live_here(&chat.id);
+                    // More and Search, and Back in a narrow window, and the call
+                    // buttons in a one-to-one chat, each on its own glass with
+                    // room around it on a vibrant window.
+                    let call_buttons = if chat.kind == crate::model::ChatKind::Direct
+                        && app.me.as_deref() != Some(chat.id.as_str())
+                    {
+                        if call_here { 1.0 } else { 2.0 }
+                    } else {
+                        0.0
+                    };
+                    let buttons = if narrow { 3.0 } else { 2.0 } + call_buttons;
+                    let right_controls = if palette.vibrant() {
+                        buttons * 36.0 + (buttons - 0.5) * BUTTON_GAP + (BUTTON_GLASS - 30.0)
+                    } else {
+                        buttons * 36.0
+                    } + room.right;
+                    // On a vibrant window the name and the buttons sit on glass
+                    // pills, drawn beneath them once they are measured.
+                    let name_pill = ui.painter().add(egui::Shape::Noop);
+                    let mut text = Rect::NOTHING;
+                    let mut avatar = Rect::NOTHING;
+                    // Treat the avatar, name, and subtitle as one info button.
+                    let block = ui
+                        .scope(|ui| {
+                            // Fix the child height before centering its contents.
+                            ui.allocate_ui_with_layout(
+                                vec2(
+                                    (ui.available_width() - right_controls).max(80.0),
+                                    HEADER_ROW,
+                                ),
+                                Layout::left_to_right(Align::Center),
+                                |ui| {
+                                    let avatar_response = widgets::avatar(
                                         ui,
                                         &palette,
-                                        avatar_response.rect,
+                                        &title,
+                                        &chat.id,
+                                        40.0,
+                                        picture.as_deref(),
                                     );
-                                }
-                                // Room for the name's glass pill to clear the avatar.
-                                ui.add_space(if palette.vibrant() { 14.0 } else { 4.0 });
-                                ui.vertical(|ui| {
-                                    let width = (ui.available_width() - right_controls).max(80.0);
-                                    ui.set_max_width(width);
-                                    // On glass the lines centre on the avatar: the
-                                    // column starts at the row's top otherwise.
-                                    if palette.vibrant() {
-                                        let column = if subtitle.is_empty() {
-                                            40.0
-                                        } else {
-                                            NAME_GLASS_LINES
-                                        };
-                                        let top = avatar.center().y - column / 2.0;
-                                        ui.add_space((top - ui.cursor().top()).max(0.0));
-                                    }
-                                    if subtitle.is_empty() {
-                                        // Center the name on the avatar.
-                                        ui.allocate_ui_with_layout(
-                                            vec2(width, 40.0),
-                                            Layout::left_to_right(Align::Center),
-                                            |ui| {
-                                                text = widgets::rich_text(
-                                                    ui,
-                                                    &title,
-                                                    // Lighter on glass, as Apple's.
-                                                    if palette.vibrant() {
-                                                        theme::medium(15.0)
-                                                    } else {
-                                                        theme::semibold(17.0)
-                                                    },
-                                                    palette.text,
-                                                )
-                                                .rect;
-                                            },
+                                    avatar = avatar_response.rect;
+                                    if chat.disappearing_timer().is_some() {
+                                        widgets::paint_disappearing_badge(
+                                            ui,
+                                            &palette,
+                                            avatar_response.rect,
                                         );
-                                    } else {
-                                        // Align the name and subtitle with the avatar edges,
-                                        // or on glass a little closer, around its middle.
-                                        ui.allocate_ui_with_layout(
-                                            vec2(
-                                                width,
-                                                if palette.vibrant() {
-                                                    NAME_GLASS_LINES
-                                                } else {
-                                                    40.0
+                                    }
+                                    // Room for the name's glass pill to clear the avatar.
+                                    ui.add_space(if palette.vibrant() { 14.0 } else { 4.0 });
+                                    ui.vertical(|ui| {
+                                        let width =
+                                            (ui.available_width() - right_controls).max(80.0);
+                                        ui.set_max_width(width);
+                                        // On glass the lines centre on the avatar: the
+                                        // column starts at the row's top otherwise.
+                                        if palette.vibrant() {
+                                            let column = if subtitle.is_empty() {
+                                                40.0
+                                            } else {
+                                                NAME_GLASS_LINES
+                                            };
+                                            let top = avatar.center().y - column / 2.0;
+                                            ui.add_space((top - ui.cursor().top()).max(0.0));
+                                        }
+                                        if subtitle.is_empty() {
+                                            // Center the name on the avatar.
+                                            ui.allocate_ui_with_layout(
+                                                vec2(width, 40.0),
+                                                Layout::left_to_right(Align::Center),
+                                                |ui| {
+                                                    text = widgets::rich_text(
+                                                        ui,
+                                                        &title,
+                                                        // Lighter on glass, as Apple's.
+                                                        if palette.vibrant() {
+                                                            theme::medium(15.0)
+                                                        } else {
+                                                            theme::semibold(17.0)
+                                                        },
+                                                        palette.text,
+                                                    )
+                                                    .rect;
                                                 },
-                                            ),
-                                            Layout::top_down(Align::Min),
-                                            |ui| {
-                                                text = widgets::rich_text(
-                                                    ui,
-                                                    &title,
-                                                    theme::semibold(if palette.vibrant() {
-                                                        14.0
+                                            );
+                                        } else {
+                                            // Align the name and subtitle with the avatar edges,
+                                            // or on glass a little closer, around its middle.
+                                            ui.allocate_ui_with_layout(
+                                                vec2(
+                                                    width,
+                                                    if palette.vibrant() {
+                                                        NAME_GLASS_LINES
                                                     } else {
-                                                        15.0
-                                                    }),
-                                                    palette.text,
-                                                )
-                                                .rect;
-                                                ui.with_layout(
-                                                    Layout::bottom_up(Align::Min),
-                                                    |ui| {
-                                                        text = text.union(
-                                                            widgets::rich_text(
-                                                                ui,
-                                                                &subtitle,
-                                                                theme::regular(
-                                                                    if palette.vibrant() {
-                                                                        11.5
-                                                                    } else {
-                                                                        12.5
-                                                                    },
-                                                                ),
-                                                                color,
-                                                            )
-                                                            .rect,
-                                                        );
+                                                        40.0
                                                     },
-                                                );
-                                            },
-                                        );
-                                    }
-                                });
+                                                ),
+                                                Layout::top_down(Align::Min),
+                                                |ui| {
+                                                    text = widgets::rich_text(
+                                                        ui,
+                                                        &title,
+                                                        theme::semibold(if palette.vibrant() {
+                                                            14.0
+                                                        } else {
+                                                            15.0
+                                                        }),
+                                                        palette.text,
+                                                    )
+                                                    .rect;
+                                                    ui.with_layout(
+                                                        Layout::bottom_up(Align::Min),
+                                                        |ui| {
+                                                            text = text.union(
+                                                                widgets::rich_text(
+                                                                    ui,
+                                                                    &subtitle,
+                                                                    theme::regular(
+                                                                        if palette.vibrant() {
+                                                                            11.5
+                                                                        } else {
+                                                                            12.5
+                                                                        },
+                                                                    ),
+                                                                    color,
+                                                                )
+                                                                .rect,
+                                                            );
+                                                        },
+                                                    );
+                                                },
+                                            );
+                                        }
+                                    });
+                                },
+                            );
+                        })
+                        .response;
+                    if palette.vibrant() && text.is_positive() {
+                        // A lone name gets Apple's roomier padding.
+                        let padding = vec2(
+                            NAME_GLASS_PADDING.x,
+                            if subtitle.is_empty() {
+                                NAME_GLASS_SINGLE
+                            } else {
+                                NAME_GLASS_PADDING.y
                             },
                         );
-                    })
-                    .response;
-                if palette.vibrant() && text.is_positive() {
-                    // A lone name gets Apple's roomier padding.
-                    let padding = vec2(
-                        NAME_GLASS_PADDING.x,
-                        if subtitle.is_empty() {
-                            NAME_GLASS_SINGLE
-                        } else {
-                            NAME_GLASS_PADDING.y
-                        },
-                    );
-                    // Centred on the avatar, whatever room the lines leave
-                    // above and below their glyphs.
-                    let glass_rect = Rect::from_center_size(
-                        pos2(text.center().x, avatar.center().y),
-                        text.size() + 2.0 * padding,
-                    );
-                    ui.painter()
-                        .set(name_pill, glass(&palette, glass_rect, NAME_GLASS_RADIUS));
-                }
-                let block = ui
-                    .interact(block.rect, ui.id().with("chat-header-info"), Sense::click())
-                    .on_hover_cursor(egui::CursorIcon::PointingHand);
-                if block.clicked() {
-                    app.actions.push(Action::OpenInfo(chat.id.clone()));
-                }
-                // The item and the width that has to hold it are measured from
-                // the same localized label: a translation wider than the
-                // English one would otherwise be clipped.
-                let leave_label = if chat.is_channel() {
-                    crate::i18n::gettext(app.locale, "Leave channel")
-                } else {
-                    crate::i18n::gettext(app.locale, "Leave group")
-                };
-                let select_messages_label = crate::i18n::gettext(app.locale, "Select messages");
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.add_space(room.right);
-                    // Each button on a vibrant window floats on its own glass,
-                    // with room around it.
-                    if palette.vibrant() {
-                        ui.add_space(BUTTON_GAP / 2.0);
-                    }
-                    let more_glass = ui.painter().add(egui::Shape::Noop);
-                    let more = theme::icon_button(
-                        ui,
-                        Icon::Ellipsis,
-                        18.0,
-                        palette.secondary,
-                        palette.text,
-                        "More",
-                    );
-                    if palette.vibrant() {
-                        ui.painter()
-                            .set(more_glass, glass_button(&palette, more.rect));
-                    }
-                    let width = widgets::menu_width(
-                        ui,
-                        &[
-                            "Info",
-                            select_messages_label.as_ref(),
-                            "Pin to top",
-                            "Unarchive",
-                            "Clear chat",
-                            leave_label.as_ref(),
-                            "Copy number",
-                            "Close chat",
-                        ],
-                        true,
-                    );
-                    // Demo/test: hold this menu open for a screenshot.
-                    #[cfg(any(test, feature = "demo"))]
-                    if app.open_header_menu.as_deref() == Some(chat.id.as_str()) {
-                        egui::Popup::open_id(ui.ctx(), more.id.with("popup"));
-                    }
-                    egui::Popup::menu(&more)
-                        .width(width)
-                        .frame(widgets::menu_frame(&palette))
-                        .show(|ui| {
-                            if widgets::menu_item(ui, &palette, Some(Icon::Info), "Info") {
-                                app.actions.push(Action::OpenInfo(chat.id.clone()));
-                            }
-                            if widgets::menu_item(
-                                ui,
-                                &palette,
-                                Some(Icon::Check),
-                                select_messages_label.as_ref(),
-                            ) {
-                                app.actions.push(Action::StartSelection);
-                            }
-                            if widgets::menu_item(
-                                ui,
-                                &palette,
-                                Some(if chat.pinned { Icon::PinOff } else { Icon::Pin }),
-                                if chat.pinned { "Unpin" } else { "Pin to top" },
-                            ) {
-                                app.actions
-                                    .push(Action::SetPinned(chat.id.clone(), !chat.pinned));
-                            }
-                            if widgets::menu_item(
-                                ui,
-                                &palette,
-                                Some(Icon::Archive),
-                                if chat.archived {
-                                    "Unarchive"
-                                } else {
-                                    "Archive"
-                                },
-                            ) {
-                                app.actions
-                                    .push(Action::SetArchived(chat.id.clone(), !chat.archived));
-                            }
-                            // Clearing reaches the phone, so it waits for a
-                            // connection, as deleting does in the chat list.
-                            if widgets::menu_item_enabled(
-                                ui,
-                                &palette,
-                                Some(Icon::Eraser),
-                                "Clear chat",
-                                app.is_connected(),
-                            ) {
-                                app.actions
-                                    .push(Action::ShowDialog(Dialog::ConfirmClearChat(
-                                        chat.id.clone(),
-                                    )));
-                            }
-                            widgets::menu_separator(ui, &palette);
-                            if chat.can_leave(&app.our_ids())
-                                && widgets::menu_item(
-                                    ui,
-                                    &palette,
-                                    Some(Icon::LogOut),
-                                    leave_label.as_ref(),
-                                )
-                            {
-                                app.actions
-                                    .push(Action::ShowDialog(Dialog::ConfirmLeaveGroup(
-                                        chat.id.clone(),
-                                    )));
-                            }
-                            if let Some(phone) = chat.phone()
-                                && widgets::menu_item(ui, &palette, Some(Icon::Copy), "Copy number")
-                            {
-                                app.actions.push(Action::CopyText(format!("+{phone}")));
-                            }
-                            if widgets::menu_item(ui, &palette, Some(Icon::X), "Close chat") {
-                                app.actions.push(Action::CloseChat);
-                            }
-                        });
-                    // Calls are one to one: a group, a channel, a broadcast
-                    // list and the chat with ourselves have no call button.
-                    // While this chat has the call, the button ends it.
-                    if call_buttons > 0.0 {
-                        let (call_tooltip, call_icon, call_fill, call) = if call_here {
-                            (
-                                crate::i18n::gettext(app.locale, "Hang up").into_owned(),
-                                Icon::PhoneOff,
-                                palette.danger,
-                                Action::HangupCall,
-                            )
-                        } else {
-                            (
-                                crate::i18n::gettext(app.locale, "Voice call").into_owned(),
-                                Icon::Phone,
-                                palette.secondary,
-                                Action::StartCall(chat.id.clone()),
-                            )
-                        };
-                        // On a vibrant window each sits on its own glass, as
-                        // Search and More do.
-                        if palette.vibrant() {
-                            ui.add_space(BUTTON_GAP);
-                        }
-                        let call_glass = ui.painter().add(egui::Shape::Noop);
-                        let call_button = theme::icon_button(
-                            ui,
-                            call_icon,
-                            18.0,
-                            call_fill,
-                            palette.text,
-                            &call_tooltip,
+                        // Centred on the avatar, whatever room the lines leave
+                        // above and below their glyphs.
+                        let glass_rect = Rect::from_center_size(
+                            pos2(text.center().x, avatar.center().y),
+                            text.size() + 2.0 * padding,
                         );
-                        if palette.vibrant() {
-                            ui.painter()
-                                .set(call_glass, glass_button(&palette, call_button.rect));
-                        }
-                        if call_button.clicked() {
-                            app.actions.push(call);
-                        }
-                        if !call_here {
-                            let tip = crate::i18n::gettext(app.locale, "Video call");
-                            if palette.vibrant() {
-                                ui.add_space(BUTTON_GAP);
-                            }
-                            let video_glass = ui.painter().add(egui::Shape::Noop);
-                            let video = theme::icon_button(
-                                ui,
-                                Icon::Video,
-                                18.0,
-                                palette.secondary,
-                                palette.text,
-                                &tip,
-                            );
-                            if palette.vibrant() {
-                                ui.painter()
-                                    .set(video_glass, glass_button(&palette, video.rect));
-                            }
-                            if video.clicked() {
-                                app.actions.push(Action::StartVideoCall(chat.id.clone()));
-                            }
-                        }
-                    }
-                    let searching = app.chat_search_open;
-                    let tip = format!(
-                        "{} ({})",
-                        crate::i18n::gettext(app.locale, "Search messages"),
-                        super::keys::label("Ctrl+F")
-                    );
-                    if palette.vibrant() {
-                        ui.add_space(BUTTON_GAP);
-                    }
-                    let search_glass = ui.painter().add(egui::Shape::Noop);
-                    let search = theme::icon_button(
-                        ui,
-                        Icon::Search,
-                        18.0,
-                        if searching {
-                            palette.accent
-                        } else {
-                            palette.secondary
-                        },
-                        palette.text,
-                        &tip,
-                    )
-                    .tab_stop(Stop::ChatSearch);
-                    if palette.vibrant() {
                         ui.painter()
-                            .set(search_glass, glass_button(&palette, search.rect));
+                            .set(name_pill, glass(&palette, glass_rect, NAME_GLASS_RADIUS));
                     }
-                    if search.clicked() {
-                        app.actions.push(if searching {
-                            Action::CloseChatSearch
-                        } else {
-                            Action::OpenChatSearch
-                        });
+                    let block = ui
+                        .interact(block.rect, ui.id().with("chat-header-info"), Sense::click())
+                        .in_toolbar(header_toolbar_id())
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    // A button a screen reader names by what it opens, as the
+                    // avatar and title it covers say nothing. The toolbar
+                    // already reads the chat's name on the way in, so the
+                    // button does not repeat it.
+                    let info = crate::i18n::gettext(app.locale, "Chat info");
+                    block.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &info)
+                    });
+                    if block.clicked() {
+                        app.actions.push(Action::OpenInfo(chat.id.clone()));
                     }
-                    // A narrow window shows the list or the chat, not both;
-                    // this is the way back to the list.
-                    if narrow {
+                    // The item and the width that has to hold it are measured from
+                    // the same localized label: a translation wider than the
+                    // English one would otherwise be clipped.
+                    let leave_label = if chat.is_channel() {
+                        crate::i18n::gettext(app.locale, "Leave channel")
+                    } else {
+                        crate::i18n::gettext(app.locale, "Leave group")
+                    };
+                    let select_messages_label = crate::i18n::gettext(app.locale, "Select messages");
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.add_space(room.right);
+                        // Each button on a vibrant window floats on its own glass,
+                        // with room around it.
                         if palette.vibrant() {
-                            ui.add_space(BUTTON_GAP);
+                            ui.add_space(BUTTON_GAP / 2.0);
                         }
-                        let back_glass = ui.painter().add(egui::Shape::Noop);
-                        // On the Calls tab the list underneath is the call
-                        // history.
-                        let back_label = if app.page == crate::model::Page::Calls {
-                            crate::i18n::gettext(app.locale, "Back to the calls").into_owned()
-                        } else {
-                            "Back to chats".to_owned()
-                        };
-                        let back = theme::icon_button(
+                        let more_glass = ui.painter().add(egui::Shape::Noop);
+                        let more = theme::icon_button(
                             ui,
-                            Icon::ArrowLeft,
+                            Icon::Ellipsis,
                             18.0,
                             palette.secondary,
                             palette.text,
-                            &back_label,
+                            "More",
                         )
-                        .tab_stop(Stop::Back);
+                        .in_toolbar(header_toolbar_id());
                         if palette.vibrant() {
                             ui.painter()
-                                .set(back_glass, glass_button(&palette, back.rect));
+                                .set(more_glass, glass_button(&palette, more.rect));
                         }
-                        ui.ctx()
-                            .data_mut(|data| data.insert_temp(back_button_id(), back.rect));
-                        if back.clicked() {
-                            app.actions.push(Action::CloseChat);
+                        let width = widgets::menu_width(
+                            ui,
+                            &[
+                                "Info",
+                                select_messages_label.as_ref(),
+                                "Pin to top",
+                                "Unarchive",
+                                "Clear chat",
+                                leave_label.as_ref(),
+                                "Copy number",
+                                "Close chat",
+                            ],
+                            true,
+                        );
+                        // Demo/test: hold this menu open for a screenshot.
+                        #[cfg(any(test, feature = "demo"))]
+                        if app.open_header_menu.as_deref() == Some(chat.id.as_str()) {
+                            egui::Popup::open_id(ui.ctx(), more.id.with("popup"));
                         }
-                    }
+                        // Opened from the keys (Enter or Space on More) or by a
+                        // screen reader, focus goes into the menu, stays in it,
+                        // and returns to More when it closes, as in the other
+                        // menus. The pointer's menu is unchanged.
+                        let key_menu = super::list_nav::KeyMenu::for_button(
+                            ui.ctx(),
+                            more.id.with("popup"),
+                            &more,
+                            false,
+                        )
+                        .menu(crate::i18n::gettext(app.locale, "Chat"));
+                        let from_keys = key_menu.from_keys();
+                        let mut first = None;
+                        let shown = egui::Popup::menu(&more)
+                            .width(width)
+                            .frame(widgets::menu_frame(&palette))
+                            .show(|ui| {
+                                let info = widgets::menu_item_response(
+                                    ui,
+                                    &palette,
+                                    Some(Icon::Info),
+                                    "Info",
+                                    true,
+                                );
+                                // A popup's first pass only measures it, drawing
+                                // nothing that could take focus.
+                                first = (!ui.is_sizing_pass()).then_some(info.id);
+                                if info.clicked() {
+                                    app.actions.push(Action::OpenInfo(chat.id.clone()));
+                                }
+                                if widgets::menu_item(
+                                    ui,
+                                    &palette,
+                                    Some(Icon::Check),
+                                    select_messages_label.as_ref(),
+                                ) {
+                                    app.actions.push(Action::StartSelection);
+                                }
+                                if widgets::menu_item(
+                                    ui,
+                                    &palette,
+                                    Some(if chat.pinned { Icon::PinOff } else { Icon::Pin }),
+                                    if chat.pinned { "Unpin" } else { "Pin to top" },
+                                ) {
+                                    app.actions
+                                        .push(Action::SetPinned(chat.id.clone(), !chat.pinned));
+                                }
+                                if widgets::menu_item(
+                                    ui,
+                                    &palette,
+                                    Some(Icon::Archive),
+                                    if chat.archived {
+                                        "Unarchive"
+                                    } else {
+                                        "Archive"
+                                    },
+                                ) {
+                                    app.actions
+                                        .push(Action::SetArchived(chat.id.clone(), !chat.archived));
+                                }
+                                // Clearing reaches the phone, so it waits for a
+                                // connection, as deleting does in the chat list.
+                                // Offline, the keys still reach it.
+                                let connected = app.is_connected();
+                                if widgets::menu_item_focusable(
+                                    ui,
+                                    &palette,
+                                    Some(Icon::Eraser),
+                                    "Clear chat",
+                                    &clear_chat_name(app.locale, connected),
+                                    connected,
+                                    connected || from_keys,
+                                )
+                                .clicked()
+                                    && connected
+                                {
+                                    app.actions
+                                        .push(Action::ShowDialog(Dialog::ConfirmClearChat(
+                                            chat.id.clone(),
+                                        )));
+                                }
+                                widgets::menu_separator(ui, &palette);
+                                if chat.can_leave(&app.our_ids())
+                                    && widgets::menu_item(
+                                        ui,
+                                        &palette,
+                                        Some(Icon::LogOut),
+                                        leave_label.as_ref(),
+                                    )
+                                {
+                                    app.actions.push(Action::ShowDialog(
+                                        Dialog::ConfirmLeaveGroup(chat.id.clone()),
+                                    ));
+                                }
+                                if let Some(phone) = chat.phone()
+                                    && widgets::menu_item(
+                                        ui,
+                                        &palette,
+                                        Some(Icon::Copy),
+                                        "Copy number",
+                                    )
+                                {
+                                    app.actions.push(Action::CopyText(format!("+{phone}")));
+                                }
+                                if widgets::menu_item(ui, &palette, Some(Icon::X), "Close chat") {
+                                    app.actions.push(Action::CloseChat);
+                                }
+                            });
+                        key_menu.finish(
+                            ui.ctx(),
+                            shown.map(|shown| shown.response.layer_id),
+                            false,
+                            first,
+                            more.id,
+                        );
+                        // Calls are one to one: a group, a channel, a broadcast
+                        // list and the chat with ourselves have no call button.
+                        // While this chat has the call, the button ends it.
+                        if call_buttons > 0.0 {
+                            let (call_tooltip, call_icon, call_fill, call) = if call_here {
+                                (
+                                    crate::i18n::gettext(app.locale, "Hang up").into_owned(),
+                                    Icon::PhoneOff,
+                                    palette.danger,
+                                    Action::HangupCall,
+                                )
+                            } else {
+                                (
+                                    crate::i18n::gettext(app.locale, "Voice call").into_owned(),
+                                    Icon::Phone,
+                                    palette.secondary,
+                                    Action::StartCall(chat.id.clone()),
+                                )
+                            };
+                            // On a vibrant window each sits on its own glass, as
+                            // Search and More do.
+                            if palette.vibrant() {
+                                ui.add_space(BUTTON_GAP);
+                            }
+                            let call_glass = ui.painter().add(egui::Shape::Noop);
+                            let call_button = theme::icon_button(
+                                ui,
+                                call_icon,
+                                18.0,
+                                call_fill,
+                                palette.text,
+                                &call_tooltip,
+                            )
+                            .in_toolbar(header_toolbar_id());
+                            if palette.vibrant() {
+                                ui.painter()
+                                    .set(call_glass, glass_button(&palette, call_button.rect));
+                            }
+                            if call_button.clicked() {
+                                app.actions.push(call);
+                            }
+                            if !call_here {
+                                let tip = crate::i18n::gettext(app.locale, "Video call");
+                                if palette.vibrant() {
+                                    ui.add_space(BUTTON_GAP);
+                                }
+                                let video_glass = ui.painter().add(egui::Shape::Noop);
+                                let video = theme::icon_button(
+                                    ui,
+                                    Icon::Video,
+                                    18.0,
+                                    palette.secondary,
+                                    palette.text,
+                                    &tip,
+                                )
+                                .in_toolbar(header_toolbar_id());
+                                if palette.vibrant() {
+                                    ui.painter()
+                                        .set(video_glass, glass_button(&palette, video.rect));
+                                }
+                                if video.clicked() {
+                                    app.actions.push(Action::StartVideoCall(chat.id.clone()));
+                                }
+                            }
+                        }
+                        let searching = app.chat_search_open;
+                        let tip = format!(
+                            "{} ({})",
+                            crate::i18n::gettext(app.locale, "Search messages"),
+                            super::keys::label("Ctrl+F")
+                        );
+                        if palette.vibrant() {
+                            ui.add_space(BUTTON_GAP);
+                        }
+                        let search_glass = ui.painter().add(egui::Shape::Noop);
+                        let search = theme::icon_button(
+                            ui,
+                            Icon::Search,
+                            18.0,
+                            if searching {
+                                palette.accent
+                            } else {
+                                palette.secondary
+                            },
+                            palette.text,
+                            &tip,
+                        )
+                        .in_toolbar(header_toolbar_id());
+                        if palette.vibrant() {
+                            ui.painter()
+                                .set(search_glass, glass_button(&palette, search.rect));
+                        }
+                        if search.clicked() {
+                            app.actions.push(if searching {
+                                Action::CloseChatSearch
+                            } else {
+                                Action::OpenChatSearch
+                            });
+                        }
+                        // A narrow window shows the list or the chat, not both;
+                        // this is the way back to the list.
+                        if narrow {
+                            if palette.vibrant() {
+                                ui.add_space(BUTTON_GAP);
+                            }
+                            let back_glass = ui.painter().add(egui::Shape::Noop);
+                            // On the Calls tab the list underneath is the call
+                            // history.
+                            let back_label = if app.page == crate::model::Page::Calls {
+                                crate::i18n::gettext(app.locale, "Back to the calls").into_owned()
+                            } else {
+                                "Back to chats".to_owned()
+                            };
+                            let back = theme::icon_button(
+                                ui,
+                                Icon::ArrowLeft,
+                                18.0,
+                                palette.secondary,
+                                palette.text,
+                                &back_label,
+                            )
+                            .in_toolbar(header_toolbar_id());
+                            if palette.vibrant() {
+                                ui.painter()
+                                    .set(back_glass, glass_button(&palette, back.rect));
+                            }
+                            ui.ctx()
+                                .data_mut(|data| data.insert_temp(back_button_id(), back.rect));
+                            if back.clicked() {
+                                app.actions.push(Action::CloseChat);
+                            }
+                        }
+                    });
                 });
             });
             ui.ctx()
@@ -868,13 +947,56 @@ pub(crate) fn header_row_id() -> egui::Id {
     egui::Id::new("conversation-header-row")
 }
 
+/// The header menu's Clear chat as a screen reader names it: offline, the
+/// name says why it is unavailable, which its dimmed look says to the eye
+/// only.
+fn clear_chat_name(locale: crate::i18n::Locale, connected: bool) -> String {
+    use crate::i18n::gettext;
+    if connected {
+        return "Clear chat".to_owned();
+    }
+    // Translators: why the chat menu's Clear chat is unavailable, read by a
+    // screen reader after "unavailable:".
+    let reason = gettext(locale, "Connect to WhatsApp to clear the chat");
+    crate::a11y::fill(
+        &gettext(locale, "{option}, unavailable: {reason}"),
+        &[("option", "Clear chat"), ("reason", &reason)],
+    )
+}
+
+/// The chat header's toolbar: chat info, search in the chat, and its menu,
+/// and Back in a narrow window.
+pub(crate) fn header_toolbar_id() -> egui::Id {
+    egui::Id::new("chat-actions")
+}
+
+/// The composer's toolbar: plus, emoji, and send or record.
+pub(crate) fn composer_toolbar_id() -> egui::Id {
+    egui::Id::new("message-actions")
+}
+
 /// Chat-header subtitle.
 fn subtitle(app: &App, chat: &Chat) -> (String, Color32) {
+    subtitle_as(app, chat, false)
+}
+
+/// The chat-header subtitle as drawn, or `spoken`, with the names of people
+/// typing in a group as a screen reader says them (`a11y::without_push_marker`).
+fn subtitle_as(app: &App, chat: &Chat, spoken: bool) -> (String, Color32) {
     let palette = app.palette;
     let typing = app.typing_in(&chat.id);
     if !typing.is_empty() {
         let text = if chat.is_group() {
-            let names: Vec<&str> = typing.iter().map(|(_, name)| name.as_str()).collect();
+            let names: Vec<&str> = typing
+                .iter()
+                .map(|(_, name)| {
+                    if spoken {
+                        crate::a11y::without_push_marker(name)
+                    } else {
+                        name.as_str()
+                    }
+                })
+                .collect();
             match names.as_slice() {
                 [] => String::new(),
                 [one] => format!("{one} is typing…"),
@@ -1544,6 +1666,8 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                 vec2(ui.available_width(), row_height),
                 Layout::left_to_right(Align::Max),
                 |ui| {
+                let label = crate::i18n::gettext(app.locale, "Message actions");
+                toolbar(ui, composer_toolbar_id(), &label, Stop::MessageActions, |ui| {
                 // The plus sits in the field's rounded left end, centred as
                 // the send button is in the right one.
                 ui.add_space((line / 2.0 - PLUS_EDGE / 2.0).max(0.0));
@@ -1560,7 +1684,7 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                         palette.text,
                         &crate::i18n::gettext(app.locale, "Attach"),
                     ))
-                    .tab_stop(Stop::Attach);
+                    .in_toolbar(composer_toolbar_id());
                     composer_tools_menu(app, chat, &tools);
                     // Plus and emoji sit close together, as a pair.
                     ui.add_space(COMPOSER_PAIR_GAP - ui.spacing().item_spacing.x);
@@ -1575,7 +1699,7 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                         },
                         palette.text,
                         "Emoji, GIFs, and stickers",
-                    )).tab_stop(Stop::Emoji);
+                    )).in_toolbar(composer_toolbar_id());
                     app.picker_anchor = Some(smile.rect);
                     if smile.clicked() {
                         if app.composer_tools_open {
@@ -1603,6 +1727,8 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                 )
                 .max(0.0);
                 let bottom = (row_height - text_height - top).max(0.0);
+                // The input sits between the buttons but is not one of them.
+                beside(ui, composer_toolbar_id(), |ui| {
                 Frame::new()
                     .fill(Color32::TRANSPARENT)
                     .inner_margin(Margin {
@@ -1789,6 +1915,7 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                         ui.add_space(bottom);
                         });
                     });
+                });
                 let ready = !app.composer.trim().is_empty()
                     || !app.pending.is_empty()
                     || (unsent_voice.is_some() && app.editing.is_none());
@@ -1808,7 +1935,7 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                         palette.secondary,
                         "Record a voice message",
                     )
-                    .tab_stop(Stop::Send)
+                    .in_toolbar(composer_toolbar_id())
                     .clicked()
                     {
                         app.actions.push(Action::StartRecording);
@@ -1820,11 +1947,12 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                         Icon::Send
                     };
                     if theme::circle_button(ui, icon_kind, button_width, fill, hover, icon, "Send")
-                        .tab_stop(Stop::Send)
+                        .in_toolbar(composer_toolbar_id())
                         .clicked()
                     {
                         send_click = true;
                     }
+                });
                 });
             },
                     );
@@ -2022,8 +2150,23 @@ fn composer_tools_menu(app: &mut App, chat: &Chat, plus: &egui::Response) {
         }
     }
     let mut draw_open = open;
+    // Opened from the keys (Enter or Space on the plus) or by a screen
+    // reader, focus goes into the menu, stays in it, and returns to the plus
+    // when it closes, as in the other menus. Its open state lives in `App`,
+    // not in egui's memory, where the keys look for an open menu: opened
+    // from the keys, it is noted there as well while it is open, so Escape
+    // closes it rather than the chat. The pointer's menu is unchanged.
+    let ctx = plus.ctx.clone();
+    let key_menu = super::list_nav::KeyMenu::for_button(&ctx, id, plus, false)
+        .menu(crate::i18n::gettext(app.locale, "Attach"));
+    let from_keys = key_menu.from_keys();
+    if from_keys && draw_open && !picker_open {
+        egui::Popup::open_id(&ctx, id);
+    }
+    let mut first = None;
+    let mut shown = None;
     if draw_open && !picker_open {
-        egui::Popup::menu(plus)
+        shown = egui::Popup::menu(plus)
             .id(id)
             .open_bool(&mut draw_open)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
@@ -2031,7 +2174,17 @@ fn composer_tools_menu(app: &mut App, chat: &Chat, plus: &egui::Response) {
             .frame(widgets::menu_frame(&app.palette))
             .show(|ui| {
                 let send_files = crate::i18n::gettext(app.locale, "Send files");
-                if widgets::menu_item(ui, &app.palette, Some(Icon::Paperclip), &send_files) {
+                let send = widgets::menu_item_response(
+                    ui,
+                    &app.palette,
+                    Some(Icon::Paperclip),
+                    &send_files,
+                    true,
+                );
+                // A popup's first pass only measures it, drawing nothing
+                // that could take focus.
+                first = (!ui.is_sizing_pass()).then_some(send.id);
+                if send.clicked() {
                     app.actions.push(Action::Attach { documents: false });
                 }
                 // Pictures picked here keep their own bytes instead of
@@ -2051,6 +2204,20 @@ fn composer_tools_menu(app: &mut App, chat: &Chat, plus: &egui::Response) {
                         .push(Action::ShowDialog(Dialog::CreatePoll(chat.id.clone())));
                 }
             });
+    }
+    if from_keys && !draw_open {
+        egui::Popup::close_id(&ctx, id);
+    }
+    // Focus leaving a menu the keys opened closes it, as it does the others.
+    let still_open = key_menu.finish(
+        &ctx,
+        shown.map(|shown| shown.response.layer_id),
+        false,
+        first,
+        plus.id,
+    );
+    if from_keys && !still_open {
+        draw_open = false;
     }
     if draw_open != app.composer_tools_open {
         app.actions.push(Action::SetComposerTools(draw_open));
@@ -2656,18 +2823,14 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat, under: f32) {
     };
     let mut actions = Vec::new();
     let mut anchored = false;
-    // The first unread message is the count-th incoming one from the end.
+    // The first unread message, where Alt+3 goes too.
     let divider = app
         .unread_divider
         .as_ref()
         .filter(|divider| divider.chat == chat.id)
         .and_then(|divider| {
-            conversation
-                .messages
-                .iter()
-                .rev()
-                .filter(|message| !message.from_me)
-                .nth(divider.count.saturating_sub(1) as usize)
+            divider
+                .first_unread(&conversation.messages)
                 .map(|message| (message.id.clone(), divider.count, divider.placed))
         });
     let mut divider_placed = false;
@@ -4998,7 +5161,11 @@ fn bubble_frame(
     }) && let Some(focused) = ui
         .memory(|memory| memory.focused())
         .and_then(|id| ui.ctx().read_response(id))
-        && (focused.id == bubble.id || inner.response.rect.contains(focused.rect.center()))
+        // A widget inside the bubble lies wholly within it. Its centre alone
+        // is not enough: a bubble scrolled up under the chat header covers
+        // the header's buttons on screen, and focusing one would scroll the
+        // chat to that bubble.
+        && (focused.id == bubble.id || inner.response.rect.contains_rect(focused.rect))
     {
         view.keyboard_navigation.set(true);
         if focused.gained_focus() && !ui.clip_rect().contains_rect(focused.rect) {

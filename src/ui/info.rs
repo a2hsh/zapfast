@@ -1355,11 +1355,27 @@ fn group_photo(
     let remove = crate::i18n::gettext(app.locale, "Remove photo");
     let width = widgets::menu_width(ui, &[change.as_ref(), remove.as_ref()], true);
     let mut chosen = None;
-    egui::Popup::menu(&response)
+    // Opened from the keys (Enter or Space on the photo) or by a screen
+    // reader, focus goes into the menu, stays in it, and returns to the
+    // photo when it closes, as in the other menus. The pointer's menu is
+    // unchanged.
+    let key_menu = super::list_nav::KeyMenu::for_button(
+        ui.ctx(),
+        egui::Popup::default_response_id(&response),
+        &response,
+        false,
+    )
+    .menu(label.to_string());
+    let mut first = None;
+    let shown = egui::Popup::menu(&response)
         .width(width)
         .frame(widgets::menu_frame(&palette))
         .show(|ui| {
-            if widgets::menu_item(ui, &palette, Some(Icon::Image), &change) {
+            let item = widgets::menu_item_response(ui, &palette, Some(Icon::Image), &change, true);
+            // A popup's first pass only measures it, drawing nothing that
+            // could take focus.
+            first = (!ui.is_sizing_pass()).then_some(item.id);
+            if item.clicked() {
                 chosen = Some(Action::PickGroupPicture(id.to_owned()));
                 ui.close();
             }
@@ -1369,6 +1385,13 @@ fn group_photo(
                 ui.close();
             }
         });
+    key_menu.finish(
+        ui.ctx(),
+        shown.map(|shown| shown.response.layer_id),
+        false,
+        first,
+        response.id,
+    );
     chosen
 }
 
