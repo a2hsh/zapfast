@@ -701,14 +701,38 @@ chat's matches, newest first. Its calendar narrows them to one day.
 
 Click the chat header, or choose **Info** in its menu, to open the info panel
 beside the chat. It shows the picture, the number or the members, and the
-chat's actions. When WhatsApp lets you edit a group's info, rename it with the
+chat's actions. Opened from the keyboard (Enter on **Chat info** in the chat's
+toolbar, or **Info** in a menu) or with a screen reader running, focus moves
+to the panel's **Close** (**Back** in a narrow window), and Close or Escape
+gives focus back to where you opened the panel; Escape typed in the message
+input closes it and leaves you there. With the mouse, focus stays where it
+was, as before. From the keyboard a group's members are one list, the Tab stop
+after **Media, links and docs**: Up and Down, Home, End, PgUp and PgDn walk
+every member, scrolled out of view or not, the screen reader says where each
+one is in the list ("3 of 40"), and Enter or Space opens a member's own panel,
+as a click does. When WhatsApp lets you edit a group's info, rename it with the
 pencil beside its name and click its photo to change it. Clicking a
 `chat.whatsapp.com` invite link shows the group and joins it without leaving
 ZapFast.
 
 **Media, links and docs** in the panel lists the photos and videos, the
 documents, and the links shared in the chat, newest first: click a photo or a
-document to go to its message, or a link to open it in the browser. Press
+document to go to its message, or a link to open it in the browser. From the
+keyboard the open tab's list is the Tab stop after the tabs, walked with the
+same keys as the members. The photos and videos are one list in reading
+order, left to right and row by row, each read as the viewer names it but
+without its "3 of 40", which the screen reader gives as the list's position,
+such as "Photo, Ada Lovelace, Yesterday, 18:04"; Enter or Space opens it
+in the viewer, which steps through the chat's photos and videos and whose
+**Show in the chat** goes to its message, and Escape there comes back to the
+list. Enter or Space on a document goes to its message, and on a link opens
+it; a call link reads as one, such as "Call link, voice call", without its
+address, and joins its call with your microphone muted, as from the message
+list. When the list was cut to the newest items, the list's description says
+so. A screen reader hears the panel as a region named **Contact info**,
+**Group info** or **Channel info**, its title and its sections (Description,
+Members) as headings, and **Media**, **Docs** and **Links** as tabs, the
+one shown selected, each with its count. Press
 Escape to go back to the overview, and again to close the panel. Drag its edge
 to change its width. The conversation narrows beside the panel, and when the
 window is too tight for the chat list as well, the list steps aside until the

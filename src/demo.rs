@@ -14344,6 +14344,504 @@ mod tests {
         }
     }
 
+    /// The sample group's info panel, its members joined by `extra` people
+    /// known by their number, laid out.
+    fn group_info_with_members(extra: usize) -> (App, egui::Context) {
+        let mut app = app();
+        apply_flags(&mut app, Some("group-info"));
+        let group = app.open_chat.clone().expect("the group is open");
+        let chat = app
+            .chats
+            .iter_mut()
+            .find(|chat| chat.id == group)
+            .expect("the group is listed");
+        for index in 0..extra {
+            chat.participants
+                .push(format!("4915550{index:04}@s.whatsapp.net"));
+        }
+        app.info_members = None;
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        (app, ctx)
+    }
+
+    /// A group's members are one list after the media row: one Tab stop,
+    /// named and counted, whose arrows walk every member, those scrolled
+    /// out of the panel's view included, and Enter opens the member's own
+    /// panel, as a click does.
+    #[test]
+    fn the_info_panels_members_are_one_list() {
+        use crate::ui::focus::Stop;
+        use crate::ui::info::{InfoList, MEDIA_ROW_STOP, list_id};
+        let (mut app, ctx) = group_info_with_members(40);
+        let group = app.open_chat.clone().unwrap();
+        let members = app.participant_list(app.chat(&group).unwrap());
+        assert!(members.len() > 40, "{}", members.len());
+        let list = list_id(InfoList::Members);
+        let media_row = stop_id(&ctx, Stop::InfoControl(MEDIA_ROW_STOP));
+        ctx.memory_mut(|memory| memory.request_focus(media_row));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        assert_eq!(focused(&ctx), Some(list), "the stop after the media row");
+        let tree = tree_after(&mut app, &ctx, None);
+        let (node_of_list, active) = list_nodes(&tree, list);
+        assert_eq!(node_of_list.role(), egui::accesskit::Role::ListBox);
+        assert_eq!(node_of_list.label(), Some("Members"));
+        assert_eq!(node_of_list.size_of_set(), Some(members.len()));
+        assert_eq!(tree.focus, list.accesskit_id());
+        let active = active.expect("the first member is current");
+        assert_eq!(active.role(), egui::accesskit::Role::ListBoxOption);
+        assert_eq!(active.position_in_set(), Some(0));
+        let last = members.len() - 1;
+        for (key, expected) in [
+            (egui::Key::ArrowDown, 1),
+            (egui::Key::ArrowDown, 2),
+            (egui::Key::End, last),
+            (egui::Key::ArrowUp, last - 1),
+            (egui::Key::Home, 0),
+            (egui::Key::PageDown, 0),
+        ] {
+            let tree = tree_after(&mut app, &ctx, Some(key));
+            let active = list_nodes(&tree, list)
+                .1
+                .expect("the current member is drawn");
+            if key == egui::Key::PageDown {
+                assert!(
+                    active.position_in_set().is_some_and(|at| at > 1),
+                    "a page down: {:?}",
+                    active.position_in_set()
+                );
+                continue;
+            }
+            assert_eq!(active.position_in_set(), Some(expected), "{key:?}");
+            assert_eq!(active.size_of_set(), Some(members.len()));
+            assert_eq!(
+                active.label(),
+                Some(crate::a11y::without_push_marker(&members[expected].1)),
+                "{key:?}"
+            );
+            assert_eq!(focused(&ctx), Some(list), "{key:?}");
+        }
+        press_key(&mut app, &ctx, egui::Key::Home, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(
+            app.info.as_ref().map(|info| info.chat.clone()),
+            Some(members[1].0.clone()),
+            "Enter opens the member's panel"
+        );
+    }
+
+    /// The media view's pictures and videos are one list after its tabs, in
+    /// reading order, each named as the viewer names it but without its
+    /// position, which the list gives ("Photo", who sent it, when); Enter
+    /// opens the current one in the viewer, and Escape there comes back to
+    /// the list. Its documents and links are lists too: Enter goes to a
+    /// document's message and opens a link, as a click does.
+    #[test]
+    fn the_media_documents_and_links_walk_from_the_keys() {
+        use crate::model::{InfoView, MediaTab};
+        use crate::ui::focus::Stop;
+        use crate::ui::info::{InfoList, TAB_STOP, list_id};
+        let mut app = app();
+        apply_flags(&mut app, Some("info-media"));
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let listing = app.info_media.clone().expect("the sample is listed");
+        let total = listing.media.len();
+        assert!(total >= 3, "{total}");
+        let media = list_id(InfoList::Media);
+        let links_tab = stop_id(&ctx, Stop::InfoControl(TAB_STOP + 2));
+        ctx.memory_mut(|memory| memory.request_focus(links_tab));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        assert_eq!(focused(&ctx), Some(media), "the stop after the tabs");
+        let tree = tree_after(&mut app, &ctx, None);
+        let (node_of_list, active) = list_nodes(&tree, media);
+        assert_eq!(node_of_list.role(), egui::accesskit::Role::ListBox);
+        assert_eq!(node_of_list.label(), Some("Media"));
+        assert_eq!(node_of_list.size_of_set(), Some(total));
+        let named = |node: &egui::accesskit::Node, index: usize| {
+            let kind = if matches!(listing.media[index].content, Content::Video { .. }) {
+                "Video"
+            } else {
+                "Photo"
+            };
+            // The list gives the position: the row's name does not say it
+            // again, as the viewer's "Photo 3 of 40" would.
+            let start = format!("{kind}, ");
+            let label = node.label().unwrap_or_default();
+            assert!(label.starts_with(&start), "{label:?} for {start:?}");
+            let position = format!(" {} of {total}", index + 1);
+            assert!(!label.contains(&position), "no position in {label:?}");
+            assert_eq!(node.role(), egui::accesskit::Role::ListBoxOption);
+            assert_eq!(node.position_in_set(), Some(index));
+            assert_eq!(node.size_of_set(), Some(total));
+        };
+        named(&active.expect("the newest is current"), 0);
+        for (key, expected) in [
+            (egui::Key::ArrowDown, 1),
+            (egui::Key::End, total - 1),
+            (egui::Key::ArrowUp, total - 2),
+            (egui::Key::Home, 0),
+            (egui::Key::ArrowDown, 1),
+        ] {
+            let tree = tree_after(&mut app, &ctx, Some(key));
+            named(
+                &list_nodes(&tree, media)
+                    .1
+                    .expect("the current item is drawn"),
+                expected,
+            );
+            assert_eq!(focused(&ctx), Some(media), "{key:?}");
+        }
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        let preview = app.image_preview.as_ref().expect("Enter opens the viewer");
+        assert_eq!(preview.message(), listing.media[1].id);
+        assert_eq!(preview.chat(), listing.chat);
+        assert!(app.info.is_some(), "the panel stays under the viewer");
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(app.image_preview.is_none());
+        assert_eq!(focused(&ctx), Some(media), "Escape comes back to the list");
+        // The documents: the next tab's list, read without the dots.
+        let docs_tab = stop_id(&ctx, Stop::InfoControl(TAB_STOP + 1));
+        ctx.memory_mut(|memory| memory.request_focus(docs_tab));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(
+            app.info.as_ref().map(|info| info.view),
+            Some(InfoView::Media(MediaTab::Docs))
+        );
+        // Past the Links tab.
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        let docs = list_id(InfoList::Docs);
+        assert_eq!(focused(&ctx), Some(docs));
+        let tree = tree_after(&mut app, &ctx, None);
+        let (node_of_list, active) = list_nodes(&tree, docs);
+        assert_eq!(node_of_list.label(), Some("Docs"));
+        assert_eq!(node_of_list.size_of_set(), Some(listing.docs.len()));
+        let document = &listing.docs[0];
+        let Content::Document { file_name, .. } = &document.content else {
+            panic!("a document");
+        };
+        let label = active
+            .expect("the newest document")
+            .label()
+            .map(str::to_owned);
+        let label = label.unwrap_or_default();
+        assert!(label.starts_with(&format!("{file_name}, ")), "{label:?}");
+        assert!(!label.contains('·'), "{label:?}");
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(
+            app.message_cursor.get(&document.chat),
+            Some(&document.id),
+            "Enter goes to the document's message"
+        );
+        // The links: Enter opens the current one.
+        let links_tab = stop_id(&ctx, Stop::InfoControl(TAB_STOP + 2));
+        ctx.memory_mut(|memory| memory.request_focus(links_tab));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        let links = list_id(InfoList::Links);
+        assert_eq!(focused(&ctx), Some(links));
+        let tree = tree_after(&mut app, &ctx, None);
+        let (node_of_list, active) = list_nodes(&tree, links);
+        assert_eq!(node_of_list.label(), Some("Links"));
+        assert_eq!(active.expect("the newest link").position_in_set(), Some(0));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 780.0),
+                )),
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| {
+                let ctx = ui.ctx().clone();
+                app.background_frame(&ctx);
+                app.frame_ui(ui);
+            },
+        );
+        output.textures_delta.clear();
+        let opened: Vec<String> = output
+            .platform_output
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                egui::OutputCommand::OpenUrl(open) => Some(open.url.clone()),
+                _ => None,
+            })
+            .collect();
+        let host = crate::ui::info::domain(&listing.links[0].url);
+        assert!(
+            opened.len() == 1 && opened[0].contains(&host),
+            "{opened:?} for {host}"
+        );
+    }
+
+    /// PgDn in the media grid moves about a screen of it: the rows a screen
+    /// shows, each of its columns, in the list's reading order, not as many
+    /// items as there are rows.
+    #[test]
+    fn page_down_in_the_media_grid_moves_a_screen_of_it() {
+        use crate::ui::focus::Stop;
+        use crate::ui::info::{InfoList, TAB_STOP, list_id};
+        let mut app = app();
+        apply_flags(&mut app, Some("info-media"));
+        let listing = app.info_media.as_mut().expect("the sample is listed");
+        let sample = listing.media[0].clone();
+        listing.media = (0..120)
+            .map(|index| {
+                let mut item = sample.clone();
+                item.id = format!("media-{index}");
+                item.timestamp -= index;
+                item
+            })
+            .collect();
+        let len = listing.media.len();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let links_tab = stop_id(&ctx, Stop::InfoControl(TAB_STOP + 2));
+        ctx.memory_mut(|memory| memory.request_focus(links_tab));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        let media = list_id(InfoList::Media);
+        assert_eq!(focused(&ctx), Some(media));
+        // The grid as drawn: its height, its columns and its rows' pitch.
+        let tree = tree_after(&mut app, &ctx, None);
+        let (list, _) = list_nodes(&tree, media);
+        let tops: Vec<f64> = tree
+            .nodes
+            .iter()
+            .filter(|(_, node)| {
+                node.role() == egui::accesskit::Role::ListBoxOption
+                    && node.size_of_set() == Some(len)
+            })
+            .filter_map(|(_, node)| Some((node.position_in_set()?, node.bounds()?.y0)))
+            .collect::<std::collections::BTreeMap<_, _>>()
+            .into_values()
+            .collect();
+        let columns = tops.iter().filter(|top| **top == tops[0]).count();
+        let pitch = tops[columns] - tops[0];
+        let height = list.bounds().expect("the list is placed").height();
+        let rows = (height / pitch).floor() as usize;
+        assert!(columns > 1 && rows > 1, "{columns} columns, {rows} rows");
+        let tree = tree_after(&mut app, &ctx, Some(egui::Key::PageDown));
+        let reached = list_nodes(&tree, media)
+            .1
+            .and_then(|active| active.position_in_set());
+        assert_eq!(reached, Some((rows * columns).min(len - 1)));
+    }
+
+    /// A call link in the Links list reads as a call link, as in the message
+    /// list, never as its address with the call's token; Enter joins its call
+    /// with the microphone muted, as from the message list.
+    #[test]
+    fn a_call_link_in_the_links_list_reads_as_one_and_joins_muted() {
+        use crate::ui::focus::Stop;
+        use crate::ui::info::{InfoList, TAB_STOP, list_id};
+        let mut app = app();
+        apply_flags(&mut app, Some("info-media"));
+        let url = "https://call.whatsapp.com/voice/AbCdEf1234567890";
+        let listing = app.info_media.as_mut().expect("the sample is listed");
+        let newest = listing.links.first().map_or(0, |link| link.timestamp + 1);
+        listing.links.insert(
+            0,
+            crate::model::ChatLink {
+                message: "call-link".to_owned(),
+                timestamp: newest,
+                url: url.to_owned(),
+                title: None,
+            },
+        );
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        app.backend.record_demo_commands();
+        render(&mut app, &ctx);
+        let links_tab = stop_id(&ctx, Stop::InfoControl(TAB_STOP + 2));
+        ctx.memory_mut(|memory| memory.request_focus(links_tab));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        let links = list_id(InfoList::Links);
+        assert_eq!(focused(&ctx), Some(links));
+        let tree = tree_after(&mut app, &ctx, None);
+        let label = list_nodes(&tree, links)
+            .1
+            .expect("the call link is current")
+            .label()
+            .map(str::to_owned)
+            .unwrap_or_default();
+        assert!(label.starts_with("Call link, voice call, "), "{label:?}");
+        assert!(!label.contains("AbCdEf"), "no token in {label:?}");
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert!(
+            app.backend
+                .take_demo_commands()
+                .iter()
+                .any(|command| matches!(
+                    command,
+                    crate::backend::Command::JoinCallLink { muted: true, .. }
+                )),
+            "Enter joins the call, muted"
+        );
+    }
+
+    /// The info panel is a region named by what it is about, around its
+    /// Close button: its title and its sections are headings, the media row
+    /// says the count it shows, and the media view's Media, Docs and Links
+    /// are tabs in a tab list, one selected, never "pressed" or "unread".
+    #[test]
+    fn the_info_panel_is_a_named_region_with_headings() {
+        use crate::ui::focus::Stop;
+        use egui::accesskit::Role;
+        let with = |tree: &egui::accesskit::TreeUpdate, role: Role, label: &str| {
+            tree.nodes
+                .iter()
+                .find(|(_, node)| node.role() == role && node.label() == Some(label))
+                .map(|(id, node)| (*id, node.clone()))
+        };
+        // Every node under `parent`, at any depth.
+        let under = |tree: &egui::accesskit::TreeUpdate, parent: egui::accesskit::NodeId| {
+            let mut found = Vec::new();
+            let mut stack = vec![parent];
+            while let Some(id) = stack.pop() {
+                if let Some(node) = node(tree, id) {
+                    stack.extend_from_slice(node.children());
+                    found.push(id);
+                }
+            }
+            found
+        };
+        let (mut app, ctx) = group_info_with_members(0);
+        let group = app.open_chat.clone().unwrap();
+        let members = app.participant_list(app.chat(&group).unwrap()).len();
+        let tree = tree_after(&mut app, &ctx, None);
+        let (region, _) = with(&tree, Role::Region, "Group info").expect("a named region");
+        let close = stop_id(&ctx, Stop::InfoClose).accesskit_id();
+        assert!(
+            under(&tree, region).contains(&close),
+            "Close is in the region"
+        );
+        let (_, title) = with(&tree, Role::Heading, "Group info").expect("the title");
+        assert_eq!(title.level(), Some(2));
+        let section = format!("Members ({members})");
+        let (_, section) = with(&tree, Role::Heading, &section).expect("the members heading");
+        assert_eq!(section.level(), Some(3));
+        let listing = app.info_media.as_ref().expect("the group is listed");
+        let count = listing.media.len() + listing.docs.len() + listing.links.len();
+        let row = node(
+            &tree,
+            stop_id(&ctx, Stop::InfoControl(crate::ui::info::MEDIA_ROW_STOP)).accesskit_id(),
+        )
+        .expect("the media row");
+        assert_eq!(
+            row.label(),
+            Some(format!("Media, links and docs, {count}").as_str())
+        );
+        // The media view's tabs.
+        let mut app = super::tests::app();
+        apply_flags(&mut app, Some("info-docs"));
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let tree = tree_after(&mut app, &ctx, None);
+        let (region, _) = with(&tree, Role::Region, "Contact info").expect("the same region");
+        let (tabs, list) = with(&tree, Role::TabList, "Media, links and docs").expect("tab list");
+        assert!(under(&tree, region).contains(&tabs));
+        let listing = app.info_media.clone().expect("listed");
+        let tabs: Vec<egui::accesskit::Node> = list
+            .children()
+            .iter()
+            .filter_map(|id| node(&tree, *id))
+            .filter(|node| node.role() == Role::Tab)
+            .collect();
+        let expected = [
+            ("Media", listing.media.len(), false),
+            ("Docs", listing.docs.len(), true),
+            ("Links", listing.links.len(), false),
+        ];
+        assert_eq!(tabs.len(), expected.len(), "{tabs:?}");
+        for (index, (tab, (name, count, selected))) in tabs.iter().zip(expected).enumerate() {
+            assert_eq!(tab.label(), Some(format!("{name}, {count}").as_str()));
+            assert_eq!(tab.is_selected(), Some(selected), "{name}");
+            assert_eq!(tab.toggled(), None, "{name}");
+            assert_eq!(tab.position_in_set(), Some(index));
+            assert_eq!(tab.size_of_set(), Some(3));
+        }
+        let (_, title) =
+            with(&tree, Role::Heading, "Media, links and docs").expect("the view's title");
+        assert_eq!(title.level(), Some(2));
+    }
+
+    /// Opened from the keys, the info panel takes focus on its Close, and
+    /// its Close or Escape gives focus back to what opened it. Escape typed
+    /// in the message field closes the panel and leaves the field focused,
+    /// and a member's panel opened from the members list starts on its own
+    /// Close.
+    #[test]
+    fn opening_the_info_panel_from_the_keys_focuses_close_and_closing_returns() {
+        use crate::ui::focus::Stop;
+        use crate::ui::info::{InfoList, list_id};
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let chat_info = stop_id(&ctx, Stop::ChatActions);
+        // Reached by the keyboard, as Tab does.
+        ctx.memory_mut(|memory| memory.request_focus(chat_info));
+        ctx.data_mut(|data| data.insert_temp(crate::theme::keyboard_focus_id(), true));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert!(app.info_visible(), "Enter on Chat info opens the panel");
+        let close = stop_id(&ctx, Stop::InfoClose);
+        assert_eq!(focused(&ctx), Some(close), "on the panel's Close");
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert!(!app.info_visible(), "Close closes it");
+        assert_eq!(focused(&ctx), Some(chat_info), "back on Chat info");
+        // Escape from the panel does the same.
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(focused(&ctx), Some(close));
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(!app.info_visible(), "Escape closes it");
+        assert_eq!(focused(&ctx), Some(chat_info), "back on Chat info");
+        // Escape in the message field closes the panel and stays there.
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert!(app.info_visible());
+        let composer = egui::Id::new("composer-text");
+        ctx.memory_mut(|memory| memory.request_focus(composer));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(!app.info_visible());
+        assert_eq!(focused(&ctx), Some(composer), "the field keeps focus");
+        // A member's panel, opened from the members list.
+        let (mut app, ctx) = group_info_with_members(0);
+        let members = list_id(InfoList::Members);
+        ctx.memory_mut(|memory| memory.request_focus(members));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Home, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        let group = app.open_chat.clone();
+        assert_ne!(app.info.as_ref().map(|info| info.chat.clone()), group);
+        assert_eq!(
+            focused(&ctx),
+            Some(stop_id(&ctx, Stop::InfoClose)),
+            "on the member's panel's Close"
+        );
+    }
+
     /// The timer line says what WhatsApp says: a duration for a chat with one,
     /// "Off" for a chat the phone turned it off for, and nothing at all for a
     /// chat nobody has mentioned a timer for, which includes a frame where the

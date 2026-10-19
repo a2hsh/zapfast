@@ -1294,10 +1294,11 @@ fn first_control(trace: &Trace, layer: egui::Id) -> egui::Pos2 {
 }
 
 /// Chat info, chosen in the chat's toolbar, opens the info panel beside the
-/// chat, whose controls come next in Tab order, and focus stays on the
-/// button; Escape closes the panel, as upstream's own Escape does.
+/// chat with focus on the panel's Close, in one move; Escape closes the
+/// panel, as upstream's own Escape does, and focus goes back to Chat info,
+/// in one move too, not to the message field.
 #[test]
-fn chat_info_opens_the_panel_and_keeps_focus_on_its_button() {
+fn chat_info_opens_the_panel_on_its_close_and_escape_returns() {
     let mut trace = Trace::new(app());
     focus_stop(&mut trace, Stop::ChatActions);
     let button = trace.last().clone();
@@ -1310,7 +1311,8 @@ fn chat_info_opens_the_panel_and_keeps_focus_on_its_button() {
         "the chat's info panel"
     );
     trace.assert_clean(press, "chat info opened");
-    assert_eq!(trace.last().egui, button.egui, "still on Chat info");
+    let close = control(&trace.ctx, Stop::InfoClose).expect("the panel's Close");
+    assert_eq!(trace.last().egui, Some(close), "on the panel's Close");
     let from = tap(
         &mut trace,
         "Escape",
@@ -1319,6 +1321,7 @@ fn chat_info_opens_the_panel_and_keeps_focus_on_its_button() {
     );
     assert!(trace.app.info.is_none());
     trace.assert_clean(from, "chat info closed");
+    assert_eq!(trace.last().egui, button.egui, "back on Chat info");
 }
 
 /// With a screen reader, or any other UIA client, attached, a mouse user
@@ -2268,7 +2271,8 @@ fn header_more(trace: &mut Trace) -> Frame {
 
 /// The chat header's More opens its menu from Enter and Space as every
 /// keyboard menu opens, and an item taken from it acts: Info opens the info
-/// panel beside the chat, with the reader back on More in one focus change.
+/// panel beside the chat, with the reader on the panel's Close, and Escape
+/// there gives focus back to More.
 #[test]
 fn the_chat_headers_menu_opens_from_the_keys_as_the_other_menus_do() {
     for (step, key) in [("Enter", egui::Key::Enter), ("Space", egui::Key::Space)] {
@@ -2292,6 +2296,15 @@ fn the_chat_headers_menu_opens_from_the_keys_as_the_other_menus_do() {
     // Not checked for a clean trace: the panel opening beside the chat lays
     // the conversation out again under new parent nodes, as it does for
     // anything focused in the chat.
+    let close = control(&trace.ctx, Stop::InfoClose).expect("the panel's Close");
+    assert_eq!(trace.last().egui, Some(close), "on the panel's Close");
+    tap(
+        &mut trace,
+        "Escape",
+        egui::Key::Escape,
+        egui::Modifiers::NONE,
+    );
+    assert!(trace.app.info.is_none(), "Escape closes the panel");
     assert_eq!(trace.last().egui, more.egui, "back on More");
 }
 

@@ -246,6 +246,18 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
     {
         actions.extend(crate::ui::calls::list_keys(app, ctx));
     }
+    // The info panel's focused list: the same keys move its current row,
+    // ahead of the scrolling below, and Enter or Space acts on it.
+    if app.dialog.is_none()
+        && !app.show_update
+        && app.picker.is_none()
+        && app.reaction_target.is_none()
+        && !menu_open
+        // The call screen covers the panel.
+        && (app.call.is_none() || app.call_surface_hidden)
+    {
+        crate::ui::info::list_keys(app, ctx);
+    }
     // The focused list's current message takes the keys that act on it.
     if app.dialog.is_none()
         && !app.show_update
@@ -386,6 +398,8 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
                 app.info.as_ref().map(|info| info.view),
                 Some(InfoView::Media(_))
             );
+            // Dismissed: focus may go back to what opened the panel.
+            app.info_dismissed = !media;
             actions.push(if media {
                 Action::ShowInfo(InfoView::Overview)
             } else {
