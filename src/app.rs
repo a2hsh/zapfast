@@ -554,8 +554,10 @@ pub struct App {
     /// The reaction picker came from the message list's E: closing it
     /// returns focus to the list.
     pub reaction_from_list: bool,
-    /// Demo/test: keep this chat row's context menu open.
-    #[cfg(any(test, feature = "demo"))]
+    /// One-shot: open this chat's context menu when its row is next drawn.
+    /// Set by the chat list's Shift+F10, and by demo pages; the menu then
+    /// stays open until it is closed. A request for a chat the list no
+    /// longer shows is dropped.
     pub open_chat_menu: Option<ChatId>,
     /// Demo/test: keep the open chat's header menu open.
     #[cfg(any(test, feature = "demo"))]
@@ -768,6 +770,15 @@ pub struct App {
     /// it hidden: the chat it was for, which a later visible pass of that
     /// chat honours, and no other chat.
     pub(crate) list_focus_deferred: Option<ChatId>,
+    /// The chat list's current chat: where its arrows move from and what a
+    /// screen reader reads, without opening it. It follows the chat opened.
+    /// A chat the list no longer shows hands over to the open chat, or to
+    /// the first one (`chat_cursor_index`).
+    pub chat_cursor: Option<ChatId>,
+    /// Whether the chat list had keyboard focus in the last frame drawn.
+    pub chats_focused: bool,
+    /// One-shot: give the chat list keyboard focus when it is next drawn.
+    pub focus_chats: bool,
     pub focus_composer: bool,
     pub focus_search: bool,
     /// What the Settings page is filtered by.
@@ -1436,7 +1447,6 @@ impl App {
             open_message_menu: None,
             open_phone_menu: None,
             reaction_from_list: false,
-            #[cfg(any(test, feature = "demo"))]
             open_chat_menu: None,
             #[cfg(any(test, feature = "demo"))]
             open_header_menu: None,
@@ -1527,6 +1537,9 @@ impl App {
             messages_focused: false,
             focus_messages: false,
             list_focus_deferred: None,
+            chat_cursor: None,
+            chats_focused: false,
+            focus_chats: false,
             focus_composer: false,
             focus_search: false,
             settings_search: String::new(),
@@ -1803,6 +1816,14 @@ impl App {
         self.message_item = None;
         self.download_heard = None;
         self.pending_follow = None;
+        // The chat list's current chat follows the next account's open chat.
+        self.chat_cursor = None;
+        // The chat list's focus request is drawn by the next account's list
+        // or not at all.
+        self.focus_chats = false;
+        // A chat menu asked for and not drawn yet was for the previous
+        // account's chat: the next one can hold a chat with the same id.
+        self.open_chat_menu = None;
     }
 
     fn add_account(&mut self) {
@@ -2301,6 +2322,7 @@ impl App {
         // A new window starts with nothing focused: a message list that had
         // focus in the last one does not hold it back from the composer.
         self.messages_focused = false;
+        self.chats_focused = false;
         self.refocus_composer(ctx);
         // Before the tray: muda keeps the first menu handler it is given, and
         // the tray installs one when it makes its item on the first window.
@@ -2905,6 +2927,35 @@ impl App {
     /// a window-scoped session so the search field remains useful.
     pub fn locked_folder_open(&self) -> bool {
         self.locked_folder && (self.chat_lock_authenticated() || self.secret_code_matched())
+    }
+
+    /// Whether the chat list shows search results: there is search text, and
+    /// it neither filters the locked folder nor is the secret code.
+    pub fn chat_results_shown(&self) -> bool {
+        !self.search.trim().is_empty() && !self.locked_folder_open() && !self.secret_code_matched()
+    }
+
+    /// Where the chat list's current chat is among `chats`, the chats it
+    /// shows: the cursor's chat while it is shown, else the open chat while
+    /// that is, else the first. Never a chat the list no longer shows, after
+    /// a filter change, an archive or a deletion.
+    pub fn chat_cursor_index<'a>(
+        &self,
+        chats: impl Iterator<Item = &'a str> + Clone,
+    ) -> Option<usize> {
+        let find = |wanted: Option<&str>| {
+            wanted.and_then(|wanted| chats.clone().position(|chat| chat == wanted))
+        };
+        find(self.chat_cursor.as_deref())
+            .or_else(|| find(self.open_chat.as_deref()))
+            .or_else(|| chats.clone().next().map(|_| 0))
+    }
+
+    /// The chat list's current chat, as the list resolves it.
+    pub fn current_list_chat(&self) -> Option<ChatId> {
+        let visible = self.visible_chats();
+        let index = self.chat_cursor_index(visible.iter().map(|chat| chat.id.as_str()))?;
+        Some(visible[index].id.clone())
     }
 
     pub fn locked_count(&self) -> usize {
@@ -5581,6 +5632,9 @@ impl App {
         self.emoji_start = None;
         self.mention_start = None;
         self.set_open_chat(Some(id.clone()));
+        // The chat list's current chat follows the chat opened, however it
+        // was opened.
+        self.chat_cursor = Some(id.clone());
         // The Calls tab keeps its history beside the chat; every other page
         // gives way to the chat list.
         if self.page != Page::Calls {
@@ -5631,8 +5685,10 @@ impl App {
             && !search_focused
             // A reader in the message list stays there: coming back to the
             // window (Alt+Tab, a screen reader dialog) must not lose their
-            // place. Still last frame's value here.
+            // place. Still last frame's value here. So does a reader in the
+            // chat list.
             && !self.messages_focused
+            && !self.chats_focused
         {
             self.focus_composer = true;
         }
@@ -8362,6 +8418,77 @@ impl App {
                 }
             }
             Action::PhoneMenuOpened => self.open_phone_menu = None,
+            Action::ChatCursor(step) => {
+                use crate::ui::list_nav::Step;
+                let chats: Vec<ChatId> = self
+                    .visible_chats()
+                    .into_iter()
+                    .map(|chat| chat.id.clone())
+                    .collect();
+                let current = self.chat_cursor_index(chats.iter().map(String::as_str));
+                // Up from the first search result goes back to the search
+                // field, where Down came from.
+                if step == Step::Previous && current == Some(0) && self.chat_results_shown() {
+                    self.focus_search = true;
+                    return;
+                }
+                let Some(index) = crate::ui::list_nav::step(current, chats.len(), step) else {
+                    return;
+                };
+                let id = chats[index].clone();
+                // In search results the current chat is also the result the
+                // search field's Enter opens, highlighted as before.
+                if self.chat_results_shown() {
+                    self.search_selected = Some(id.clone());
+                }
+                // Laid out next frame even when it was scrolled away, so it
+                // can become the list's active descendant.
+                self.scroll_chat_into_view = Some(id.clone());
+                self.chat_cursor = Some(id);
+            }
+            Action::FocusChats => {
+                let Some(current) = self.current_list_chat() else {
+                    self.announcer.say(
+                        crate::announcer::Category::Status,
+                        crate::i18n::gettext(self.locale, "No chats"),
+                    );
+                    return;
+                };
+                // From the Calls page or Settings, back to the chats, where
+                // the list is. Starred messages stand in the list's place:
+                // the chats come back, as from the rail's Chats.
+                self.page = Page::Chats;
+                self.show_starred = false;
+                // Where the open chat is drawn in the list's place, the list
+                // comes back too. A narrow window gives the chat all of its
+                // width: the list comes back as Back brings it, its current
+                // chat the one that was open. A wider one drops the rail and
+                // the list while the info panel leaves them no room: the
+                // panel closes.
+                if self.current_chat().is_some() && crate::ui::narrow(ctx) {
+                    self.chat_cursor = self.open_chat.clone();
+                    self.apply(Action::CloseChat, ctx);
+                } else if crate::ui::info_crowds_list(self, ctx, ctx.content_rect().width()) {
+                    self.close_info();
+                }
+                self.focus_search = false;
+                self.focus_composer = false;
+                // The list takes focus when it is next drawn, with its
+                // current chat in view.
+                self.focus_chats = true;
+                self.scroll_chat_into_view = Some(current);
+                // Shown as after Tab: the ring goes around the current chat.
+                ctx.data_mut(|data| {
+                    data.insert_temp(crate::theme::keyboard_focus_id(), true);
+                });
+            }
+            Action::OpenChatMenu(id) => {
+                // The row opens its menu when it is next drawn; the chat is
+                // brought into view so that it is.
+                self.scroll_chat_into_view = Some(id.clone());
+                self.open_chat_menu = Some(id);
+            }
+            Action::ChatMenuOpened => self.open_chat_menu = None,
             Action::FocusMessages => {
                 if self.current_chat().is_some() {
                     // The Calls tab keeps its history beside the chat, as
@@ -12159,6 +12286,54 @@ mod tests {
         assert!(app.message_item.is_none());
         assert!(app.download_heard.is_none());
         assert!(app.pending_follow.is_none());
+    }
+
+    /// The chat list's current chat is the new account's open chat, not a
+    /// chat of the account left behind.
+    #[test]
+    fn switching_accounts_puts_the_chat_list_on_the_open_chat() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _commands) = two_accounts(directory.path());
+        let ctx = egui::Context::default();
+        for (id, name) in [
+            ("15550008888@s.whatsapp.net", "Grace"),
+            ("15550009999@s.whatsapp.net", "Linus"),
+        ] {
+            app.accounts[1]
+                .chats
+                .push(Chat::new(id.into(), name.into()));
+        }
+        app.accounts[1].open_chat = Some("15550009999@s.whatsapp.net".into());
+        app.chat_cursor = Some("15550001111@s.whatsapp.net".into());
+        app.apply(Action::SwitchAccount(AccountId::parse("2").unwrap()), &ctx);
+        assert!(app.chat_cursor.is_none());
+        assert_eq!(
+            app.current_list_chat().as_deref(),
+            Some("15550009999@s.whatsapp.net")
+        );
+    }
+
+    /// A pending request for the chat list's focus ends with its account.
+    #[test]
+    fn switching_accounts_drops_a_chat_list_focus_request() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _commands) = two_accounts(directory.path());
+        let ctx = egui::Context::default();
+        app.focus_chats = true;
+        app.apply(Action::SwitchAccount(AccountId::parse("2").unwrap()), &ctx);
+        assert!(!app.focus_chats);
+    }
+
+    /// So does a chat menu asked for and not drawn yet: the next account
+    /// can hold a chat with the same id, whose row would open it.
+    #[test]
+    fn switching_accounts_drops_a_pending_chat_menu() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _commands) = two_accounts(directory.path());
+        let ctx = egui::Context::default();
+        app.open_chat_menu = Some("15550001111@s.whatsapp.net".into());
+        app.apply(Action::SwitchAccount(AccountId::parse("2").unwrap()), &ctx);
+        assert!(app.open_chat_menu.is_none());
     }
 
     #[test]

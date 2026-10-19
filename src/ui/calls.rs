@@ -189,31 +189,31 @@ pub fn list(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-/// Every call of the account, newest first, a row per run of alike calls.
-fn history(app: &mut App, ui: &mut egui::Ui) {
-    let palette = app.palette;
+/// The call history's focusable list: one Tab stop in the list pane, the
+/// chat list's (`Stop::ChatList`), whose arrows walk its rows.
+pub fn history_list_id() -> egui::Id {
+    egui::Id::new("call-history-list")
+}
+
+/// The new-call list's focusable list, in the same place.
+pub fn new_call_list_id() -> egui::Id {
+    egui::Id::new("new-call-list")
+}
+
+/// Where a row sits in its list, for its accessible node.
+#[derive(Clone, Copy)]
+struct Slot {
+    index: usize,
+    len: usize,
+}
+
+/// The rows the history lists, newest first, a row per run of alike calls,
+/// as the chip and the search pick them. None while it shows an empty state
+/// instead: no calls at all, or none missed under Missed.
+fn history_rows(app: &App) -> Option<Vec<Vec<Message>>> {
     let calls = visible_calls(app);
     if calls.is_empty() {
-        let (title, body) = if app.call_log_loaded {
-            (
-                gettext(app.locale, "No calls yet"),
-                gettext(
-                    app.locale,
-                    "Calls from your phone's call log and the ones you make here appear here.",
-                ),
-            )
-        } else {
-            (
-                gettext(app.locale, "Loading…"),
-                gettext(app.locale, "Reading this account's calls."),
-            )
-        };
-        Frame::new()
-            .inner_margin(Margin::symmetric(24, 0))
-            .show(ui, |ui| {
-                widgets::empty_state(ui, &palette, Icon::Phone, title.as_ref(), body.as_ref());
-            });
-        return;
+        return None;
     }
     // The chip picks rows after they fold, so a row reads as it does
     // under All.
@@ -222,25 +222,76 @@ fn history(app: &mut App, ui: &mut egui::Ui) {
         |row: &Vec<&Message>| !missed_only || Entry::of(row[0]).is_some_and(|entry| entry.missed());
     let folded = rows(&calls);
     if !folded.iter().any(shown) {
+        return None;
+    }
+    let needle = crate::util::search_key(app.calls_search.trim());
+    Some(
+        folded
+            .into_iter()
+            .filter(|row| shown(row) && matches(app, &row[0].chat, &needle))
+            .map(|row| row.into_iter().cloned().collect())
+            .collect(),
+    )
+}
+
+/// Where the history's current row is among `rows`: the cursor's row while
+/// it is listed, else the picked row while that is, else the first. Never a
+/// row the history no longer lists, after a chip, a search or a new call.
+fn history_cursor(app: &App, rows: &[Vec<Message>]) -> Option<usize> {
+    let find = |wanted: Option<&(String, String)>| {
+        wanted.and_then(|(chat, id)| {
+            rows.iter()
+                .position(|row| row[0].chat == *chat && row[0].id == *id)
+        })
+    };
+    find(app.call_cursor.as_ref())
+        .or_else(|| find(app.picked_call.as_ref().filter(|_| app.call_picked())))
+        .or_else(|| (!rows.is_empty()).then_some(0))
+}
+
+/// Every call of the account, newest first, a row per run of alike calls.
+fn history(app: &mut App, ui: &mut egui::Ui) {
+    let palette = app.palette;
+    let Some(rows) = history_rows(app) else {
+        let (icon, title, body) = if visible_calls(app).is_empty() {
+            let (title, body) = if app.call_log_loaded {
+                (
+                    gettext(app.locale, "No calls yet"),
+                    gettext(
+                        app.locale,
+                        "Calls from your phone's call log and the ones you make here appear here.",
+                    ),
+                )
+            } else {
+                (
+                    gettext(app.locale, "Loading…"),
+                    gettext(app.locale, "Reading this account's calls."),
+                )
+            };
+            (Icon::Phone, title, body)
+        } else {
+            (
+                Icon::PhoneMissed,
+                gettext(app.locale, "No missed calls"),
+                gettext(app.locale, "Choose All to see every call."),
+            )
+        };
         Frame::new()
             .inner_margin(Margin::symmetric(24, 0))
             .show(ui, |ui| {
-                widgets::empty_state(
-                    ui,
-                    &palette,
-                    Icon::PhoneMissed,
-                    gettext(app.locale, "No missed calls").as_ref(),
-                    gettext(app.locale, "Choose All to see every call.").as_ref(),
-                );
+                widgets::empty_state(ui, &palette, icon, title.as_ref(), body.as_ref());
             });
         return;
-    }
-    let needle = crate::util::search_key(app.calls_search.trim());
-    let rows: Vec<Vec<Message>> = folded
-        .into_iter()
-        .filter(|row| shown(row) && matches(app, &row[0].chat, &needle))
-        .map(|row| row.into_iter().cloned().collect())
-        .collect();
+    };
+    let list = history_list_id();
+    let label = if app.call_filter == CallFilter::Missed {
+        gettext(app.locale, "Missed calls")
+    } else {
+        gettext(app.locale, "Calls")
+    };
+    let pass = ListPass::begin(ui, list, label.as_ref(), rows.len());
+    let cursor = history_cursor(app, &rows);
+    let mut active = None;
     let mut actions = Vec::new();
     egui::ScrollArea::vertical()
         .id_salt("call-history")
@@ -258,12 +309,298 @@ fn history(app: &mut App, ui: &mut egui::Ui) {
                     );
                 });
             }
-            for row in &rows {
-                history_row(app, ui, row, &mut actions);
+            for (index, row) in rows.iter().enumerate() {
+                let slot = Slot {
+                    index,
+                    len: rows.len(),
+                };
+                let response = ui
+                    .scope_builder(
+                        egui::UiBuilder::new()
+                            .id_salt(("call", &row[0].chat, &row[0].id))
+                            .accessibility_parent(list),
+                        |ui| history_row(app, ui, row, slot, &mut actions),
+                    )
+                    .inner;
+                if Some(index) == cursor
+                    && let Some(response) = response
+                {
+                    active = Some(pass.current(ui, &response));
+                }
             }
             ui.add_space(12.0);
         });
+    pass.finish(ui.ctx(), active);
     app.actions.extend(actions);
+}
+
+/// A list of the Calls page in the pass that draws it: one focusable
+/// ListBox whose current row is its active descendant, as the chat list is.
+struct ListPass {
+    id: egui::Id,
+    focused: bool,
+    /// Whether the current row is to be scrolled into view: the list was
+    /// reached by keyboard, or its keys moved the row, in this pass.
+    reveal: bool,
+}
+
+impl ListPass {
+    /// Creates the list's container before its rows, so their nodes can hang
+    /// from its node. It senses no pointer input, so pointer users see the
+    /// list exactly as before.
+    fn begin(ui: &mut egui::Ui, id: egui::Id, label: &str, len: usize) -> Self {
+        let rect = ui.available_rect_before_wrap();
+        let response = super::list_nav::container(ui, id, rect, || label.to_owned(), len)
+            .tab_stop(Stop::ChatList);
+        // About a screen of rows, as PgUp and PgDn move.
+        let page = (rect.height() / theme::ROW_HEIGHT).floor().max(1.0) as usize;
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(id.with("page"), page));
+        let keyboard = ui.ctx().data(|data| {
+            data.get_temp::<bool>(theme::keyboard_focus_id())
+                .unwrap_or(false)
+        });
+        let moved = ui.ctx().data(|data| data.get_temp::<u64>(id.with("moved")))
+            == Some(ui.ctx().cumulative_frame_nr());
+        let focused = response.has_focus();
+        Self {
+            id,
+            focused,
+            reveal: focused && ((response.gained_focus() && keyboard) || moved),
+        }
+    }
+
+    /// The current row, `response`, drawn in this pass: it carries the
+    /// list's focus ring, drawn only after keyboard navigation, and its node
+    /// is the list's active descendant.
+    fn current(&self, ui: &egui::Ui, response: &egui::Response) -> egui::Id {
+        if self.focused {
+            theme::focus_outline(ui, self.id, response.rect, f32::from(theme::RADIUS_SMALL));
+            if self.reveal {
+                response.scroll_to_me_animation(None, egui::style::ScrollAnimation::none());
+            }
+        }
+        response.id
+    }
+
+    fn finish(self, ctx: &egui::Context, active: Option<egui::Id>) {
+        super::list_nav::set_active(ctx, self.id, active);
+    }
+}
+
+/// Notes that the keys moved the current row of `list` in this frame: its
+/// passes bring the row into view.
+fn note_moved(ctx: &egui::Context, list: egui::Id) {
+    let frame = ctx.cumulative_frame_nr();
+    ctx.data_mut(|data| data.insert_temp(list.with("moved"), frame));
+}
+
+/// About a screen of the list `list`'s rows, as PgUp and PgDn move.
+fn page_rows(ctx: &egui::Context, list: egui::Id) -> usize {
+    ctx.data(|data| data.get_temp::<usize>(list.with("page")))
+        .unwrap_or(8)
+}
+
+/// Where the keys ask for a row's menu: the row, and the frame they asked
+/// in, whose passes open it.
+fn menu_request_id(list: egui::Id) -> egui::Id {
+    list.with("menu-request")
+}
+
+/// Whether the keys asked for `row`'s menu in this frame.
+fn menu_requested(ctx: &egui::Context, list: egui::Id, row: egui::Id) -> bool {
+    let frame = ctx.cumulative_frame_nr();
+    ctx.data(|data| data.get_temp::<(egui::Id, u64)>(menu_request_id(list)))
+        .is_some_and(|(asked, at)| asked == row && at == frame)
+}
+
+/// Draws the keys' menu of the list row `response`, named `label`, when the
+/// keys open it, or while it is open. Only the keys open it: a click on the
+/// row does what it always did, and the pointer never sees this menu.
+/// `items` draws its entries, as wide as `labels`, and returns its first,
+/// where focus goes.
+fn row_key_menu(
+    ui: &egui::Ui,
+    palette: &theme::Palette,
+    response: &egui::Response,
+    list: egui::Id,
+    label: String,
+    labels: &[&str],
+    items: impl FnOnce(&mut egui::Ui) -> egui::Id,
+) {
+    let popup_id = egui::Popup::default_response_id(response);
+    let force = menu_requested(ui.ctx(), list, response.id);
+    if !force && !egui::Popup::is_id_open(ui.ctx(), popup_id) {
+        return;
+    }
+    let key_menu = super::list_nav::KeyMenu::begin(ui.ctx(), popup_id, force, false).menu(label);
+    let popup = egui::Popup::menu(response)
+        // The background takes clicks, not focus: a focusable one is a
+        // nameless Tab stop.
+        .sense(Sense::CLICK)
+        .open_memory(force.then_some(egui::SetOpenCommand::Bool(true)))
+        .width(widgets::menu_width(ui, labels, true).max(160.0))
+        .frame(widgets::menu_frame(palette))
+        .at_position(response.rect.left_top() + vec2(12.0, 8.0));
+    let mut first = None;
+    let menu = popup.show(|ui| {
+        let item = items(ui);
+        // A popup's first pass only measures it, drawing nothing that could
+        // take focus; only a pass that draws the menu names its item.
+        if !ui.is_sizing_pass() {
+            first = Some(item);
+        }
+    });
+    key_menu.finish(
+        ui.ctx(),
+        menu.as_ref().map(|menu| menu.response.layer_id),
+        false,
+        first,
+        list,
+    );
+}
+
+/// Takes this frame's keys for the focused call history or new-call list:
+/// the arrows, Home, End and the page keys move its current row; Enter opens
+/// a history row's chat as a click does, and a person's menu; Shift+F10
+/// opens the row's menu. Returns the actions they ask for.
+pub fn list_keys(app: &mut App, ctx: &egui::Context) -> Vec<Action> {
+    let history = ctx.memory(|memory| memory.has_focus(history_list_id()));
+    let people_list = ctx.memory(|memory| memory.has_focus(new_call_list_id()));
+    if !history && !people_list {
+        return Vec::new();
+    }
+    let list = if history {
+        history_list_id()
+    } else {
+        new_call_list_id()
+    };
+    if let Some(step) = super::list_nav::take_step(ctx, || page_rows(ctx, list)) {
+        if history {
+            step_history(app, ctx, step);
+        } else {
+            step_people(app, ctx, step);
+        }
+        note_moved(ctx, list);
+        return Vec::new();
+    }
+    let (enter, menu) = ctx.input_mut(|input| {
+        (
+            super::keys::take_plain(input, egui::Key::Enter),
+            super::keys::take_exact(input, egui::Modifiers::SHIFT, egui::Key::F10),
+        )
+    });
+    if !enter && !menu {
+        return Vec::new();
+    }
+    // Acting from the keyboard is keyboard navigation, as Tab is: the
+    // focus the keys move, into a menu or a chat, is shown.
+    ctx.data_mut(|data| data.insert_temp(theme::keyboard_focus_id(), true));
+    let frame = ctx.cumulative_frame_nr();
+    let mut actions = Vec::new();
+    if history {
+        let Some(rows) = history_rows(app) else {
+            return actions;
+        };
+        let Some(row) = history_cursor(app, &rows).map(|index| &rows[index][0]) else {
+            return actions;
+        };
+        if row.chat == crate::model::CALL_LINK_CHAT {
+            // A call joined through a link has no chat to open and nobody
+            // to call back: its row's click does nothing either.
+            app.announcer.say(
+                crate::announcer::Category::Status,
+                gettext(app.locale, "Nothing to open for a call link"),
+            );
+        } else if enter {
+            actions.push(Action::PickCall {
+                chat: row.chat.clone(),
+                message: row.id.clone(),
+            });
+        } else {
+            let id = row_id(&row.chat, &row.id);
+            ctx.data_mut(|data| data.insert_temp(menu_request_id(list), (id, frame)));
+        }
+    } else if let Some((frequent, id)) = people_cursor(app) {
+        // A row alone starts nothing, so a stray key never rings anyone:
+        // Enter opens the menu, as Shift+F10 does.
+        let row = person_row_id(frequent, &id);
+        ctx.data_mut(|data| data.insert_temp(menu_request_id(list), (row, frame)));
+    }
+    actions
+}
+
+/// Moves the history's current row by `step`. Up from the first row of a
+/// search goes back to the search field, where Down came from.
+fn step_history(app: &mut App, ctx: &egui::Context, step: super::list_nav::Step) {
+    let Some(rows) = history_rows(app) else {
+        return;
+    };
+    let current = history_cursor(app, &rows);
+    if step == super::list_nav::Step::Previous
+        && current == Some(0)
+        && !app.calls_search.trim().is_empty()
+    {
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new(HISTORY_SEARCH)));
+        return;
+    }
+    if let Some(index) = super::list_nav::step(current, rows.len(), step) {
+        app.call_cursor = Some((rows[index][0].chat.clone(), rows[index][0].id.clone()));
+    }
+}
+
+/// The search field above the call history.
+pub(crate) const HISTORY_SEARCH: &str = "calls-search";
+/// The search field above the new-call list.
+pub(crate) const NEW_CALL_SEARCH: &str = "new-call-search";
+
+/// Down in the Calls page's focused search field, taken before the field
+/// sees it: into the list under it, on its first row, as Down from the chat
+/// list's search enters its results. Moving there from the keyboard is
+/// keyboard navigation, as Tab is: the ring shows the first row. Nothing
+/// happens while the list is empty.
+pub fn search_keyboard(app: &mut App, ui: &egui::Ui) {
+    let field = egui::Id::new(if app.new_call {
+        NEW_CALL_SEARCH
+    } else {
+        HISTORY_SEARCH
+    });
+    if !ui.is_enabled()
+        || !ui.memory(|memory| memory.has_focus(field))
+        || !ui.input(|input| {
+            input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key {
+                        key: egui::Key::ArrowDown,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if modifiers.is_none()
+                )
+            })
+        })
+    {
+        return;
+    }
+    let list = if app.new_call {
+        let Some(first) = people(app).into_iter().next() else {
+            return;
+        };
+        app.new_call_cursor = Some(first);
+        new_call_list_id()
+    } else {
+        let Some(first) = history_rows(app).and_then(|rows| rows.into_iter().next()) else {
+            return;
+        };
+        app.call_cursor = Some((first[0].chat.clone(), first[0].id.clone()));
+        history_list_id()
+    };
+    ui.input_mut(|input| super::keys::take_plain(input, egui::Key::ArrowDown));
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(theme::keyboard_focus_id(), true));
+    note_moved(ui.ctx(), list);
+    ui.memory_mut(|memory| memory.request_focus(list));
 }
 
 /// Stable id of a call filter chip, for tests.
@@ -310,12 +647,16 @@ pub fn row_id(chat: &str, message: &str) -> egui::Id {
 /// One history row, as WhatsApp draws it: the person, a count when calls
 /// fold together, the way the newest went and what it was, when, and a
 /// button to call back the same way. A click opens the chat beside the
-/// list at that call.
-fn history_row(app: &mut App, ui: &mut egui::Ui, row: &[Message], actions: &mut Vec<Action>) {
+/// list at that call. The row is the history list's item at `slot`.
+fn history_row(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    row: &[Message],
+    slot: Slot,
+    actions: &mut Vec<Action>,
+) -> Option<egui::Response> {
     let message = &row[0];
-    let Some(entry) = Entry::of(message) else {
-        return;
-    };
+    let entry = Entry::of(message)?;
     let palette = app.palette;
     let locale = app.locale;
     // A call joined through a link has no chat to open or call back, and no
@@ -335,11 +676,11 @@ fn history_row(app: &mut App, ui: &mut egui::Ui, row: &[Message], actions: &mut 
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(width, theme::ROW_HEIGHT), Sense::hover());
     // The row's own target goes first, so the call-back button inside keeps
-    // its clicks.
+    // its clicks. Clicks only, never focus: the keyboard reaches rows through
+    // the history's one Tab stop and its arrows.
     let response = ui
-        .interact(rect, row_id(&message.chat, &message.id), Sense::click())
+        .interact(rect, row_id(&message.chat, &message.id), Sense::CLICK)
         .on_hover_cursor(egui::CursorIcon::PointingHand);
-    theme::reveal_focus(&response);
     let mut label = name.clone();
     if row.len() > 1 {
         label = format!("{label} ({})", row.len());
@@ -355,6 +696,15 @@ fn history_row(app: &mut App, ui: &mut egui::Ui, row: &[Message], actions: &mut 
             spoken.as_str(),
         )
     });
+    super::list_nav::mark_row(
+        ui.ctx(),
+        response.id,
+        spoken,
+        slot.index,
+        slot.len,
+        rect,
+        selected,
+    );
     if response.clicked() && !link {
         actions.push(Action::PickCall {
             chat: message.chat.clone(),
@@ -370,7 +720,9 @@ fn history_row(app: &mut App, ui: &mut egui::Ui, row: &[Message], actions: &mut 
         let mut child = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(button_rect)
-                .layout(Layout::centered_and_justified(egui::Direction::LeftToRight)),
+                .layout(Layout::centered_and_justified(egui::Direction::LeftToRight))
+                // Inside its row's item, not beside the list's items.
+                .accessibility_parent(response.id),
         );
         let (icon, tooltip) = if entry.video {
             (Icon::Video, gettext(locale, "Video call"))
@@ -394,8 +746,11 @@ fn history_row(app: &mut App, ui: &mut egui::Ui, row: &[Message], actions: &mut 
             });
         }
     }
+    if !link {
+        history_menu(app, ui, &response, &message.chat, entry.group, actions);
+    }
     if !ui.is_rect_visible(rect) {
-        return;
+        return Some(response);
     }
     if selected {
         widgets::row_highlight(ui, &palette, rect, palette.surface_active);
@@ -463,6 +818,62 @@ fn history_row(app: &mut App, ui: &mut egui::Ui, row: &[Message], actions: &mut 
         1,
     );
     detail.paint(ui, pos2(left + 21.0, rect.top() + 38.0), palette.secondary);
+    Some(response)
+}
+
+/// A history row's menu, which only the keys open (Shift+F10): calling the
+/// row's person back by voice or video, as its button calls back the way the
+/// call went. A group call has no way back from here, and its menu's one
+/// row says why.
+fn history_menu(
+    app: &App,
+    ui: &egui::Ui,
+    response: &egui::Response,
+    chat: &str,
+    group: bool,
+    actions: &mut Vec<Action>,
+) {
+    let palette = app.palette;
+    let voice = gettext(app.locale, "Voice call");
+    let video = gettext(app.locale, "Video call");
+    let phone = gettext(app.locale, "Group calls happen on the phone");
+    let labels: Vec<&str> = if group {
+        vec![phone.as_ref()]
+    } else {
+        vec![voice.as_ref(), video.as_ref()]
+    };
+    row_key_menu(
+        ui,
+        &palette,
+        response,
+        history_list_id(),
+        app.display_name(chat),
+        &labels,
+        |ui| {
+            if group {
+                // The menu's one row takes focus, unavailable, so the reader
+                // hears why there is nothing to choose.
+                return widgets::menu_item_focusable(
+                    ui,
+                    &palette,
+                    Some(Icon::Phone),
+                    &phone,
+                    &phone,
+                    false,
+                    true,
+                )
+                .id;
+            }
+            let first = widgets::menu_item_response(ui, &palette, Some(Icon::Phone), &voice, true);
+            if first.clicked() {
+                actions.push(Action::StartCall(chat.to_owned()));
+            }
+            if widgets::menu_item(ui, &palette, Some(Icon::Video), &video) {
+                actions.push(Action::StartVideoCall(chat.to_owned()));
+            }
+            first.id
+        },
+    );
 }
 
 /// What a call was and how it went, on one line: "Video call · 12 min 34 s".
@@ -505,13 +916,11 @@ pub fn frequent(calls: &[Message], me: Option<&str>) -> Vec<String> {
         .collect()
 }
 
-/// WhatsApp's new-call list: the people called most often, then every
-/// contact, each with a voice and a video button. A row alone starts
-/// nothing, so a stray click never rings anyone.
-fn new_call_list(app: &mut App, ui: &mut egui::Ui) {
-    let palette = app.palette;
-    let needle = crate::util::search_key(app.new_call_search.trim());
-    let contacts = super::dialogs::contact_choices(app, &needle);
+/// The people the new-call list offers while its search holds `needle`, a
+/// `search_key`: the frequently contacted with no search, then every
+/// contact the search finds.
+fn people_lists(app: &App, needle: &str) -> (Vec<String>, Vec<crate::model::Contact>) {
+    let contacts = super::dialogs::contact_choices(app, needle);
     let frequent: Vec<String> = if needle.is_empty() {
         let calls = visible_calls(app);
         frequent(&calls, app.me.as_deref())
@@ -521,18 +930,109 @@ fn new_call_list(app: &mut App, ui: &mut egui::Ui) {
     } else {
         Vec::new()
     };
+    (frequent, contacts)
+}
+
+/// The new-call list's rows in order, as its keys walk them: whether each
+/// is among the frequently contacted, and the person.
+fn people(app: &App) -> Vec<(bool, String)> {
+    let needle = crate::util::search_key(app.new_call_search.trim());
+    let (frequent, contacts) = people_lists(app, &needle);
+    people_rows(&frequent, &contacts)
+}
+
+/// The new-call list's rows built from `people_lists`' two lists: the
+/// frequently contacted first, then the contacts.
+fn people_rows(frequent: &[String], contacts: &[crate::model::Contact]) -> Vec<(bool, String)> {
+    frequent
+        .iter()
+        .map(|chat| (true, chat.clone()))
+        .chain(contacts.iter().map(|contact| (false, contact.id.clone())))
+        .collect()
+}
+
+/// Where the new-call list's current row is among `rows`: the cursor's
+/// while it is listed, else the first.
+fn people_index(app: &App, rows: &[(bool, String)]) -> Option<usize> {
+    app.new_call_cursor
+        .as_ref()
+        .and_then(|cursor| rows.iter().position(|row| row == cursor))
+        .or_else(|| (!rows.is_empty()).then_some(0))
+}
+
+/// The new-call list's current row, as the list resolves it.
+fn people_cursor(app: &App) -> Option<(bool, String)> {
+    let rows = people(app);
+    people_index(app, &rows).map(|index| rows[index].clone())
+}
+
+/// Moves the new-call list's current row by `step`. Up from the first row
+/// goes back to the search field above it.
+fn step_people(app: &mut App, ctx: &egui::Context, step: super::list_nav::Step) {
+    let rows = people(app);
+    let current = people_index(app, &rows);
+    if step == super::list_nav::Step::Previous && current == Some(0) {
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new(NEW_CALL_SEARCH)));
+        return;
+    }
+    if let Some(index) = super::list_nav::step(current, rows.len(), step) {
+        app.new_call_cursor = Some(rows[index].clone());
+    }
+}
+
+/// Stable id of a row of the new-call list: among the frequently contacted
+/// or among every contact, and the person.
+pub fn person_row_id(frequent: bool, id: &str) -> egui::Id {
+    egui::Id::new(("new-call-row", frequent, id))
+}
+
+/// WhatsApp's new-call list: the people called most often, then every
+/// contact, each with a voice and a video button. A row alone starts
+/// nothing, so a stray click never rings anyone.
+fn new_call_list(app: &mut App, ui: &mut egui::Ui) {
+    let palette = app.palette;
+    let needle = crate::util::search_key(app.new_call_search.trim());
+    let (frequent, contacts) = people_lists(app, &needle);
+    let rows = people_rows(&frequent, &contacts);
+    let list = new_call_list_id();
+    let label = gettext(app.locale, "New call");
+    let pass = ListPass::begin(ui, list, label.as_ref(), rows.len());
+    let cursor = people_index(app, &rows).map(|index| rows[index].clone());
+    let mut active = None;
     let mut actions = Vec::new();
+    let len = rows.len();
     egui::ScrollArea::vertical()
         .id_salt("new-call-contacts")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
+            let mut index = 0;
+            let mut row = |app: &mut App, ui: &mut egui::Ui, frequent: bool, id: &str| {
+                let slot = Slot { index, len };
+                index += 1;
+                let response = ui
+                    .scope_builder(
+                        egui::UiBuilder::new()
+                            .id_salt(if frequent {
+                                egui::Id::new(("frequent", id))
+                            } else {
+                                egui::Id::new(id)
+                            })
+                            .accessibility_parent(list),
+                        |ui| person(app, ui, id, frequent, slot, &mut actions),
+                    )
+                    .inner;
+                if cursor
+                    .as_ref()
+                    .is_some_and(|(at, person)| *at == frequent && person == id)
+                {
+                    active = Some(pass.current(ui, &response));
+                }
+            };
             if !frequent.is_empty() {
                 section(ui, &palette, &gettext(app.locale, "Frequently contacted"));
                 for chat in &frequent {
-                    ui.push_id(("frequent", chat), |ui| {
-                        person(app, ui, chat, &mut actions);
-                    });
+                    row(app, ui, true, chat);
                 }
             }
             if contacts.is_empty() {
@@ -549,12 +1049,11 @@ fn new_call_list(app: &mut App, ui: &mut egui::Ui) {
                 section(ui, &palette, &gettext(app.locale, "All contacts"));
             }
             for contact in &contacts {
-                ui.push_id(&contact.id, |ui| {
-                    person(app, ui, &contact.id, &mut actions);
-                });
+                row(app, ui, false, &contact.id);
             }
             ui.add_space(12.0);
         });
+    pass.finish(ui.ctx(), active);
     if !actions.is_empty() {
         actions.push(Action::ShowNewCall(false));
     }
@@ -575,15 +1074,38 @@ fn section(ui: &mut egui::Ui, palette: &theme::Palette, label: &str) {
         });
 }
 
-/// One person on the new-call list, with a voice and a video button.
-fn person(app: &mut App, ui: &mut egui::Ui, id: &str, actions: &mut Vec<Action>) {
+/// One person on the new-call list, with a voice and a video button: the
+/// list's item at `slot`, among the frequently contacted or not.
+fn person(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    id: &str,
+    frequent: bool,
+    slot: Slot,
+    actions: &mut Vec<Action>,
+) -> egui::Response {
     let palette = app.palette;
     let locale = app.locale;
     let name = app.display_name(id);
     let picture = app.avatar(id);
-    let (rect, response) = ui.allocate_exact_size(
+    let (rect, _) = ui.allocate_exact_size(
         vec2(ui.available_width(), theme::ROW_HEIGHT),
         Sense::hover(),
+    );
+    let response = ui.interact(rect, person_row_id(frequent, id), Sense::hover());
+    let phone = crate::model::phone_of(id).map(crate::util::phone);
+    let spoken = match &phone {
+        Some(phone) => format!("{name}, {phone}"),
+        None => name.clone(),
+    };
+    super::list_nav::mark_row(
+        ui.ctx(),
+        response.id,
+        spoken,
+        slot.index,
+        slot.len,
+        rect,
+        false,
     );
     let buttons = Rect::from_min_max(
         pos2(rect.right() - 92.0, rect.top()),
@@ -600,15 +1122,17 @@ fn person(app: &mut App, ui: &mut egui::Ui, id: &str, actions: &mut Vec<Action>)
         let width = (buttons.left() - 8.0 - left).max(0.0);
         let name_line = widgets::line(ui, &name, theme::medium(14.5), palette.text, width, 1);
         name_line.paint(ui, pos2(left, rect.top() + 14.0), palette.text);
-        if let Some(phone) = crate::model::phone_of(id).map(crate::util::phone) {
-            let phone_line = widgets::line(ui, &phone, theme::regular(13.0), palette.dim, width, 1);
+        if let Some(phone) = &phone {
+            let phone_line = widgets::line(ui, phone, theme::regular(13.0), palette.dim, width, 1);
             phone_line.paint(ui, pos2(left, rect.top() + 38.0), palette.dim);
         }
     }
     let mut child = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(buttons)
-            .layout(Layout::right_to_left(Align::Center)),
+            .layout(Layout::right_to_left(Align::Center))
+            // Inside its row's item, not beside the list's items.
+            .accessibility_parent(response.id),
     );
     let video = gettext(locale, "Video call {name}").replace("{name}", &name);
     if theme::icon_button(
@@ -637,6 +1161,28 @@ fn person(app: &mut App, ui: &mut egui::Ui, id: &str, actions: &mut Vec<Action>)
     {
         actions.push(Action::StartCall(id.to_owned()));
     }
+    // The keys' menu: what the two buttons do.
+    let voice = gettext(locale, "Voice call");
+    let video = gettext(locale, "Video call");
+    row_key_menu(
+        ui,
+        &palette,
+        &response,
+        new_call_list_id(),
+        name,
+        &[voice.as_ref(), video.as_ref()],
+        |ui| {
+            let first = widgets::menu_item_response(ui, &palette, Some(Icon::Phone), &voice, true);
+            if first.clicked() {
+                actions.push(Action::StartCall(id.to_owned()));
+            }
+            if widgets::menu_item(ui, &palette, Some(Icon::Video), &video) {
+                actions.push(Action::StartVideoCall(id.to_owned()));
+            }
+            first.id
+        },
+    );
+    response
 }
 
 /// The Calls tab's main pane when no chat is open beside the history:

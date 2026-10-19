@@ -32,6 +32,14 @@ struct Frame {
     /// What a reader says of the effective node: a change while it keeps
     /// focus is read out again.
     spoken: String,
+    /// The effective node's ancestors as `describe` names them, nearest
+    /// first, such as the menu an item is in.
+    ancestor_names: Vec<String>,
+    /// What this frame's update says of the node the reader was on in the
+    /// frame before, empty when it is gone. A screen reader takes a change
+    /// to it in the update that moves focus away before the focus change,
+    /// and reads that node out again first.
+    left: String,
     /// How many nodes the frame's update carries.
     nodes: usize,
     /// egui's focused widget after the frame.
@@ -173,13 +181,21 @@ impl Trace {
             .accesskit_update
             .expect("accessibility tree");
         let effective = effective(&tree);
+        let ancestors = ancestors(&tree, effective);
+        let left = self
+            .frames
+            .last()
+            .map(|before| spoken(&tree, before.effective))
+            .unwrap_or_default();
         self.frames.push(Frame {
+            left,
             nodes: tree.nodes.len(),
             step: step.to_owned(),
             action: self.action,
             focus: tree.focus,
             effective,
-            ancestors: ancestors(&tree, effective),
+            ancestor_names: ancestors.iter().map(|id| describe(&tree, *id)).collect(),
+            ancestors,
             name: describe(&tree, effective),
             spoken: spoken(&tree, effective),
             egui: self.ctx.memory(|memory| memory.focused()),
@@ -390,6 +406,7 @@ fn long_chat(app: &mut App, count: usize) {
 /// as Tab would.
 fn focus_stop(trace: &mut Trace, stop: Stop) {
     match stop {
+        Stop::ChatList => trace.press("Alt+1", egui::Key::Num1, alt()),
         Stop::Messages => trace.press("Alt+2", egui::Key::Num2, alt()),
         Stop::Composer => {}
         _ => {
@@ -423,6 +440,45 @@ fn arrowing_the_message_list_never_reports_the_window() {
         trace.press("Down", egui::Key::ArrowDown, egui::Modifiers::NONE);
     }
     trace.assert_clean(from, "arrows in the message list");
+}
+
+/// In the message menu, the reactions are one stop of Up and Down: they
+/// land on an emoji, Left and Right move between the emoji, and Up and Down
+/// leave the row, which they come back to on the emoji left last.
+#[test]
+fn the_reactions_are_one_stop_of_the_message_menu() {
+    let mut trace = Trace::new(app());
+    focus_stop(&mut trace, Stop::Messages);
+    let from = trace.mark();
+    let heard = |trace: &mut Trace, step: &str, key: egui::Key| {
+        trace.press(step, key, egui::Modifiers::NONE);
+        trace.last().name.clone()
+    };
+    trace.press("Shift+F10", egui::Key::F10, egui::Modifiers::SHIFT);
+    let reply = trace.last().name.clone();
+    assert_eq!(reply, "MenuItem \"Reply\"", "{}", trace.dump(from));
+    let first = heard(&mut trace, "Up", egui::Key::ArrowUp);
+    assert!(first.starts_with("Button"), "Up lands on an emoji: {first}");
+    let second = heard(&mut trace, "Right", egui::Key::ArrowRight);
+    assert!(second.starts_with("Button") && second != first, "{second}");
+    let third = heard(&mut trace, "Right", egui::Key::ArrowRight);
+    assert!(third.starts_with("Button") && third != second, "{third}");
+    assert_eq!(heard(&mut trace, "Left", egui::Key::ArrowLeft), second);
+    // Up from the row, the first stop, wraps to the last item, not to the
+    // emoji before.
+    let last = heard(&mut trace, "Up", egui::Key::ArrowUp);
+    assert!(
+        last.starts_with("MenuItem") && last != reply,
+        "Up leaves the row: {last}\n{}",
+        trace.dump(from)
+    );
+    assert_eq!(
+        heard(&mut trace, "Down", egui::Key::ArrowDown),
+        second,
+        "back on the emoji left last"
+    );
+    assert_eq!(heard(&mut trace, "Down", egui::Key::ArrowDown), reply);
+    trace.assert_clean(from, "the reactions in the message menu");
 }
 
 /// Home and End reach messages far from the view, which are not laid out
@@ -502,7 +558,7 @@ fn escape_with_the_pointer_lets_go_as_before() {
 }
 
 /// Where focus can be with no chat open: Escape and Alt+2 are tried there.
-const NO_CHAT_STOPS: &[Stop] = &[Stop::Search];
+const NO_CHAT_STOPS: &[Stop] = &[Stop::Search, Stop::ChatList];
 
 /// Escape with nothing to close is not heard at all.
 #[test]
@@ -562,7 +618,7 @@ fn a_deleted_current_message_leaves_the_cursor_on_the_next() {
 
 /// Where focus can be when the window goes away, one stop or more in each
 /// section.
-const REFOCUS_STOPS: &[Stop] = &[Stop::Search, Stop::Messages, Stop::Composer];
+const REFOCUS_STOPS: &[Stop] = &[Stop::Search, Stop::Messages, Stop::Composer, Stop::ChatList];
 
 /// Leaving the window and coming back puts the reader where they were, in
 /// any section.
@@ -1485,4 +1541,327 @@ fn a_clip_opened_in_the_viewer_takes_focus_on_its_frame() {
         "Space played or paused, the viewer stays"
     );
     trace.app.video.stop();
+}
+
+/// The message menu and the chat menu, opened from the keys, are heard in
+/// the frame after the key: the menu's hidden first pass is redone in that
+/// frame to show it, rather than shown a frame later.
+#[test]
+fn menus_opened_from_the_keys_are_heard_in_the_next_frame() {
+    for (stop, step, key, modifiers) in [
+        (
+            Stop::Messages,
+            "Shift+F10",
+            egui::Key::F10,
+            egui::Modifiers::SHIFT,
+        ),
+        (
+            Stop::ChatList,
+            "Shift+F10",
+            egui::Key::F10,
+            egui::Modifiers::SHIFT,
+        ),
+    ] {
+        let mut trace = Trace::new(app());
+        focus_stop(&mut trace, stop);
+        let press = tap(&mut trace, step, key, modifiers);
+        let scenario = format!("{step} on {stop:?}");
+        trace.assert_clean(press, &scenario);
+        // The item the menu settles on already has focus, on the menu's own
+        // layer, in the frame after the key.
+        let next = &trace.frames[press + 1];
+        assert!(
+            next.name.starts_with("MenuItem")
+                && next.egui.is_some()
+                && next.egui == trace.last().egui
+                && next.layer != trace.frames[press].layer,
+            "{scenario}: the menu is heard in the next frame\n{}",
+            trace.dump(press)
+        );
+    }
+}
+
+/// Escape closes the open chat and puts the reader on its row in the chat
+/// list, from the message field and from the message list alike.
+#[test]
+fn escape_in_an_open_chat_lands_on_its_row() {
+    for stop in [Stop::Composer, Stop::Messages] {
+        let mut trace = Trace::new(app());
+        let chat = trace.app.open_chat.clone().expect("the demo opens a chat");
+        focus_stop(&mut trace, stop);
+        let from = trace.mark();
+        trace.press("Escape", egui::Key::Escape, egui::Modifiers::NONE);
+        let scenario = format!("Escape in an open chat from {stop:?}");
+        trace.assert_clean(from, &scenario);
+        assert_eq!(trace.app.open_chat, None, "{scenario}");
+        assert_eq!(
+            trace.last().egui,
+            Some(crate::ui::chats::chats_list_id()),
+            "{scenario}\n{}",
+            trace.dump(from)
+        );
+        let row = trace
+            .ctx
+            .data(|data| {
+                data.get_temp::<egui::Id>(crate::ui::chats::chat_row_id(&chat).with("widget"))
+            })
+            .expect("the closed chat's row is drawn");
+        assert_eq!(
+            trace.last().effective,
+            row.accesskit_id(),
+            "{scenario}: the reader is on the closed chat's row\n{}",
+            trace.dump(from)
+        );
+    }
+}
+
+/// Alt+1 in the message field moves to the chat list and types nothing.
+#[test]
+fn alt_1_in_the_message_field_types_nothing() {
+    let mut trace = Trace::new(app());
+    focus_stop(&mut trace, Stop::Composer);
+    let draft = trace.app.composer.clone();
+    trace.press("Alt+1", egui::Key::Num1, alt());
+    assert_eq!(trace.last().egui, Some(crate::ui::chats::chats_list_id()));
+    assert_eq!(trace.app.composer, draft, "nothing typed");
+}
+
+/// With the pointer, no keyboard navigation and no screen reader, Escape
+/// closes the chat as it always did: no ring on its row in the chat list,
+/// no scroll to it, and focus let go.
+#[test]
+fn escape_with_the_pointer_closes_the_chat_as_before() {
+    let mut app = app();
+    let ctx = egui::Context::default();
+    app.attach(&ctx);
+    render(&mut app, &ctx);
+    assert!(app.open_chat.is_some());
+    press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+    assert_eq!(app.open_chat, None);
+    assert!(app.scroll_chat_into_view.is_none());
+    assert_eq!(ctx.memory(|memory| memory.focused()), None);
+    assert!(!ctx.data(|data| {
+        data.get_temp::<bool>(crate::theme::keyboard_focus_id())
+            .unwrap_or(false)
+    }));
+}
+
+/// Enter on a chat row opens the chat and moves to its message field. The
+/// row says "open" only once focus has left it: never while the reader is
+/// on it, nor in the update that moves focus away, which a screen reader
+/// reads before the focus change, so the row is not read out again. Back on
+/// the row with Alt+1, it says "open".
+#[test]
+fn opening_a_chat_from_its_row_never_reads_the_row_again() {
+    let mut trace = Trace::new(app());
+    focus_stop(&mut trace, Stop::ChatList);
+    trace.press("Down", egui::Key::ArrowDown, egui::Modifiers::NONE);
+    let row = trace.last().clone();
+    assert!(!row.spoken.contains(", open"), "{}", row.spoken);
+    let from = trace.mark();
+    trace.press("Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    assert_eq!(trace.last().egui, Some(egui::Id::new("composer-text")));
+    trace.assert_clean(from, "a chat opened from its row");
+    for (index, frame) in trace.frames.iter().enumerate().skip(from) {
+        let before = &trace.frames[index - 1];
+        let renamed = (frame.effective == row.effective && frame.spoken != row.spoken)
+            || (before.effective == row.effective
+                && frame.effective != row.effective
+                && frame.left != row.spoken);
+        assert!(
+            !renamed,
+            "frame #{index}: the row changed while focus was on it or leaving it: {:?}\n{}",
+            frame.left,
+            trace.dump(from - 1)
+        );
+    }
+    trace.press("Alt+1", egui::Key::Num1, alt());
+    assert_eq!(trace.last().effective, row.effective, "back on the row");
+    assert!(
+        trace.last().spoken.contains(", open"),
+        "{}",
+        trace.last().spoken
+    );
+}
+
+/// The chat list scrolls under the arrows: the reader hears each chat once.
+#[test]
+fn arrowing_the_chat_list_never_reports_the_window() {
+    let mut trace = Trace::new(app());
+    focus_stop(&mut trace, Stop::ChatList);
+    let from = trace.mark();
+    for _ in 0..super::sample_ids().len() {
+        trace.press("Down", egui::Key::ArrowDown, egui::Modifiers::NONE);
+    }
+    for _ in 0..4 {
+        trace.press("Up", egui::Key::ArrowUp, egui::Modifiers::NONE);
+    }
+    trace.press("Home", egui::Key::Home, egui::Modifiers::NONE);
+    trace.press("End", egui::Key::End, egui::Modifiers::NONE);
+    trace.assert_clean(from, "arrows in the chat list");
+}
+
+/// The chat menu's Delete chat asks in a dialog reached in one focus
+/// change, and Escape puts the reader back on the chat's row.
+#[test]
+fn the_chat_menus_dialog_gives_focus_back_to_the_row() {
+    let mut trace = Trace::new(app());
+    focus_stop(&mut trace, Stop::ChatList);
+    let row = trace.last().clone();
+    trace.press("Shift+F10", egui::Key::F10, egui::Modifiers::SHIFT);
+    walk_to(&mut trace, "Delete chat");
+    let press = tap(&mut trace, "Enter", egui::Key::Enter, egui::Modifiers::NONE);
+    assert!(trace.app.dialog.is_some());
+    trace.assert_clean(press, "Delete chat");
+    assert_eq!(
+        trace.frames[press + 1].layer,
+        Some(crate::ui::dialogs::modal_id())
+    );
+    let from = tap(
+        &mut trace,
+        "Escape",
+        egui::Key::Escape,
+        egui::Modifiers::NONE,
+    );
+    trace.assert_clean(from, "Delete chat, closed");
+    assert_eq!(trace.last().egui, Some(crate::ui::chats::chats_list_id()));
+    assert_eq!(trace.last().effective, row.effective, "back on the chat");
+}
+
+/// Where a menu item is in its menu, as a screen reader hears it: its
+/// position (from 0) and the menu's size.
+fn menu_position(frame: &Frame) -> (Option<usize>, Option<usize>) {
+    let number = |part: Option<&str>| -> Option<usize> {
+        part?.strip_prefix("Some(")?.strip_suffix(')')?.parse().ok()
+    };
+    let mut parts = frame.spoken.rsplitn(3, '|');
+    let size = number(parts.next());
+    let position = number(parts.next());
+    (position, size)
+}
+
+/// A menu the keys opened from `opener` in the frame `press` behaves as
+/// every keyboard menu does: it is heard in the frame after the key, as a
+/// menu named `menu`, on its first item, whose role and name start with
+/// `first`, said to be the first of its items; Up and Down walk its items
+/// and wrap, Home and End go to its ends, Tab and Shift+Tab stay among its
+/// items, and Escape closes it and puts the reader back on `opener`, each
+/// key heard once.
+fn walks_like_a_menu(
+    trace: &mut Trace,
+    opener: &Frame,
+    press: usize,
+    menu: &str,
+    first: &str,
+    scenario: &str,
+) {
+    trace.assert_clean(press, scenario);
+    let opened = trace.frames[press + 1].clone();
+    assert!(
+        opened.name.starts_with(first),
+        "{scenario}: on the first item, {first}, in the frame after the key\n{}",
+        trace.dump(press)
+    );
+    assert!(
+        opened
+            .ancestor_names
+            .iter()
+            .any(|name| *name == format!("Menu {menu:?}")),
+        "{scenario}: in a menu named {menu}: {:?}",
+        opened.ancestor_names
+    );
+    let (position, size) = menu_position(&opened);
+    assert_eq!(position, Some(0), "{scenario}: {}", opened.spoken);
+    let size = size.unwrap_or_else(|| panic!("{scenario}: no size: {}", opened.spoken));
+    let at = |trace: &Trace| menu_position(trace.last()).0;
+    let from = trace.mark();
+    trace.press("Up", egui::Key::ArrowUp, egui::Modifiers::NONE);
+    assert_eq!(
+        at(trace),
+        Some(size - 1),
+        "{scenario}: Up wraps to the last"
+    );
+    let last = trace.last().effective;
+    trace.press("Down", egui::Key::ArrowDown, egui::Modifiers::NONE);
+    assert_eq!(
+        trace.last().effective,
+        opened.effective,
+        "{scenario}: Down wraps to the first"
+    );
+    trace.press("End", egui::Key::End, egui::Modifiers::NONE);
+    assert_eq!(trace.last().effective, last, "{scenario}: End");
+    trace.press("Home", egui::Key::Home, egui::Modifiers::NONE);
+    assert_eq!(trace.last().effective, opened.effective, "{scenario}: Home");
+    trace.press("Down", egui::Key::ArrowDown, egui::Modifiers::NONE);
+    assert_eq!(at(trace), Some(1 % size), "{scenario}: Down");
+    trace.press("Tab", egui::Key::Tab, egui::Modifiers::NONE);
+    assert_eq!(
+        at(trace),
+        Some(2 % size),
+        "{scenario}: Tab stays in the menu"
+    );
+    trace.press("Shift+Tab", egui::Key::Tab, egui::Modifiers::SHIFT);
+    assert_eq!(at(trace), Some(1 % size), "{scenario}: Shift+Tab");
+    trace.assert_clean(from, scenario);
+    let escape = tap(trace, "Escape", egui::Key::Escape, egui::Modifiers::NONE);
+    trace.assert_clean(escape, &format!("{scenario}, Escape"));
+    assert!(!egui::Popup::is_any_open(&trace.ctx), "{scenario}: closed");
+    assert_eq!(
+        trace.last().egui,
+        opener.egui,
+        "{scenario}: Escape puts the reader back on the opener\n{}",
+        trace.dump(escape)
+    );
+}
+
+/// The chat menu, opened from the chat list's Shift+F10, walks as every
+/// keyboard menu does, Home and End included.
+#[test]
+fn the_chat_menu_walks_like_the_other_menus() {
+    let mut trace = Trace::new(app());
+    focus_stop(&mut trace, Stop::ChatList);
+    let row = trace.last().clone();
+    let press = tap(
+        &mut trace,
+        "Shift+F10",
+        egui::Key::F10,
+        egui::Modifiers::SHIFT,
+    );
+    walks_like_a_menu(
+        &mut trace,
+        &row,
+        press,
+        "Chat",
+        "MenuItem \"Mark as",
+        "the chat menu",
+    );
+    assert_eq!(trace.last().effective, row.effective, "back on the chat");
+}
+
+/// Home and End reach the ends of the message menu: its first stop, the
+/// reactions, on an emoji, and its last item.
+#[test]
+fn home_and_end_reach_the_ends_of_the_message_menu() {
+    let mut trace = Trace::new(app());
+    focus_stop(&mut trace, Stop::Messages);
+    let row = trace.last().clone();
+    trace.press("Shift+F10", egui::Key::F10, egui::Modifiers::SHIFT);
+    let from = trace.mark();
+    trace.press("End", egui::Key::End, egui::Modifiers::NONE);
+    let (position, size) = menu_position(trace.last());
+    assert!(
+        trace.last().name.starts_with("MenuItem")
+            && position.is_some()
+            && position == size.map(|size| size - 1),
+        "End: {}",
+        trace.last().spoken
+    );
+    trace.press("Home", egui::Key::Home, egui::Modifiers::NONE);
+    assert!(
+        trace.last().name.starts_with("Button"),
+        "Home lands on an emoji: {}",
+        trace.last().name
+    );
+    trace.assert_clean(from, "Home and End in the message menu");
+    escape_back_to_the_list(&mut trace, &row, "the message menu");
 }

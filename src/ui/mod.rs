@@ -41,6 +41,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     info::release_thumbnails(app, ctx);
     // The message list sets it again when it is drawn with focus.
     app.messages_focused = false;
+    // So does the chat list.
+    app.chats_focused = false;
     // Locked, nothing else is drawn: no chat list, no messages, no dialogs,
     // no toasts, and no shortcut reaches them.
     if app.app_lock.is_locked() {
@@ -156,13 +158,8 @@ fn main_view(app: &mut App, ui: &mut egui::Ui, list_only: bool) {
     // too little room for it and the conversation, the list and the rail
     // step aside while the panel is open. The Calls tab's history needs the
     // full list pane: only the chats collapse into the rail's avatars.
-    let full_list = app.sidebar_mode() == SidebarDisplayMode::Expanded || app.page == Page::Calls;
-    let mut list_width = chats::compact_width(ui.ctx());
-    if full_list {
-        list_width += app.settings.sidebar_width;
-    }
-    let crowded = app.info_visible()
-        && ui.available_width() - list_width < pane::INFO_MIN + pane::INFO_CONVERSATION_MIN;
+    let full_list = full_list(app);
+    let crowded = info_crowds_list(app, ui.ctx(), ui.available_width());
     if !narrow(ui.ctx()) && !crowded {
         rail::show(app, ui, !full_list);
         if full_list {
@@ -196,6 +193,23 @@ fn main_view(app: &mut App, ui: &mut egui::Ui, list_only: bool) {
     if let Some(region) = info_overlay {
         info::show_overlay(app, ui.ctx(), region);
     }
+}
+
+/// Whether the list pane beside the rail shows in full: the expanded chat
+/// list, or the Calls tab's history, which never collapses.
+fn full_list(app: &App) -> bool {
+    app.sidebar_mode() == SidebarDisplayMode::Expanded || app.page == Page::Calls
+}
+
+/// Whether the open info panel leaves a window `width` points wide too
+/// little room for the rail and the list beside it and the conversation, so
+/// that they step aside while the panel is open.
+pub(crate) fn info_crowds_list(app: &App, ctx: &egui::Context, width: f32) -> bool {
+    let mut list_width = chats::compact_width(ctx);
+    if full_list(app) {
+        list_width += app.settings.sidebar_width;
+    }
+    app.info_visible() && width - list_width < pane::INFO_MIN + pane::INFO_CONVERSATION_MIN
 }
 
 /// What a narrow window shows: the chat list, or what was opened from it.

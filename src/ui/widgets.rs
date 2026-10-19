@@ -556,6 +556,8 @@ pub fn submenu<R>(
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
     });
+    // A menu opened from the keyboard opens this row's submenu with Right too.
+    super::list_nav::mark_submenu_row(ui.ctx(), response.id);
     let open = egui::Popup::is_id_open(
         ui.ctx(),
         egui::containers::menu::SubMenu::id_from_widget_id(response.id),

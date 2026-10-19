@@ -62,10 +62,11 @@ fn body(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-/// Walks matching chats while the global search field keeps keyboard focus.
-/// Enter leaves search and opens the reached chat ready for typing. A
-/// disabled list (beneath a narrow window's sliding chat) leaves the keys
-/// to the view coming in.
+/// Down moves from the global search field into the search results, on the
+/// first result, where the arrows walk them and Up from the first comes
+/// back. Enter in the field leaves search and opens the reached chat, or
+/// the first, ready for typing. A disabled list (beneath a narrow window's
+/// sliding chat) leaves the keys to the view coming in.
 fn search_keyboard(app: &mut App, ui: &egui::Ui) {
     let field = egui::Id::new("chat-search");
     if !ui.is_enabled()
@@ -95,13 +96,23 @@ fn search_keyboard(app: &mut App, ui: &egui::Ui) {
         app.search_selected = None;
         return;
     }
+    if down {
+        // Into the results list, which takes focus when it is drawn below
+        // in this pass. Moving there from the keyboard is keyboard
+        // navigation, as Tab is: the ring shows the first result.
+        let first = chats[0].clone();
+        app.search_selected = Some(first.clone());
+        app.chat_cursor = Some(first.clone());
+        app.scroll_chat_into_view = Some(first);
+        app.focus_chats = true;
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(theme::keyboard_focus_id(), true));
+        return;
+    }
     let before = app.search_selected.clone();
     let mut index = before
         .as_ref()
         .and_then(|selected| chats.iter().position(|chat| chat == selected));
-    if down {
-        index = Some(index.map_or(0, |index| (index + 1).min(chats.len() - 1)));
-    }
     if up {
         index = index.map(|index| index.saturating_sub(1));
     }
@@ -283,10 +294,12 @@ fn search_and_filters(app: &mut App, ui: &mut egui::Ui) {
     let width = ui.available_width();
     if app.page == Page::Calls {
         let hint = crate::i18n::gettext(app.locale, "Search name or number");
+        // Down from the field goes into the list under it.
+        super::calls::search_keyboard(app, ui);
         let (id, mut text) = if app.new_call {
-            ("new-call-search", app.new_call_search.clone())
+            (super::calls::NEW_CALL_SEARCH, app.new_call_search.clone())
         } else {
-            ("calls-search", app.calls_search.clone())
+            (super::calls::HISTORY_SEARCH, app.calls_search.clone())
         };
         let response = widgets::search_field(
             ui,
@@ -572,6 +585,241 @@ fn macos_header(app: &mut App, ui: &mut egui::Ui) {
 /// Stable main-list row id used by interaction tests.
 pub fn chat_row_id(chat: &str) -> egui::Id {
     egui::Id::new(("chat-row", chat))
+}
+
+/// The chat list's focusable container. One id for every form of the list
+/// (all chats, archived, locked, search results, collapsed): only one is
+/// drawn at a time, and the keys find it by this id.
+pub fn chats_list_id() -> egui::Id {
+    egui::Id::new("chat-list-container")
+}
+
+/// The chat Enter opened from its row in the chat list, and the frame it
+/// was pressed in (`keys::chat_list_keys`).
+pub(crate) fn opened_from_row_id() -> egui::Id {
+    chats_list_id().with("opened-from-row")
+}
+
+/// What a screen reader last heard of the current row: its chat, its name
+/// and whether it was selected.
+type HeardRow = (String, String, Option<bool>);
+
+fn heard_row_id() -> egui::Id {
+    chats_list_id().with("heard-row")
+}
+
+/// Keeps the current row, `row` showing `chat`, as a screen reader last
+/// heard it just after Enter opened that chat from it: opening a chat
+/// changes its row, ", open" appended, the unread count gone, and a row
+/// changed while focus is on it, or in the update that moves focus away, is
+/// read out again before the reader follows focus to the message field.
+/// Held through the frame after the key, the one that opens the chat and
+/// moves focus, whatever its passes do, and one frame more only while the
+/// list still has focus (`focused`): never longer, so it cannot keep a
+/// focused row's name from changing. Otherwise notes what the row says now.
+fn hold_heard_row(ctx: &egui::Context, row: egui::Id, chat: &str, focused: bool) {
+    let frame = ctx.cumulative_frame_nr();
+    let held = ctx
+        .data(|data| data.get_temp::<(String, u64)>(opened_from_row_id()))
+        .is_some_and(|(opened, pressed)| {
+            opened == chat && (frame <= pressed + 1 || (frame == pressed + 2 && focused))
+        });
+    let heard = ctx
+        .data(|data| data.get_temp::<HeardRow>(heard_row_id()))
+        .filter(|(heard, ..)| heard == chat);
+    if held && let Some((_, label, selected)) = heard {
+        ctx.accesskit_node_builder(row, |node| {
+            node.set_label(label);
+            match selected {
+                Some(selected) => node.set_selected(selected),
+                None => node.clear_selected(),
+            }
+        });
+        return;
+    }
+    let now = ctx.accesskit_node_builder(row, |node| {
+        (node.label().map(str::to_owned), node.is_selected())
+    });
+    if let Some((Some(label), selected)) = now {
+        ctx.data_mut(|data| {
+            data.insert_temp::<HeardRow>(heard_row_id(), (chat.to_owned(), label, selected));
+        });
+    }
+}
+
+/// About a screen of chat rows, as PgUp and PgDn move in the list.
+pub fn page_rows(ctx: &egui::Context) -> usize {
+    ctx.data(|data| data.get_temp::<usize>(chats_list_id().with("page")))
+        .unwrap_or(8)
+}
+
+/// Where a chat row sits in the chat list, for its accessible node.
+#[derive(Clone, Copy)]
+struct Slot {
+    index: usize,
+    len: usize,
+}
+
+/// The chat list in the pass that draws it: one focusable ListBox whose
+/// current chat is its active descendant, never egui focus on a row.
+struct ListPass {
+    /// The list's container, as `begin` made it this pass.
+    response: egui::Response,
+    focused: bool,
+    len: usize,
+    /// The current chat, resolved against the chats shown.
+    cursor: Option<String>,
+    /// The current chat's row, once laid out in this pass.
+    active: Option<egui::Id>,
+}
+
+impl ListPass {
+    /// Creates the list's container before its rows, so their nodes can
+    /// hang from its node. It senses no pointer input, so pointer users see
+    /// the list exactly as before. `focus` is the list's one-shot focus
+    /// request, taken in this pass, which draws the list, so focus never
+    /// names a node missing from this frame's tree.
+    fn begin(app: &mut App, ui: &mut egui::Ui, focus: bool, label: &str, chats: &[Chat]) -> Self {
+        let id = chats_list_id();
+        // A menu asked for a chat this list does not show never opens later.
+        if app
+            .open_chat_menu
+            .as_ref()
+            .is_some_and(|menu| !chats.iter().any(|chat| chat.id == *menu))
+        {
+            app.open_chat_menu = None;
+        }
+        if focus {
+            ui.memory_mut(|memory| memory.request_focus(id));
+        }
+        let rect = ui.available_rect_before_wrap();
+        let response = super::list_nav::container(ui, id, rect, || label.to_owned(), chats.len())
+            .tab_stop(Stop::ChatList);
+        let index = app.chat_cursor_index(chats.iter().map(|chat| chat.id.as_str()));
+        let cursor = index.map(|index| chats[index].id.clone());
+        let keyboard = ui.ctx().data(|data| {
+            data.get_temp::<bool>(theme::keyboard_focus_id())
+                .unwrap_or(false)
+        });
+        let focused = response.has_focus();
+        // Arriving in the list by keyboard shows where its current chat is.
+        if response.gained_focus() && keyboard && app.scroll_chat_into_view.is_none() {
+            app.scroll_chat_into_view.clone_from(&cursor);
+        }
+        if focused && cursor.is_some() && cursor != app.chat_cursor {
+            // The current chat left the list while the reader is in it
+            // (archived, read under Unread, locked, deleted): the chat it
+            // fell back to is current from now on, and the list takes the
+            // reader to it, so it is laid out and named as the active
+            // descendant rather than the list having none. Without focus
+            // nothing moves: the list stays as the pointer left it.
+            app.scroll_chat_into_view.clone_from(&cursor);
+            app.chat_cursor.clone_from(&cursor);
+        }
+        // Emptied while the reader is in it, the list keeps focus, with
+        // nothing to say but that.
+        let before = ui.ctx().data(|data| data.get_temp::<usize>(id.with("len")));
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(id.with("len"), chats.len()));
+        if focused && chats.is_empty() && before.is_some_and(|len| len > 0) {
+            app.announcer.say(
+                crate::announcer::Category::Status,
+                crate::i18n::gettext(app.locale, "No chats"),
+            );
+        }
+        // egui's focus, not the response's: that one also asks for the
+        // window's focus, and the list keeps its place while the window is
+        // away.
+        app.chats_focused = ui.memory(|memory| memory.has_focus(id));
+        Self {
+            response,
+            focused,
+            len: chats.len(),
+            cursor,
+            active: None,
+        }
+    }
+
+    /// Records about a screen of rows for PgUp and PgDn.
+    fn page(ui: &egui::Ui, row_height: f32) {
+        let rows = (ui.available_height() / row_height).floor().max(1.0) as usize;
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(chats_list_id().with("page"), rows));
+    }
+
+    /// Lays out the chat at `index`: its row's node becomes an item of the
+    /// list's node rather than of the scroll area's containers in between.
+    /// The current row carries the list's focus ring, drawn only after
+    /// keyboard navigation, as around any focused control.
+    fn row(
+        &mut self,
+        app: &mut App,
+        ui: &mut egui::Ui,
+        chat: &Chat,
+        index: usize,
+        compact: bool,
+    ) -> egui::Response {
+        let slot = Some(Slot {
+            index,
+            len: self.len,
+        });
+        let response = ui
+            .scope_builder(
+                egui::UiBuilder::new()
+                    // As `push_id`: the row's ids, and so its menu's, stay put.
+                    .id_salt(("chat", &chat.id))
+                    .accessibility_parent(chats_list_id()),
+                |ui| {
+                    if compact {
+                        compact_row(app, ui, chat, slot)
+                    } else {
+                        row(app, ui, chat, slot)
+                    }
+                },
+            )
+            .inner;
+        if !compact {
+            // Store the row rect for interaction tests.
+            ui.ctx()
+                .data_mut(|data| data.insert_temp(chat_row_id(&chat.id), response.rect));
+            #[cfg(test)]
+            ui.ctx().data_mut(|data| {
+                data.insert_temp(chat_row_id(&chat.id).with("widget"), response.id);
+            });
+        }
+        if self.cursor.as_deref() == Some(chat.id.as_str()) {
+            if self.focused {
+                theme::focus_outline(
+                    ui,
+                    chats_list_id(),
+                    response.rect,
+                    f32::from(theme::RADIUS_SMALL),
+                );
+            }
+            // Laid out this pass, so its node is in this pass's tree and
+            // may be the list's active descendant.
+            self.active = Some(response.id);
+            // A chat opened from this row keeps the row as the reader heard
+            // it until focus has left it. Back on the row later, it says
+            // "open".
+            hold_heard_row(ui.ctx(), response.id, &chat.id, self.focused);
+        }
+        response
+    }
+
+    /// Reveals `viewport` in the scroll area around the list when the list
+    /// was reached by keyboard this pass, as [`theme::reveal_focus_in`] does
+    /// for a focused control.
+    fn reveal_in(&self, ui: &egui::Ui, viewport: egui::Rect) {
+        let mut list = self.response.clone();
+        list.rect = viewport;
+        list.interact_rect = viewport.intersect(ui.clip_rect());
+        theme::reveal_focus_in(ui, &list);
+    }
+
+    fn finish(self, ctx: &egui::Context) {
+        super::list_nav::set_active(ctx, chats_list_id(), self.active);
+    }
 }
 
 /// Stable filter-chip id used by interaction tests.
@@ -902,13 +1150,19 @@ fn list(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     // Taken here so a send seen while the list is hidden cannot move it later.
     let to_top = std::mem::take(&mut app.scroll_chats_to_top);
+    // Taken whichever form the list takes: a request the list cannot take
+    // up now is not taken up later. A disabled copy of the list (beneath a
+    // narrow window's sliding chat) cannot take the keyboard: the request
+    // waits for the list drawn for real.
+    let focus = ui.is_enabled() && std::mem::take(&mut app.focus_chats);
     if app.locked_folder_open() {
-        locked_list(app, ui);
+        locked_list(app, ui, focus);
         return;
     }
     if app.secret_code_matched() {
         // Typing the secret code hides every other result: the folder entry
         // is all the search reveals until it is clicked.
+        app.open_chat_menu = None;
         locked_entry(app, ui);
         return;
     }
@@ -917,11 +1171,18 @@ fn list(app: &mut App, ui: &mut egui::Ui) {
         return;
     }
     if !app.search.trim().is_empty() {
-        results(app, ui);
+        results(app, ui, focus);
         return;
     }
     let chats: Vec<Chat> = app.visible_chats().into_iter().cloned().collect();
+    let label = if app.show_archived {
+        crate::i18n::gettext(app.locale, "Archived chats")
+    } else {
+        crate::i18n::gettext(app.locale, "Chats")
+    };
     if chats.is_empty() {
+        // Still the list, with no items, so a reader in it keeps focus.
+        ListPass::begin(app, ui, focus, &label, &chats).finish(ui.ctx());
         // The favorites title is translated, so it is bound here: the tuple
         // below borrows it for this frame, and every other arm stays a literal.
         let favorites_title;
@@ -954,6 +1215,8 @@ fn list(app: &mut App, ui: &mut egui::Ui) {
     ui.spacing_mut().item_spacing.y = 0.0;
     let row_height = theme::ROW_HEIGHT;
     let total = chats.len();
+    let mut pass = ListPass::begin(app, ui, focus, &label, &chats);
+    ListPass::page(ui, row_height);
     let mut scroll_area = egui::ScrollArea::vertical()
         .id_salt("chat-list")
         .auto_shrink([false, false]);
@@ -1011,16 +1274,7 @@ fn list(app: &mut App, ui: &mut egui::Ui) {
         for index in range {
             let chat = &chats[index];
             // Key by chat so an open menu survives list reordering.
-            let response = ui
-                .push_id(("chat", &chat.id), |ui| row(app, ui, chat))
-                .inner;
-            // Store the row rect for interaction tests.
-            ui.ctx()
-                .data_mut(|data| data.insert_temp(chat_row_id(&chat.id), response.rect));
-            #[cfg(test)]
-            ui.ctx().data_mut(|data| {
-                data.insert_temp(chat_row_id(&chat.id).with("widget"), response.id);
-            });
+            let response = pass.row(app, ui, chat, index, false);
             if response.clicked() && !app.show_archived {
                 app.actions.push(Action::KeepUnread(chat.id.clone()));
             }
@@ -1030,6 +1284,7 @@ fn list(app: &mut App, ui: &mut egui::Ui) {
         ui.ctx()
             .data_mut(|data| data.insert_temp(shared_offset_id(), output.state.offset.y));
     }
+    pass.finish(ui.ctx());
     app.scroll_route
         .place(crate::app::ScrollPane::Chats, output.inner_rect);
     #[cfg(test)]
@@ -1109,10 +1364,13 @@ fn locked_entry(app: &mut App, ui: &mut egui::Ui) {
 }
 
 /// The authenticated folder, including archived chats and local title search.
-fn locked_list(app: &mut App, ui: &mut egui::Ui) {
+fn locked_list(app: &mut App, ui: &mut egui::Ui, focus: bool) {
     let palette = app.palette;
-    let chats = app.visible_chats();
+    let chats: Vec<Chat> = app.visible_chats().into_iter().cloned().collect();
+    let label = crate::i18n::gettext(app.locale, "Locked chats");
     if chats.is_empty() {
+        // Still the list, with no items, so a reader in it keeps focus.
+        ListPass::begin(app, ui, focus, &label, &chats).finish(ui.ctx());
         widgets::empty_state(
             ui,
             &palette,
@@ -1122,36 +1380,38 @@ fn locked_list(app: &mut App, ui: &mut egui::Ui) {
         );
         return;
     }
-    let chats: Vec<Chat> = chats.into_iter().cloned().collect();
     ui.spacing_mut().item_spacing.y = 0.0;
+    let mut pass = ListPass::begin(app, ui, focus, &label, &chats);
+    ListPass::page(ui, theme::ROW_HEIGHT);
     let mut scroll_area = egui::ScrollArea::vertical()
         .id_salt("locked-chats")
         .auto_shrink([false, false]);
-    let target_row = app
+    // The current chat, moved by the arrows, is laid out and in view.
+    if let Some(target_row) = app
         .scroll_chat_into_view
         .as_ref()
-        .and_then(|target| chats.iter().position(|chat| chat.id == *target));
-    if let Some(target_row) = target_row {
+        .and_then(|target| chats.iter().position(|chat| chat.id == *target))
+    {
         let id = ui.make_persistent_id(egui::IdSalt::new("locked-chats"));
         let current = egui::scroll_area::State::load(ui.ctx(), id)
             .unwrap_or_default()
             .offset
             .y;
-        let offset = row_scroll_offset(
+        scroll_area = scroll_area.vertical_scroll_offset(row_scroll_offset(
             current,
             ui.available_height(),
             target_row,
             theme::ROW_HEIGHT,
             ui.spacing().item_spacing.y,
-        );
-        scroll_area = scroll_area.vertical_scroll_offset(offset);
+        ));
         app.scroll_chat_into_view = None;
     }
     scroll_area.show_rows(ui, theme::ROW_HEIGHT, chats.len(), |ui, range| {
-        for chat in &chats[range] {
-            ui.push_id(("chat", &chat.id), |ui| row(app, ui, chat));
+        for index in range {
+            pass.row(app, ui, &chats[index], index, false);
         }
     });
+    pass.finish(ui.ctx());
 }
 
 /// Returns the smallest offset that fully reveals a fixed-height row.
@@ -1174,7 +1434,7 @@ fn row_scroll_offset(
 }
 
 /// Search results grouped into chats, messages, and contacts.
-fn results(app: &mut App, ui: &mut egui::Ui) {
+fn results(app: &mut App, ui: &mut egui::Ui, focus: bool) {
     let palette = app.palette;
     let chats: Vec<Chat> = app.visible_chats().into_iter().cloned().collect();
     let hits: Vec<Message> = app.search_hits.clone();
@@ -1185,7 +1445,10 @@ fn results(app: &mut App, ui: &mut egui::Ui) {
         && !chats
             .iter()
             .any(|chat| app.me.as_deref() == Some(chat.id.as_str()));
+    let label = crate::i18n::gettext(app.locale, "Search results");
     if chats.is_empty() && hits.is_empty() && contacts.is_empty() && !offer_self {
+        // Still the list, with no items, so a reader in it keeps focus.
+        ListPass::begin(app, ui, focus, &label, &chats).finish(ui.ctx());
         widgets::empty_state(
             ui,
             &palette,
@@ -1196,18 +1459,21 @@ fn results(app: &mut App, ui: &mut egui::Ui) {
         return;
     }
     ui.spacing_mut().item_spacing.y = 0.0;
+    // The matching chats are their own list; message and contact results
+    // stay rows of their own below it. Without matching chats the list is
+    // empty, and still there for a reader in it.
+    let mut pass = ListPass::begin(app, ui, focus, &label, &chats);
+    ListPass::page(ui, theme::ROW_HEIGHT);
     egui::ScrollArea::vertical()
         .id_salt("search-results")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             if !chats.is_empty() {
                 section(ui, &palette, "Chats");
-                for chat in &chats {
+                for (index, chat) in chats.iter().enumerate() {
                     let reveal = ui.is_enabled()
                         && app.scroll_chat_into_view.as_deref() == Some(chat.id.as_str());
-                    let response = ui
-                        .push_id(("chat", &chat.id), |ui| row(app, ui, chat))
-                        .inner;
+                    let response = pass.row(app, ui, chat, index, false);
                     if reveal {
                         response.scroll_to_me(None);
                         app.scroll_chat_into_view = None;
@@ -1231,6 +1497,7 @@ fn results(app: &mut App, ui: &mut egui::Ui) {
             }
             ui.add_space(8.0);
         });
+    pass.finish(ui.ctx());
 }
 
 fn section(ui: &mut egui::Ui, palette: &Palette, label: &str) {
@@ -1408,7 +1675,8 @@ fn person_row(
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
+/// One chat row. With a `slot` it is an item of the chat list's node.
+fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat, slot: Option<Slot>) -> egui::Response {
     let palette = app.palette;
     let title = app.chat_title(chat);
     // While searching, the result reached with the arrows is the selection;
@@ -1421,21 +1689,34 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
         .is_some_and(|selected| *selected == chat.id);
     let now = crate::util::now();
     let muted = chat.muted(now);
-    let (rect, response) = ui.allocate_exact_size(
-        vec2(ui.available_width(), theme::ROW_HEIGHT),
-        Sense::click(),
-    );
-    theme::reveal_focus(&response);
+    // Clicks only, never focus: the keyboard reaches rows through the chat
+    // list's one Tab stop and its arrows (`ListPass`).
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(ui.available_width(), theme::ROW_HEIGHT), Sense::CLICK);
     // The preview area and the whole last message, when the row cuts it short.
     let mut full_preview: Option<(Rect, String, String)> = None;
+    let label = spoken_label(app, ui.ctx(), response.id, chat, &title, now);
     response.widget_info(|| {
         egui::WidgetInfo::selected(
             egui::WidgetType::SelectableLabel,
             ui.is_enabled(),
             selected,
-            unread_announcement(&title, chat),
+            label.clone(),
         )
     });
+    if let Some(slot) = slot {
+        // The open chat is the list's selection, whatever the search
+        // highlights.
+        super::list_nav::mark_row(
+            ui.ctx(),
+            response.id,
+            label,
+            slot.index,
+            slot.len,
+            rect,
+            app.open_chat.as_deref() == Some(chat.id.as_str()),
+        );
+    }
     if ui.is_rect_visible(rect) {
         if selected {
             widgets::row_highlight(ui, &palette, rect, palette.surface_active);
@@ -1669,16 +1950,64 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
     let popup = egui::Popup::context_menu(&response)
         .width(menu_width)
         .frame(widgets::menu_frame(&menu_palette));
-    #[cfg(any(test, feature = "demo"))]
-    let popup = if app.open_chat_menu.as_deref() == Some(chat.id.as_str()) {
-        popup
-            .open_memory(Some(egui::SetOpenCommand::Bool(true)))
-            .at_position(response.rect.left_top() + vec2(12.0, 8.0))
+    let popup_id = response.id.with("popup");
+    // Asked for by the chat list's Shift+F10 or a demo page: it opens once,
+    // and from there on closes as any menu does. Opened from the keys, focus
+    // goes into it, stays in it, and returns to the list when it closes.
+    let force = app.open_chat_menu.as_deref() == Some(chat.id.as_str());
+    if force {
+        app.actions.push(Action::ChatMenuOpened);
+    }
+    let key_menu = super::list_nav::KeyMenu::begin(ui.ctx(), popup_id, force, false)
+        .menu(crate::i18n::gettext(app.locale, "Chat"));
+    // A menu opened without the pointer stays beside its row for as long as
+    // it is open: the pointer-anchored placement has no position to go to.
+    let at_row_id = popup_id.with("at-row");
+    let was_open = key_menu.was_open();
+    let at_row = force
+        || (was_open
+            && !response.secondary_clicked()
+            && ui
+                .ctx()
+                .data(|data| data.get_temp::<bool>(at_row_id))
+                .unwrap_or(false));
+    let popup = if force {
+        popup.open_memory(Some(egui::SetOpenCommand::Bool(true)))
     } else {
         popup
     };
-    popup.show(|ui| context_menu(app, ui, chat, &menu_palette));
+    let popup = if at_row {
+        popup.at_position(response.rect.left_top() + vec2(12.0, 8.0))
+    } else {
+        popup
+    };
+    let menu = popup.show(|ui| context_menu(app, ui, chat, &menu_palette));
+    let first = ui
+        .ctx()
+        .data(|data| data.get_temp::<Option<egui::Id>>(menu_first_item_id(&chat.id)))
+        .flatten();
+    let open = key_menu.finish(
+        ui.ctx(),
+        menu.as_ref().map(|menu| menu.response.layer_id),
+        false,
+        first,
+        chats_list_id(),
+    );
+    if at_row || was_open {
+        ui.ctx().data_mut(|data| {
+            if at_row && open {
+                data.insert_temp(at_row_id, true);
+            } else {
+                data.remove::<bool>(at_row_id);
+            }
+        });
+    }
     response
+}
+
+/// Where the chat menu records its first item for this pass.
+fn menu_first_item_id(chat: &str) -> egui::Id {
+    egui::Id::new(("chat-menu-first-item", chat))
 }
 
 /// The widest a chat row's full-message tooltip grows before it wraps.
@@ -1761,12 +2090,35 @@ pub(super) fn compact_list(app: &mut App, ui: &mut egui::Ui) {
         .data(|data| data.get_temp::<bool>(slide_copy_id()))
         .is_some();
     let to_top = !copy && std::mem::take(&mut app.scroll_chats_to_top);
+    // A copy beneath a narrow window's slide leaves the list's requests to
+    // the rail drawn for real.
+    let keyboard = !copy;
+    let focus = keyboard && std::mem::take(&mut app.focus_chats);
+    if keyboard {
+        // Avatars carry no menu: a request is not left to open one when the
+        // full list comes back.
+        app.open_chat_menu = None;
+    }
     if !app.locked_folder_open() && app.secret_code_matched() {
         // As in the full list, the secret code reveals only the way in.
         compact_locked_entry(app, ui);
         return;
     }
     let chats: Vec<Chat> = app.visible_chats().into_iter().cloned().collect();
+    // The same list as the full one, with the same name and items.
+    let label = if app.locked_folder_open() {
+        crate::i18n::gettext(app.locale, "Locked chats")
+    } else if app.chat_results_shown() {
+        crate::i18n::gettext(app.locale, "Search results")
+    } else if app.show_archived {
+        crate::i18n::gettext(app.locale, "Archived chats")
+    } else {
+        crate::i18n::gettext(app.locale, "Chats")
+    };
+    let mut pass = keyboard.then(|| ListPass::begin(app, ui, focus, &label, &chats));
+    if keyboard {
+        ListPass::page(ui, COMPACT_CELL);
+    }
     // Exactly the height the rail gives it: egui's least scrolled height
     // would reach past the window's bottom in a short one.
     let mut scroll_area = egui::ScrollArea::vertical()
@@ -1813,33 +2165,33 @@ pub(super) fn compact_list(app: &mut App, ui: &mut egui::Ui) {
     };
     // Only the avatars on screen are laid out, however many chats there are.
     let output = scroll_area.show_rows(ui, COMPACT_CELL, chats.len(), |ui, range| {
-        let mut focused = None;
         if carried != 0.0 {
             ui.scroll_with_delta_animation(
                 vec2(0.0, carried),
                 egui::style::ScrollAnimation::none(),
             );
         }
-        for chat in &chats[range] {
-            let response = ui
-                .push_id(("chat", &chat.id), |ui| compact_row(app, ui, chat))
-                .inner;
+        for index in range {
+            let chat = &chats[index];
+            let response = match pass.as_mut() {
+                Some(pass) => pass.row(app, ui, chat, index, true),
+                None => {
+                    ui.push_id(("chat", &chat.id), |ui| compact_row(app, ui, chat, None))
+                        .inner
+                }
+            };
             if response.clicked() && !app.locked_folder_open() && !app.show_archived {
                 app.actions.push(Action::KeepUnread(chat.id.clone()));
             }
-            if response.has_focus() {
-                focused = Some(response);
-            }
         }
-        focused
     });
-    // The rail itself scrolls in a short window. The inner scroll area has
-    // consumed the avatar's focus target; reveal its viewport in the outer
-    // one as well, so a focused avatar cannot stay clipped by the rail.
-    if let Some(mut focused) = output.inner {
-        focused.rect = output.inner_rect;
-        focused.interact_rect = focused.rect.intersect(ui.clip_rect());
-        theme::reveal_focus_in(ui, &focused);
+    if let Some(pass) = pass {
+        // The rail itself scrolls in a short window. The inner scroll area
+        // has consumed the current avatar's scroll target; reveal its
+        // viewport in the outer one as well, so the avatars the list moves
+        // through cannot stay clipped by the rail.
+        pass.reveal_in(ui, output.inner_rect);
+        pass.finish(ui.ctx());
     }
     if !copy {
         ui.ctx().data_mut(|data| {
@@ -1907,22 +2259,38 @@ fn compact_locked_id() -> egui::Id {
 
 /// One avatar in the collapsed chat list: a click opens the chat, hovering
 /// names it, and unread chats carry the same badge as a full row.
-fn compact_row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
+fn compact_row(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    chat: &Chat,
+    slot: Option<Slot>,
+) -> egui::Response {
     let palette = app.palette;
     let title = app.chat_title(chat);
     let selected = app.open_chat.as_deref() == Some(chat.id.as_str());
+    // Clicks only, as a full row: the keyboard uses the list's arrows.
     let (rect, response) =
-        ui.allocate_exact_size(vec2(ui.available_width(), COMPACT_CELL), Sense::click());
-    // A short window leaves the rail's avatars little more than one row.
-    theme::reveal_focus_in(ui, &response);
+        ui.allocate_exact_size(vec2(ui.available_width(), COMPACT_CELL), Sense::CLICK);
+    let label = spoken_label(app, ui.ctx(), response.id, chat, &title, crate::util::now());
     response.widget_info(|| {
         egui::WidgetInfo::selected(
             egui::WidgetType::SelectableLabel,
             ui.is_enabled(),
             selected,
-            unread_announcement(&title, chat),
+            label.clone(),
         )
     });
+    if let Some(slot) = slot {
+        super::list_nav::mark_row(
+            ui.ctx(),
+            response.id,
+            label,
+            slot.index,
+            slot.len,
+            rect,
+            selected,
+        );
+    }
     if ui.is_rect_visible(rect) {
         if response.hovered() {
             ui.painter().rect_filled(
@@ -1987,16 +2355,31 @@ fn compact_badge_center(avatar: Rect) -> egui::Pos2 {
 }
 
 fn context_menu(app: &mut App, ui: &mut egui::Ui, chat: &Chat, palette: &Palette) {
-    if chat.looks_unread()
-        && widgets::menu_item(ui, palette, Some(Icon::CheckCheck), "Mark as read")
-    {
-        app.actions.push(Action::MarkRead(chat.id.clone()));
+    // The first item, Mark as read or Mark as unread, is where a menu opened
+    // from the keyboard puts focus.
+    let first = if chat.looks_unread() {
+        widgets::menu_item_response(ui, palette, Some(Icon::CheckCheck), "Mark as read", true)
+    } else {
+        widgets::menu_item_response(
+            ui,
+            palette,
+            Some(Icon::MessageCircle),
+            "Mark as unread",
+            true,
+        )
+    };
+    if first.clicked() {
+        app.actions.push(if chat.looks_unread() {
+            Action::MarkRead(chat.id.clone())
+        } else {
+            Action::MarkUnread(chat.id.clone())
+        });
     }
-    if !chat.looks_unread()
-        && widgets::menu_item(ui, palette, Some(Icon::MessageCircle), "Mark as unread")
-    {
-        app.actions.push(Action::MarkUnread(chat.id.clone()));
-    }
+    // A popup's first pass only measures it, drawing nothing that could
+    // take focus; only a pass that draws the menu names its item.
+    let first = (!ui.is_sizing_pass()).then_some(first.id);
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(menu_first_item_id(&chat.id), first));
     if widgets::menu_item(
         ui,
         palette,
@@ -2105,16 +2488,96 @@ fn context_menu(app: &mut App, ui: &mut egui::Ui, chat: &Chat, palette: &Palette
     }
 }
 
-/// What a screen reader reads out for a chat's unread state. A chat marked
-/// unread by hand has no count to read, so it must not announce zero.
-fn unread_announcement(title: &str, chat: &Chat) -> String {
-    if chat.marked_unread && chat.unread == 0 {
-        format!("{title}, unread")
-    } else if chat.unread > 0 && chat.unread_mention.is_some() {
-        format!("{title}, {} unread messages, mentioned you", chat.unread)
-    } else {
-        format!("{title}, {} unread messages", chat.unread)
+/// What a screen reader reads for a chat row, built from the same values the
+/// row paints. Empty while no screen reader is attached, so idle frames pay
+/// nothing for it.
+fn spoken_label(
+    app: &App,
+    ctx: &egui::Context,
+    id: egui::Id,
+    chat: &Chat,
+    title: &str,
+    now: i64,
+) -> String {
+    if !crate::a11y::screen_reader_active(ctx, id) {
+        return String::new();
     }
+    let typing = app.typing_in(&chat.id);
+    let draft = app.draft_preview(&chat.id);
+    // The row paints a group sender by first word; the spoken label keeps the
+    // whole name, so "The Annoying Person" is not read as "The".
+    let sender;
+    let summary;
+    let typist;
+    let status;
+    let last = if let Some((_, name)) = typing.first() {
+        typist = name.trim_start_matches('~').to_owned();
+        Some(crate::a11y::ChatLast::Typing(
+            chat.is_group().then_some(typist.as_str()),
+        ))
+    } else if let Some(draft) = &draft {
+        Some(crate::a11y::ChatLast::Draft(draft))
+    } else if let Some(last) = &chat.last {
+        summary = crate::markup::plain(&app.resolve_mention_tokens(&last.summary), &[]);
+        let group_sender = if !last.from_me && chat.is_group() {
+            // A name only known from a push name carries a "~" marker; it is not
+            // part of the name, and the typing branch drops it the same way.
+            sender = app
+                .display_name_or(&last.sender, last.sender_name.as_deref())
+                .trim_start_matches('~')
+                .to_owned();
+            Some(sender.as_str())
+        } else {
+            None
+        };
+        // The ticks the row draws beside our own message, as drawn: a read
+        // receipt hidden while ours are off reads as delivered.
+        status = last
+            .from_me
+            .then(|| {
+                crate::a11y::status_word(
+                    app.locale,
+                    super::conversation::display_delivery(
+                        last.status,
+                        last.from_me,
+                        chat.kind,
+                        app.account_receipts_off,
+                    ),
+                )
+            })
+            .flatten();
+        Some(crate::a11y::ChatLast::Message {
+            from_me: last.from_me,
+            group_sender,
+            text: &summary,
+            status: status.as_deref(),
+        })
+    } else {
+        None
+    };
+    let time = if chat.last_activity > 0 {
+        crate::util::chat_stamp(app.locale, chat.last_activity)
+    } else {
+        String::new()
+    };
+    crate::a11y::chat_label(
+        app.locale,
+        &crate::a11y::ChatLabel {
+            title,
+            unread: chat.unread,
+            marked_unread: chat.marked_unread,
+            last,
+            time: &time,
+            pinned: chat.pinned,
+            muted: chat.muted(now),
+            favorite: chat.favorite,
+            // As the row draws them: the "@" while an unread message
+            // mentions us, and the timer only while one is set.
+            mentioned: chat.unread > 0 && chat.unread_mention.is_some(),
+            disappearing: chat.disappearing_timer().is_some(),
+            open: app.open_chat.as_deref() == Some(chat.id.as_str()),
+        },
+    )
 }
 
 /// A chat's own notification sound, overriding Settings for this chat.
@@ -2261,7 +2724,7 @@ mod tests {
                         events,
                         ..Default::default()
                     },
-                    |ui| response = Some(row(&mut app, ui, &chat)),
+                    |ui| response = Some(row(&mut app, ui, &chat, None)),
                 );
                 output.textures_delta.clear();
                 response.unwrap()

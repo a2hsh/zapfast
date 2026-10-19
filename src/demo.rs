@@ -6955,6 +6955,1158 @@ mod tests {
         assert_eq!(app.message_cursor.get(&chat), Some(&target));
     }
 
+    /// Alt+1, or Control+1 on macOS.
+    fn chats_shortcut() -> egui::Modifiers {
+        messages_shortcut()
+    }
+
+    fn visible_ids(app: &App) -> Vec<String> {
+        app.visible_chats()
+            .into_iter()
+            .map(|chat| chat.id.clone())
+            .collect()
+    }
+
+    /// The chat list's node, and the node of its active descendant.
+    fn chat_list_nodes(
+        tree: &egui::accesskit::TreeUpdate,
+    ) -> (egui::accesskit::Node, Option<egui::accesskit::Node>) {
+        let list = node(tree, crate::ui::chats::chats_list_id().accesskit_id())
+            .expect("the chat list is in the tree");
+        let active = list
+            .active_descendant()
+            .map(|active| node(tree, active).expect("the active row is in this update"));
+        (list, active)
+    }
+
+    fn row_rect(ctx: &egui::Context, chat: &str) -> Option<egui::Rect> {
+        ctx.data(|data| data.get_temp::<egui::Rect>(crate::ui::chats::chat_row_id(chat)))
+    }
+
+    #[test]
+    fn chat_list_is_a_labelled_listbox_with_selected_open_chat() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        let tree = tree_after(&mut app, &ctx, None);
+        let (list, active) = chat_list_nodes(&tree);
+        let ids = visible_ids(&app);
+        let open = app.open_chat.clone().unwrap();
+        let open_index = ids.iter().position(|id| *id == open).unwrap();
+        assert_eq!(list.role(), egui::accesskit::Role::ListBox);
+        assert_eq!(list.label(), Some("Chats"));
+        assert_eq!(list.size_of_set(), Some(ids.len()));
+        assert_eq!(tree.focus, crate::ui::chats::chats_list_id().accesskit_id());
+        let active = active.expect("the open chat is the current one");
+        assert_eq!(active.role(), egui::accesskit::Role::ListBoxOption);
+        assert_eq!(active.position_in_set(), Some(open_index));
+        assert_eq!(active.size_of_set(), Some(ids.len()));
+        assert_eq!(
+            active.is_selected(),
+            Some(true),
+            "the open chat is selected"
+        );
+        let title = app.chat_title(app.chat(&open).unwrap());
+        assert!(
+            active
+                .label()
+                .is_some_and(|label| label.starts_with(&title)),
+            "{:?}",
+            active.label()
+        );
+        // Every other drawn row is an item of the same list with no selection
+        // state at all, neither selected nor toggled: a screen reader would
+        // say "not selected" or "not checked" on each. The row hangs from a
+        // plain container (its scope), which AccessKit flattens, and that
+        // container from the list.
+        let options: Vec<_> = tree
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.role() == egui::accesskit::Role::ListBoxOption)
+            .filter(|(_, node)| node.size_of_set() == Some(ids.len()))
+            .collect();
+        assert!(options.len() > 1, "several rows are drawn");
+        for (id, option) in &options {
+            if option.position_in_set() == Some(open_index) {
+                assert_eq!(option.is_selected(), Some(true));
+            } else {
+                assert_eq!(option.is_selected(), None, "{:?}", option.label());
+            }
+            assert_eq!(option.toggled(), None, "{:?}", option.label());
+            let (scope, parent) = tree
+                .nodes
+                .iter()
+                .find(|(_, parent)| parent.children().contains(id))
+                .expect("a row has a parent");
+            assert_eq!(parent.role(), egui::accesskit::Role::GenericContainer);
+            assert!(list.children().contains(scope), "rows are the list's items");
+        }
+    }
+
+    #[test]
+    fn the_chat_list_is_named_for_what_it_shows() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        app.show_archived = true;
+        assert!(!visible_ids(&app).is_empty(), "the samples archive a chat");
+        let tree = tree_after(&mut app, &ctx, None);
+        assert_eq!(chat_list_nodes(&tree).0.label(), Some("Archived chats"));
+        app.show_archived = false;
+        app.search = "a".into();
+        let matches = visible_ids(&app).len();
+        let tree = tree_after(&mut app, &ctx, None);
+        let (list, _) = chat_list_nodes(&tree);
+        assert_eq!(list.label(), Some("Search results"));
+        assert_eq!(list.size_of_set(), Some(matches));
+        // The collapsed list is the same list, by the same name.
+        app.search.clear();
+        app.sidebar_visible = false;
+        let tree = tree_after(&mut app, &ctx, None);
+        let (list, _) = chat_list_nodes(&tree);
+        assert_eq!(list.label(), Some("Chats"));
+        assert_eq!(list.size_of_set(), Some(visible_ids(&app).len()));
+    }
+
+    #[test]
+    fn alt_1_focuses_the_chat_list() {
+        for collapsed in [false, true] {
+            let mut app = app();
+            app.sidebar_visible = !collapsed;
+            let ctx = egui::Context::default();
+            app.attach(&ctx);
+            render(&mut app, &ctx);
+            assert_eq!(
+                ctx.memory(|memory| memory.focused()),
+                Some(egui::Id::new("composer-text"))
+            );
+            press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+            assert_eq!(
+                ctx.memory(|memory| memory.focused()),
+                Some(crate::ui::chats::chats_list_id()),
+                "collapsed: {collapsed}"
+            );
+            assert!(app.chats_focused);
+        }
+    }
+
+    /// From the Calls page, which shows the call history in the list's
+    /// place, Alt+1 goes back to the chats and into their list.
+    #[test]
+    fn alt_1_from_the_calls_page_focuses_the_chat_list() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        app.actions
+            .push(crate::model::Action::Open(crate::model::Page::Calls));
+        render(&mut app, &ctx);
+        assert_eq!(app.page, crate::model::Page::Calls);
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        assert_eq!(app.page, crate::model::Page::Chats);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::chats::chats_list_id())
+        );
+    }
+
+    /// Frames of a window `width` points wide, a second apart so that a
+    /// narrow window's slide ends within one, the first with `events`.
+    fn frames_at(app: &mut App, ctx: &egui::Context, width: f32, events: Vec<egui::Event>) {
+        let mut events = Some(events);
+        for _ in 0..4 {
+            let time = ctx.input(|input| input.time) + 1.0;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    time: Some(time),
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 780.0),
+                    )),
+                    events: events.take().unwrap_or_default(),
+                    ..Default::default()
+                },
+                |ui| {
+                    let ctx = ui.ctx().clone();
+                    app.background_frame(&ctx);
+                    app.frame_ui(ui);
+                },
+            );
+            output.textures_delta.clear();
+        }
+    }
+
+    /// A narrow window shows the open chat in the chat list's place: Alt+1
+    /// (Control+1 on macOS) goes back to the list, as Back does, with focus
+    /// on the chat that was open. So it does from the Calls page, where a
+    /// call picked from the history shows its chat in the same place.
+    #[test]
+    fn the_chats_shortcut_in_a_narrow_window_goes_back_to_the_list() {
+        for page in [None, Some("calls-info")] {
+            let mut app = app();
+            apply_flags(&mut app, page);
+            let ctx = egui::Context::default();
+            app.attach(&ctx);
+            frames_at(&mut app, &ctx, 480.0, Vec::new());
+            let open = app.open_chat.clone().expect("a chat is open");
+            let list = crate::ui::chats::chats_list_id();
+            assert!(
+                ctx.read_response(list).is_none(),
+                "{page:?}: no chat list beside a narrow chat"
+            );
+            frames_at(
+                &mut app,
+                &ctx,
+                480.0,
+                vec![key(egui::Key::Num1, chats_shortcut())],
+            );
+            assert_eq!(app.page, crate::model::Page::Chats, "{page:?}");
+            assert_eq!(
+                app.open_chat, None,
+                "{page:?}: the chat is closed, as by Back"
+            );
+            assert_eq!(
+                ctx.memory(|memory| memory.focused()),
+                Some(list),
+                "{page:?}"
+            );
+            assert_eq!(app.current_list_chat(), Some(open), "{page:?}");
+        }
+    }
+
+    /// Where the info panel leaves no room for the rail and the chat list
+    /// beside the chat, Alt+1 closes the panel and the list takes focus.
+    #[test]
+    fn alt_1_beside_a_crowding_info_panel_closes_it() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        let chat = app.open_chat.clone().expect("the demo opens a chat");
+        app.actions
+            .push(crate::model::Action::OpenInfo(chat.clone()));
+        frames_at(&mut app, &ctx, 860.0, Vec::new());
+        assert!(app.info_visible());
+        let list = crate::ui::chats::chats_list_id();
+        assert!(
+            ctx.read_response(list).is_none(),
+            "the list steps aside for the panel"
+        );
+        frames_at(
+            &mut app,
+            &ctx,
+            860.0,
+            vec![key(egui::Key::Num1, chats_shortcut())],
+        );
+        assert!(!app.info_visible(), "the panel closes");
+        assert_eq!(app.open_chat, Some(chat), "the chat stays open");
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+    }
+
+    /// Starred messages stand in the chat list's place: Alt+1 brings the
+    /// chats back, as the rail's Chats does, and moves into their list.
+    #[test]
+    fn alt_1_from_the_starred_messages_focuses_the_chat_list() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        app.show_starred = true;
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        assert!(!app.show_starred);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::chats::chats_list_id())
+        );
+    }
+
+    /// The call screen covers the chats: the chat list's keys leave the
+    /// list beneath it alone, even with focus on it.
+    #[test]
+    fn the_chat_list_keys_wait_under_the_call_screen() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        let list = crate::ui::chats::chats_list_id();
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        crate::demo::call_sample(&mut app, false, false);
+        render(&mut app, &ctx);
+        // Focus handed back to the list under the call screen, as a menu
+        // that started the call hands it back to where it opened.
+        ctx.memory_mut(|memory| memory.request_focus(list));
+        render(&mut app, &ctx);
+        let current = app.current_list_chat();
+        let open = app.open_chat.clone();
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::End, egui::Modifiers::NONE);
+        assert_eq!(app.current_list_chat(), current, "the cursor stays");
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(app.open_chat, open, "no chat opens under the call");
+        // Put aside, the call leaves the list its keys.
+        app.call_surface_hidden = true;
+        render(&mut app, &ctx);
+        ctx.memory_mut(|memory| memory.request_focus(list));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        assert_ne!(app.current_list_chat(), current);
+    }
+
+    /// The demo on the Calls page `page`, laid out.
+    fn calls_page(page: &str) -> (App, egui::Context) {
+        let mut app = app();
+        apply_flags(&mut app, Some(page));
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        (app, ctx)
+    }
+
+    /// The node of the list `list`, and the node of its active descendant.
+    fn list_nodes(
+        tree: &egui::accesskit::TreeUpdate,
+        list: egui::Id,
+    ) -> (egui::accesskit::Node, Option<egui::accesskit::Node>) {
+        let node_of_list = node(tree, list.accesskit_id()).expect("the list is in the tree");
+        let active = node_of_list
+            .active_descendant()
+            .map(|active| node(tree, active).expect("the active row is in this update"));
+        (node_of_list, active)
+    }
+
+    /// The call history is one Tab stop after the chips, named and counted
+    /// as a list, whose arrows walk its rows without opening them. Enter
+    /// opens the current row's chat beside it, as a click does, and
+    /// Shift+F10 its menu, which calls back by voice or video.
+    #[test]
+    fn the_call_history_is_one_list_walked_by_the_arrows() {
+        use crate::ui::calls;
+        let (mut app, ctx) = calls_page("calls");
+        let list = calls::history_list_id();
+        let missed = crate::ui::focus::control(&ctx, crate::ui::focus::Stop::Missed)
+            .expect("the Missed chip");
+        ctx.memory_mut(|memory| memory.request_focus(missed));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        let rows: Vec<Message> = calls::rows(&app.call_log)
+            .into_iter()
+            .map(|row| row[0].clone())
+            .collect();
+        assert!(rows.len() >= 3, "{rows:?}");
+        let tree = tree_after(&mut app, &ctx, None);
+        let (node_of_list, active) = list_nodes(&tree, list);
+        assert_eq!(node_of_list.role(), egui::accesskit::Role::ListBox);
+        assert_eq!(node_of_list.label(), Some("Calls"));
+        assert_eq!(node_of_list.size_of_set(), Some(rows.len()));
+        assert_eq!(tree.focus, list.accesskit_id());
+        let active = active.expect("the first row is current");
+        assert_eq!(active.role(), egui::accesskit::Role::ListBoxOption);
+        assert_eq!(active.position_in_set(), Some(0));
+        let open = app.open_chat.clone();
+        for (key, expected) in [
+            (egui::Key::ArrowDown, 1),
+            (egui::Key::End, rows.len() - 1),
+            (egui::Key::Home, 0),
+            (egui::Key::ArrowDown, 1),
+        ] {
+            let tree = tree_after(&mut app, &ctx, Some(key));
+            let active = list_nodes(&tree, list).1.expect("the current row is drawn");
+            assert_eq!(active.position_in_set(), Some(expected), "{key:?}");
+            assert_eq!(active.size_of_set(), Some(rows.len()));
+            let name = app.display_name(&rows[expected].chat);
+            assert!(
+                active.label().is_some_and(|label| label.starts_with(&name)),
+                "{key:?}: {:?}",
+                active.label()
+            );
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(list), "{key:?}");
+            assert_eq!(app.open_chat, open, "{key:?} opened a chat");
+        }
+        // A one-to-one row's menu calls back either way.
+        let one_to_one = rows
+            .iter()
+            .position(|row| {
+                matches!(row.content, Content::Call { group: false, .. })
+                    && row.chat != crate::model::CALL_LINK_CHAT
+            })
+            .expect("a one-to-one call");
+        app.call_cursor = Some((rows[one_to_one].chat.clone(), rows[one_to_one].id.clone()));
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::F10, egui::Modifiers::SHIFT);
+        let popup = egui::Popup::default_response_id(
+            &ctx.read_response(calls::row_id(&rows[one_to_one].chat, &rows[one_to_one].id))
+                .expect("the row is drawn"),
+        );
+        assert!(egui::Popup::is_id_open(&ctx, popup), "the row's menu");
+        assert_eq!(focused_layer(&ctx).map(|layer| layer.id), Some(popup));
+        assert_eq!(focused_label(&mut app, &ctx).as_deref(), Some("Voice call"));
+        walk_menu_to(&mut app, &ctx, "Video call");
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(!egui::Popup::is_id_open(&ctx, popup));
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        // Enter opens the row's chat at its call.
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(
+            app.picked_call,
+            Some((rows[one_to_one].chat.clone(), rows[one_to_one].id.clone()))
+        );
+        assert_eq!(app.open_chat.as_ref(), Some(&rows[one_to_one].chat));
+        assert_eq!(app.page, crate::model::Page::Calls);
+    }
+
+    /// The new-call list is reached with Down from its search field and Up
+    /// goes back; a row alone starts nothing, so Enter opens its menu, whose
+    /// Voice call rings the person and closes the list.
+    #[test]
+    fn the_new_call_list_calls_from_the_keys() {
+        use crate::ui::calls;
+        let (mut app, ctx) = calls_page("new-call");
+        let field = egui::Id::new(calls::NEW_CALL_SEARCH);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(field));
+        let list = calls::new_call_list_id();
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        let tree = tree_after(&mut app, &ctx, None);
+        let (node_of_list, active) = list_nodes(&tree, list);
+        assert_eq!(node_of_list.label(), Some("New call"));
+        let len = node_of_list.size_of_set().expect("a counted list");
+        assert!(len >= 2, "{len}");
+        let active = active.expect("the first person is current");
+        assert_eq!(active.position_in_set(), Some(0));
+        press_key(&mut app, &ctx, egui::Key::ArrowUp, egui::Modifiers::NONE);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(field));
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        let tree = tree_after(&mut app, &ctx, None);
+        let active = list_nodes(&tree, list).1.expect("the second person");
+        assert_eq!(active.position_in_set(), Some(1));
+        let (frequent, person) = app.new_call_cursor.clone().expect("a current person");
+        assert!(
+            active
+                .label()
+                .is_some_and(|label| label.starts_with(&app.display_name(&person))),
+            "{:?}",
+            active.label()
+        );
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        let popup = egui::Popup::default_response_id(
+            &ctx.read_response(calls::person_row_id(frequent, &person))
+                .expect("the row is drawn"),
+        );
+        assert!(egui::Popup::is_id_open(&ctx, popup), "the person's menu");
+        assert!(app.new_call && app.call.is_none(), "nothing rang yet");
+        assert_eq!(focused_label(&mut app, &ctx).as_deref(), Some("Voice call"));
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        render(&mut app, &ctx);
+        assert!(!app.new_call, "the list closes");
+        assert_eq!(
+            app.call.as_ref().map(|call| call.chat.as_str()),
+            Some(person.as_str()),
+            "the call goes to the person"
+        );
+    }
+
+    /// A call joined through a link has no chat to open and nobody to call
+    /// back: its row's click does nothing, and its keys say why.
+    #[test]
+    fn a_call_link_row_says_why_it_opens_nothing() {
+        use crate::ui::calls;
+        let (mut app, ctx) = calls_page("calls-link");
+        let link = app
+            .call_log
+            .iter()
+            .find(|call| call.chat == crate::model::CALL_LINK_CHAT)
+            .cloned()
+            .expect("the call link's call");
+        let list = calls::history_list_id();
+        app.call_cursor = Some((link.chat.clone(), link.id.clone()));
+        ctx.memory_mut(|memory| memory.request_focus(list));
+        render(&mut app, &ctx);
+        let open = app.open_chat.clone();
+        for (key, modifiers) in [
+            (egui::Key::Enter, egui::Modifiers::NONE),
+            (egui::Key::F10, egui::Modifiers::SHIFT),
+        ] {
+            let before = app.announcer.spoken().map(str::to_owned);
+            press_key(&mut app, &ctx, key, modifiers);
+            assert_ne!(app.announcer.spoken().map(str::to_owned), before, "{key:?}");
+            assert!(
+                said_last(&app, "Nothing to open for a call link"),
+                "{key:?}: {:?}",
+                app.announcer.spoken()
+            );
+            assert_eq!(app.picked_call, None, "{key:?}");
+            assert_eq!(app.open_chat, open, "{key:?}");
+            assert!(!egui::Popup::is_any_open(&ctx), "{key:?}: no menu");
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        }
+    }
+
+    #[test]
+    fn arrows_move_the_chat_cursor_without_opening() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let ids = visible_ids(&app);
+        let open = app.open_chat.clone().unwrap();
+        let start = ids.iter().position(|id| *id == open).unwrap();
+        let unread: Vec<u32> = app.chats.iter().map(|chat| chat.unread).collect();
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        for (key, expected) in [
+            (egui::Key::ArrowDown, start + 1),
+            (egui::Key::ArrowUp, start),
+            (egui::Key::End, ids.len() - 1),
+            (egui::Key::Home, 0),
+            (
+                egui::Key::PageDown,
+                (crate::ui::chats::page_rows(&ctx)).min(ids.len() - 1),
+            ),
+        ] {
+            press_key(&mut app, &ctx, key, egui::Modifiers::NONE);
+            assert_eq!(app.chat_cursor.as_ref(), Some(&ids[expected]), "{key:?}");
+            assert_eq!(app.open_chat.as_ref(), Some(&open), "{key:?} opened a chat");
+            assert_eq!(
+                ctx.memory(|memory| memory.focused()),
+                Some(crate::ui::chats::chats_list_id()),
+                "{key:?}: focus stays on the list"
+            );
+            let tree = tree_after(&mut app, &ctx, None);
+            let active = chat_list_nodes(&tree).1.expect("the current row is drawn");
+            assert_eq!(active.position_in_set(), Some(expected), "{key:?}");
+        }
+        assert_eq!(
+            app.chats.iter().map(|chat| chat.unread).collect::<Vec<_>>(),
+            unread,
+            "passing over a chat reads nothing"
+        );
+    }
+
+    #[test]
+    fn enter_opens_the_cursor_chat() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let ids = visible_ids(&app);
+        let open = app.open_chat.clone().unwrap();
+        let start = ids.iter().position(|id| *id == open).unwrap();
+        let target = ids[start + 1].clone();
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(app.open_chat.as_ref(), Some(&target));
+        let focused = ctx.memory(|memory| memory.focused());
+        if app.chat(&target).unwrap().can_send() {
+            assert_eq!(focused, Some(egui::Id::new("composer-text")));
+        } else {
+            assert_eq!(
+                focused,
+                Some(crate::ui::conversation::messages_list_id(&target))
+            );
+        }
+    }
+
+    /// Entered with the keyboard, a chat without a message field lands on
+    /// its message list, as Alt+Down does.
+    #[test]
+    fn enter_on_a_read_only_chat_lands_on_its_message_list() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        let channel = channel(&app);
+        app.chat_filter = crate::model::ChatFilter::Channels;
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        app.chat_cursor = Some(channel.clone());
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(app.open_chat.as_ref(), Some(&channel));
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::conversation::messages_list_id(&channel))
+        );
+    }
+
+    #[test]
+    fn chat_cursor_survives_filter_change() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        // The cursor on a chat the Groups filter hides, the open chat a
+        // direct one it hides too.
+        let open = app.open_chat.clone().unwrap();
+        assert!(!app.chat(&open).unwrap().is_group());
+        let direct = visible_ids(&app)
+            .into_iter()
+            .find(|id| *id != open && !app.chat(id).unwrap().is_group())
+            .unwrap();
+        app.chat_cursor = Some(direct);
+        app.chat_filter = crate::model::ChatFilter::Groups;
+        let tree = tree_after(&mut app, &ctx, None);
+        let active = chat_list_nodes(&tree)
+            .1
+            .expect("falls back to a shown chat");
+        assert_eq!(active.position_in_set(), Some(0), "the first group");
+        // The open chat is preferred while it is shown.
+        app.chat_filter = crate::model::ChatFilter::All;
+        let ids = visible_ids(&app);
+        app.chat_cursor = Some("gone@s.whatsapp.net".into());
+        let tree = tree_after(&mut app, &ctx, None);
+        let active = chat_list_nodes(&tree)
+            .1
+            .expect("falls back to the open chat");
+        assert_eq!(
+            active.position_in_set(),
+            ids.iter().position(|id| *id == open)
+        );
+        // The arrows move on from there.
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        let next = ids.iter().position(|id| *id == open).unwrap() + 1;
+        assert_eq!(app.chat_cursor.as_ref(), Some(&ids[next]));
+    }
+
+    /// A long list lays out only the rows on screen: the cursor moved far
+    /// away is scrolled to and only then named as the active descendant.
+    #[test]
+    fn a_far_chat_cursor_never_names_a_missing_row() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        let template = app.chats[0].clone();
+        for index in 0..300 {
+            let mut chat = template.clone();
+            chat.id = format!("4917900{index:05}@s.whatsapp.net");
+            chat.name = format!("Fixture {index:03}");
+            chat.last_activity = 1_000 + index;
+            chat.pinned = false;
+            chat.archived = false;
+            chat.locked = false;
+            app.chats.push(chat);
+        }
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        for key in [egui::Key::End, egui::Key::Home, egui::Key::End] {
+            let tree = tree_after(&mut app, &ctx, Some(key));
+            let (_, active) = chat_list_nodes(&tree);
+            let active = active.unwrap_or_else(|| panic!("{key:?}: the row is drawn"));
+            let expected = if key == egui::Key::Home {
+                0
+            } else {
+                visible_ids(&app).len() - 1
+            };
+            assert_eq!(active.position_in_set(), Some(expected), "{key:?}");
+        }
+    }
+
+    /// Pointer users never see the list's focus: no ring until the keyboard
+    /// reaches it, and then a ring around the current row only.
+    #[test]
+    fn the_chat_list_rings_only_its_current_row_and_only_after_the_keyboard() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let list = crate::ui::chats::chats_list_id();
+        let ids = visible_ids(&app);
+        assert!(
+            ids.iter().all(|id| row_rect(&ctx, id) != ring(&ctx)),
+            "no row is ringed at rest"
+        );
+        // Focus without keyboard navigation draws nothing.
+        ctx.memory_mut(|memory| memory.request_focus(list));
+        render(&mut app, &ctx);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        assert_eq!(ring(&ctx), None, "no ring without the keyboard");
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        let open = app.open_chat.clone().unwrap();
+        assert_eq!(ring(&ctx), row_rect(&ctx, &open), "the open chat's row");
+        assert!(ring(&ctx).is_some());
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        let cursor = app.chat_cursor.clone().unwrap();
+        assert_ne!(cursor, open);
+        assert_eq!(ring(&ctx), row_rect(&ctx, &cursor), "the ring follows");
+        // A click hides it again, as for any control.
+        let away = egui::pos2(900.0, 300.0);
+        frame_with(
+            &mut app,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(away),
+                egui::Event::PointerButton {
+                    pos: away,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        assert_ne!(ring(&ctx), row_rect(&ctx, &cursor));
+    }
+
+    /// Rows answer the pointer only: a click opens the chat and leaves
+    /// focus where it was, as before the list existed.
+    #[test]
+    fn a_click_on_a_chat_row_opens_it_without_focusing_the_row() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let ids = visible_ids(&app);
+        let open = app.open_chat.clone().unwrap();
+        let other = ids.iter().find(|id| **id != open).unwrap().clone();
+        let row = ctx
+            .data(|data| {
+                data.get_temp::<egui::Id>(crate::ui::chats::chat_row_id(&other).with("widget"))
+            })
+            .unwrap();
+        assert!(!ctx.read_response(row).unwrap().sense.is_focusable());
+        let at = row_rect(&ctx, &other).unwrap().center();
+        let pointer = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame_with(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(at), pointer(true), pointer(false)],
+        );
+        render(&mut app, &ctx);
+        assert_eq!(app.open_chat.as_ref(), Some(&other));
+        assert_ne!(ctx.memory(|memory| memory.focused()), Some(row));
+    }
+
+    fn chat_popup(ctx: &egui::Context, chat: &str) -> egui::Id {
+        ctx.data(|data| {
+            data.get_temp::<egui::Id>(crate::ui::chats::chat_row_id(chat).with("widget"))
+        })
+        .expect("the row is drawn")
+        .with("popup")
+    }
+
+    #[test]
+    fn shift_f10_opens_the_chat_menu_with_focus_inside() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        let cursor = app.chat_cursor.clone().unwrap();
+        let open = app.open_chat.clone();
+        press_key(&mut app, &ctx, egui::Key::F10, egui::Modifiers::SHIFT);
+        let popup = chat_popup(&ctx, &cursor);
+        assert!(egui::Popup::is_id_open(&ctx, popup));
+        assert_eq!(app.open_chat_menu, None, "asked for once");
+        assert_eq!(app.open_chat, open, "the menu opens nothing else");
+        let focused = ctx
+            .memory(|memory| memory.focused())
+            .and_then(|id| ctx.read_response(id))
+            .expect("an item has focus");
+        assert_eq!(focused.layer_id.id, popup, "focus is inside the menu");
+        // Down walks the items and stays in the menu.
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        let moved = ctx
+            .memory(|memory| memory.focused())
+            .and_then(|id| ctx.read_response(id))
+            .unwrap();
+        assert_eq!(moved.layer_id.id, popup);
+        assert_ne!(moved.id, focused.id);
+        // Escape closes it and returns to the list, on the same chat.
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(!egui::Popup::is_id_open(&ctx, popup));
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::chats::chats_list_id())
+        );
+        assert_eq!(app.chat_cursor.as_ref(), Some(&cursor));
+        assert_eq!(app.open_chat, open, "Escape in the menu closes no chat");
+    }
+
+    /// A menu asked for a chat the list no longer shows is dropped, not
+    /// opened when the chat shows again.
+    #[test]
+    fn a_chat_menu_request_for_a_hidden_chat_is_dropped() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let open = app.open_chat.clone().unwrap();
+        app.chat_filter = crate::model::ChatFilter::Groups;
+        app.open_chat_menu = Some(open.clone());
+        render(&mut app, &ctx);
+        assert_eq!(app.open_chat_menu, None);
+        app.chat_filter = crate::model::ChatFilter::All;
+        render(&mut app, &ctx);
+        assert!(!egui::Popup::is_id_open(&ctx, chat_popup(&ctx, &open)));
+    }
+
+    /// The collapsed list's avatars carry the same states as full rows: only
+    /// the open chat a selection, and no row a toggle.
+    #[test]
+    fn non_open_chat_rows_carry_no_selection_or_toggle_state() {
+        let mut app = app();
+        app.sidebar_visible = false;
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        let tree = tree_after(&mut app, &ctx, None);
+        let ids = visible_ids(&app);
+        let open = app.open_chat.clone().unwrap();
+        let open_index = ids.iter().position(|id| *id == open);
+        // The list's items, not the message list's: each hangs from one of
+        // the list's (flattened) children.
+        let (list, _) = chat_list_nodes(&tree);
+        let options: Vec<_> = tree
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.role() == egui::accesskit::Role::ListBoxOption)
+            .filter(|(id, _)| {
+                tree.nodes.iter().any(|(scope, parent)| {
+                    list.children().contains(scope) && parent.children().contains(id)
+                })
+            })
+            .collect();
+        assert!(options.len() > 1, "several avatars are drawn");
+        assert!(
+            options
+                .iter()
+                .any(|(_, node)| node.position_in_set() == open_index)
+        );
+        for (_, option) in options {
+            if option.position_in_set() == open_index {
+                assert_eq!(option.is_selected(), Some(true));
+            } else {
+                assert_eq!(option.is_selected(), None);
+            }
+            assert_eq!(option.toggled(), None);
+            // The rail follows the full rows: only the open chat says open.
+            let label = option.label().unwrap_or_default();
+            assert_eq!(
+                label.ends_with(", open"),
+                option.position_in_set() == open_index,
+                "{label}"
+            );
+        }
+    }
+
+    fn focused_menu_layer(ctx: &egui::Context) -> Option<egui::Id> {
+        ctx.memory(|memory| memory.focused())
+            .and_then(|id| ctx.read_response(id))
+            .map(|response| response.layer_id.id)
+    }
+
+    #[test]
+    fn chat_menu_submenus_work_from_the_keyboard() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        let chat = app.chat_cursor.clone().unwrap();
+        press_key(&mut app, &ctx, egui::Key::F10, egui::Modifiers::SHIFT);
+        let popup = chat_popup(&ctx, &chat);
+        walk_menu_to(&mut app, &ctx, "Notification sound");
+        let row = ctx.memory(|memory| memory.focused()).unwrap();
+        assert!(crate::ui::list_nav::is_submenu_row(&ctx, row));
+        let submenu = egui::containers::menu::SubMenu::id_from_widget_id(row);
+        // Right opens the submenu, on its first item.
+        press_key(&mut app, &ctx, egui::Key::ArrowRight, egui::Modifiers::NONE);
+        assert_eq!(focused_menu_layer(&ctx), Some(submenu));
+        assert_eq!(focused_label(&mut app, &ctx).as_deref(), Some("Default"));
+        // Down stays in it.
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        assert_eq!(focused_menu_layer(&ctx), Some(submenu));
+        assert_eq!(focused_label(&mut app, &ctx).as_deref(), Some("Pidgin"));
+        // Left closes only the submenu, back on its row.
+        press_key(&mut app, &ctx, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(row));
+        assert!(egui::Popup::is_id_open(&ctx, popup), "the menu stays open");
+        // Enter opens it too, and Escape inside closes only the submenu.
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(focused_menu_layer(&ctx), Some(submenu));
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(row));
+        assert!(egui::Popup::is_id_open(&ctx, popup), "the menu stays open");
+        // An item chosen in the submenu applies, closes the menu and returns
+        // to the list.
+        press_key(&mut app, &ctx, egui::Key::ArrowRight, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        assert_eq!(focused_label(&mut app, &ctx).as_deref(), Some("Pidgin"));
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(
+            app.chat(&chat).unwrap().notification_sound,
+            Some(crate::settings::NotificationSound::Receive)
+        );
+        assert!(!egui::Popup::is_id_open(&ctx, popup));
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::chats::chats_list_id())
+        );
+        // Escape on the menu itself still closes it.
+        press_key(&mut app, &ctx, egui::Key::F10, egui::Modifiers::SHIFT);
+        assert!(egui::Popup::is_id_open(&ctx, popup));
+        press_key(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(!egui::Popup::is_id_open(&ctx, popup));
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::chats::chats_list_id())
+        );
+    }
+
+    /// Presses `key` in the open keyboard menu `popup` until focus is back
+    /// where it started: every stop on the way is a named item of the menu,
+    /// never its unnamed background, so the walk wraps at both ends.
+    fn assert_menu_cycles(
+        app: &mut App,
+        ctx: &egui::Context,
+        popup: egui::Id,
+        key: egui::Key,
+        modifiers: egui::Modifiers,
+    ) -> Vec<String> {
+        let start = ctx.memory(|memory| memory.focused()).unwrap();
+        let mut labels = Vec::new();
+        for _ in 0..60 {
+            press_key(app, ctx, key, modifiers);
+            assert_eq!(
+                focused_menu_layer(ctx),
+                Some(popup),
+                "{key:?} {modifiers:?} stays in the menu after {labels:?}"
+            );
+            let label = focused_label(app, ctx)
+                .unwrap_or_else(|| panic!("{key:?} {modifiers:?} reached an unnamed stop"));
+            if ctx.memory(|memory| memory.focused()) == Some(start) {
+                return labels;
+            }
+            labels.push(label);
+        }
+        panic!("{key:?} {modifiers:?} never wrapped: {labels:?}");
+    }
+
+    #[test]
+    fn the_chat_menu_wraps_at_both_ends() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        let chat = app.chat_cursor.clone().unwrap();
+        press_key(&mut app, &ctx, egui::Key::F10, egui::Modifiers::SHIFT);
+        let popup = chat_popup(&ctx, &chat);
+        let first = focused_label(&mut app, &ctx).unwrap();
+        // Up from the first item reaches the last, Down from there the
+        // first again.
+        press_key(&mut app, &ctx, egui::Key::ArrowUp, egui::Modifiers::NONE);
+        assert_eq!(
+            focused_label(&mut app, &ctx).as_deref(),
+            Some("Delete chat")
+        );
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        assert_eq!(focused_label(&mut app, &ctx), Some(first.clone()));
+        // Shift+Tab and Tab do the same.
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::SHIFT);
+        assert_eq!(
+            focused_label(&mut app, &ctx).as_deref(),
+            Some("Delete chat")
+        );
+        press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        assert_eq!(focused_label(&mut app, &ctx), Some(first));
+        // A whole round in each direction, by either key, only visits items.
+        let down = assert_menu_cycles(
+            &mut app,
+            &ctx,
+            popup,
+            egui::Key::ArrowDown,
+            egui::Modifiers::NONE,
+        );
+        assert!(down.len() > 5, "{down:?}");
+        let tab = assert_menu_cycles(&mut app, &ctx, popup, egui::Key::Tab, egui::Modifiers::NONE);
+        assert_eq!(tab, down, "Tab walks as Down does");
+        let mut up = assert_menu_cycles(
+            &mut app,
+            &ctx,
+            popup,
+            egui::Key::ArrowUp,
+            egui::Modifiers::NONE,
+        );
+        up.reverse();
+        assert_eq!(up, down, "Up walks back the same way");
+        assert_menu_cycles(
+            &mut app,
+            &ctx,
+            popup,
+            egui::Key::Tab,
+            egui::Modifiers::SHIFT,
+        );
+        assert!(egui::Popup::is_id_open(&ctx, popup));
+    }
+
+    #[test]
+    fn the_message_menu_wraps_at_both_ends() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        let popup = open_menu_by_keys(&mut app, &ctx);
+        for (key, modifiers) in [
+            (egui::Key::ArrowDown, egui::Modifiers::NONE),
+            (egui::Key::ArrowUp, egui::Modifiers::NONE),
+            (egui::Key::Tab, egui::Modifiers::NONE),
+            (egui::Key::Tab, egui::Modifiers::SHIFT),
+        ] {
+            let stops = assert_menu_cycles(&mut app, &ctx, popup, key, modifiers);
+            assert!(stops.len() > 3, "{key:?}: {stops:?}");
+        }
+        assert!(egui::Popup::is_id_open(&ctx, popup));
+    }
+
+    /// Archived from the keyboard menu, far down a long list, the current
+    /// chat hands over to the open chat, far up: the list goes there, so a
+    /// reader always has a current chat.
+    #[test]
+    fn archiving_from_the_keyboard_menu_keeps_an_active_chat() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        let template = app.chats[0].clone();
+        for index in 0..300 {
+            let mut chat = template.clone();
+            chat.id = format!("4917900{index:05}@s.whatsapp.net");
+            chat.name = format!("Fixture {index:03}");
+            chat.last_activity = 1_000 + index;
+            chat.pinned = false;
+            chat.archived = false;
+            chat.locked = false;
+            app.chats.push(chat);
+        }
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        press_key(&mut app, &ctx, egui::Key::End, egui::Modifiers::NONE);
+        let archived = app.chat_cursor.clone().unwrap();
+        let open = app.open_chat.clone().unwrap();
+        assert_ne!(archived, open);
+        press_key(&mut app, &ctx, egui::Key::F10, egui::Modifiers::SHIFT);
+        walk_menu_to(&mut app, &ctx, "Archive");
+        press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert!(app.chat(&archived).unwrap().archived);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::chats::chats_list_id())
+        );
+        let ids = visible_ids(&app);
+        let mut active = None;
+        for _ in 0..2 {
+            let tree = tree_after(&mut app, &ctx, None);
+            active = chat_list_nodes(&tree).1;
+            if active.is_some() {
+                break;
+            }
+        }
+        let active = active.expect("the list names a current chat");
+        assert_eq!(
+            active.position_in_set(),
+            ids.iter().position(|id| *id == open)
+        );
+        assert_eq!(app.chat_cursor.as_ref(), Some(&open));
+    }
+
+    /// Emptied while focused (the last archived chat unarchived), the list
+    /// keeps focus and says it has no chats.
+    #[test]
+    fn emptying_the_focused_chat_list_announces_and_keeps_focus() {
+        let mut app = app();
+        app.show_archived = true;
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        let list = crate::ui::chats::chats_list_id();
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        for id in visible_ids(&app) {
+            app.actions
+                .push(crate::model::Action::SetArchived(id, false));
+        }
+        render(&mut app, &ctx);
+        assert!(visible_ids(&app).is_empty());
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(list));
+        assert!(
+            app.announcer.spoken().contains(&"No chats"),
+            "{:?}",
+            app.announcer.spoken()
+        );
+        let tree = tree_after(&mut app, &ctx, None);
+        let (node, active) = chat_list_nodes(&tree);
+        assert_eq!(node.label(), Some("Archived chats"));
+        assert_eq!(node.size_of_set(), Some(0));
+        assert!(active.is_none());
+        assert_eq!(tree.focus, list.accesskit_id());
+    }
+
+    #[test]
+    fn down_from_the_search_field_enters_the_results_and_up_returns() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        frame_with(
+            &mut app,
+            &ctx,
+            vec![key(egui::Key::K, egui::Modifiers::COMMAND)],
+        );
+        render(&mut app, &ctx);
+        frame_with(&mut app, &ctx, vec![egui::Event::Text("a".into())]);
+        render(&mut app, &ctx);
+        let ids = visible_ids(&app);
+        assert!(ids.len() > 1);
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::chats::chats_list_id())
+        );
+        let tree = tree_after(&mut app, &ctx, None);
+        let (list, active) = chat_list_nodes(&tree);
+        assert_eq!(list.label(), Some("Search results"));
+        assert_eq!(active.unwrap().position_in_set(), Some(0));
+        assert_eq!(ring(&ctx), row_rect(&ctx, &ids[0]));
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        assert_eq!(app.chat_cursor.as_ref(), Some(&ids[1]));
+        press_key(&mut app, &ctx, egui::Key::ArrowUp, egui::Modifiers::NONE);
+        press_key(&mut app, &ctx, egui::Key::ArrowUp, egui::Modifiers::NONE);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(egui::Id::new("chat-search")),
+            "Up from the first result returns to the field"
+        );
+        assert_eq!(app.search, "a", "the search stays");
+    }
+
+    /// Coming back to the window leaves a reader in the chat list there.
+    #[test]
+    fn returning_to_the_window_keeps_focus_in_the_chat_list() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        press_key(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        let cursor = app.chat_cursor.clone();
+        frame_with_window_focus(&mut app, &ctx, false);
+        frame_with_window_focus(&mut app, &ctx, true);
+        render(&mut app, &ctx);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::chats::chats_list_id())
+        );
+        assert_eq!(app.chat_cursor, cursor);
+    }
+
     /// One frame with the window focused or not, as the platform reports it.
     fn frame_with_window_focus(app: &mut App, ctx: &egui::Context, focused: bool) {
         let mut input = egui::RawInput {
@@ -9951,6 +11103,193 @@ mod tests {
                 "no button named {name}"
             );
         }
+    }
+
+    /// The nodes under `menu` with `role`, sorted by their position.
+    fn menu_nodes(
+        tree: &egui::accesskit::TreeUpdate,
+        menu: &egui::accesskit::Node,
+        role: egui::accesskit::Role,
+    ) -> Vec<egui::accesskit::Node> {
+        let mut found = Vec::new();
+        let mut stack = menu.children().to_vec();
+        while let Some(id) = stack.pop() {
+            if let Some(child) = node(tree, id) {
+                stack.extend(child.children().iter().copied());
+                if child.role() == role {
+                    found.push(child);
+                }
+            }
+        }
+        found.sort_by_key(|node| node.position_in_set());
+        found
+    }
+
+    /// Asserts that `menu` is a Menu named `label` whose menu items say
+    /// where they are in it, counting `rows` rows besides them as one stop
+    /// each, and returns its size.
+    fn assert_menu_node(
+        tree: &egui::accesskit::TreeUpdate,
+        menu: &egui::accesskit::Node,
+        label: &str,
+        rows: usize,
+    ) -> usize {
+        use egui::accesskit::Role;
+        assert_eq!(menu.role(), Role::Menu, "{label}");
+        assert_eq!(menu.label(), Some(label));
+        let size = menu.size_of_set().expect("the menu has a size");
+        let items = menu_nodes(tree, menu, Role::MenuItem);
+        assert_eq!(items.len() + rows, size, "{label}: every stop counts once");
+        for item in &items {
+            assert_eq!(item.size_of_set(), Some(size), "{:?}", item.label());
+        }
+        let mut positions: Vec<_> = items
+            .iter()
+            .map(|item| item.position_in_set().expect("a menu item has a position"))
+            .collect();
+        positions.dedup();
+        assert_eq!(
+            positions.len(),
+            items.len(),
+            "{label}: positions are unique"
+        );
+        assert!(positions.iter().all(|position| *position < size));
+        size
+    }
+
+    /// Opened from the keyboard, the message menu is a menu to a screen
+    /// reader: "Reply, menu item, 2 of 9". Its reactions are one stop, the
+    /// first, a "Reactions" toolbar whose emoji count among themselves.
+    #[test]
+    fn the_message_menu_is_a_menu_whose_items_say_where_they_are() {
+        use egui::accesskit::Role;
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        let popup = open_menu_by_keys(&mut app, &ctx);
+        let tree = tree_after(&mut app, &ctx, None);
+        let menu = node(&tree, popup.accesskit_id()).expect("the menu is in the tree");
+        let size = assert_menu_node(&tree, &menu, "Message", 1);
+        assert!(size > 4, "{size}");
+        let focused = node(&tree, tree.focus).unwrap();
+        assert_eq!(focused.role(), Role::MenuItem);
+        assert_eq!(focused.label(), Some("Reply"));
+        assert_eq!(focused.position_in_set(), Some(1), "after the reactions");
+        let rows = menu_nodes(&tree, &menu, Role::Toolbar);
+        let [row] = rows.as_slice() else {
+            panic!("one row of reactions: {rows:?}");
+        };
+        assert_eq!(row.label(), Some("Reactions"));
+        let emoji = menu_nodes(&tree, row, Role::Button);
+        assert!(emoji.len() > 2, "{emoji:?}");
+        assert_eq!(row.size_of_set(), Some(emoji.len()));
+        for (position, button) in emoji.iter().enumerate() {
+            assert_eq!(button.position_in_set(), Some(position));
+            assert_eq!(button.size_of_set(), Some(emoji.len()));
+        }
+        assert_eq!(
+            emoji.last().and_then(|button| button.label()),
+            Some("React with any emoji")
+        );
+    }
+
+    /// Opened from the keyboard, a phone number's menu is a menu named by
+    /// the number: "Message, menu item, 1 of 2".
+    #[test]
+    fn a_phone_numbers_menu_is_a_menu_named_by_the_number() {
+        use egui::accesskit::Role;
+        let mut on = app_on_attachment(Content::text(PHONE_FIXTURE));
+        on.space();
+        let link = phone_link(&on.ctx, &on.chat, "key-fixture", "tel:+15550102040", 0)
+            .expect("the number is drawn");
+        let popup = link.with("popup");
+        assert!(egui::Popup::is_id_open(&on.ctx, popup));
+        let tree = tree_after(&mut on.app, &on.ctx, None);
+        let menu = node(&tree, popup.accesskit_id()).expect("the menu is in the tree");
+        assert_eq!(assert_menu_node(&tree, &menu, "+1 (555) 010-2040", 0), 2);
+        let focused = node(&tree, tree.focus).unwrap();
+        assert_eq!(focused.role(), Role::MenuItem);
+        assert_eq!(focused.label(), Some("Message"));
+        assert_eq!(focused.position_in_set(), Some(0));
+    }
+
+    /// A voice message's speeds are a row as the reactions are: one stop of
+    /// the menu, a "Playback speed" toolbar of every speed.
+    #[test]
+    fn a_voice_message_menu_counts_its_speeds_as_one_stop() {
+        use egui::accesskit::Role;
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        // The speed row only appears for a downloaded clip.
+        let chat = app.open_chat.clone().unwrap();
+        let mut clip = media("audio/ogg; codecs=opus", 12_000, None, None);
+        clip.path = Some(std::path::PathBuf::from("demo/voice.ogg"));
+        app.conversations.get_mut(&chat).unwrap().messages = vec![message(
+            &chat,
+            "voice-speed",
+            false,
+            100,
+            Content::Audio {
+                media: clip,
+                seconds: Some(5),
+                voice_note: true,
+                waveform: demo_waveform(),
+            },
+        )];
+        let popup = open_menu_by_keys(&mut app, &ctx);
+        let tree = tree_after(&mut app, &ctx, None);
+        let menu = node(&tree, popup.accesskit_id()).expect("the menu is in the tree");
+        assert_menu_node(&tree, &menu, "Message", 2);
+        let rows = menu_nodes(&tree, &menu, Role::Toolbar);
+        let speeds = rows
+            .iter()
+            .find(|row| row.label() == Some("Playback speed"))
+            .unwrap_or_else(|| panic!("a row of speeds: {rows:?}"));
+        let pills = menu_nodes(&tree, speeds, Role::Button);
+        assert_eq!(pills.len(), crate::audio::SPEEDS.len());
+        assert_eq!(speeds.size_of_set(), Some(pills.len()));
+        for (position, pill) in pills.iter().enumerate() {
+            assert_eq!(pill.position_in_set(), Some(position));
+        }
+    }
+
+    /// The chat menu is a menu too, and a row that opens a submenu says so;
+    /// the submenu is a menu named after its row.
+    #[test]
+    fn the_chat_menu_and_its_submenus_are_menus() {
+        use egui::accesskit::{HasPopup, Role};
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        press_key(&mut app, &ctx, egui::Key::Num1, chats_shortcut());
+        let chat = app.chat_cursor.clone().unwrap();
+        press_key(&mut app, &ctx, egui::Key::F10, egui::Modifiers::SHIFT);
+        let popup = chat_popup(&ctx, &chat);
+        let tree = tree_after(&mut app, &ctx, None);
+        let menu = node(&tree, popup.accesskit_id()).expect("the menu is in the tree");
+        let size = assert_menu_node(&tree, &menu, "Chat", 0);
+        let focused = node(&tree, tree.focus).unwrap();
+        assert_eq!(focused.role(), Role::MenuItem);
+        assert_eq!(focused.position_in_set(), Some(0), "the first item");
+        assert_eq!(focused.size_of_set(), Some(size));
+        walk_menu_to(&mut app, &ctx, "Notification sound");
+        let row = ctx.memory(|memory| memory.focused()).unwrap();
+        let tree = tree_after(&mut app, &ctx, None);
+        let focused = node(&tree, tree.focus).unwrap();
+        assert_eq!(focused.role(), Role::MenuItem);
+        assert_eq!(focused.has_popup(), Some(HasPopup::Menu));
+        press_key(&mut app, &ctx, egui::Key::ArrowRight, egui::Modifiers::NONE);
+        let submenu = egui::containers::menu::SubMenu::id_from_widget_id(row);
+        assert_eq!(focused_menu_layer(&ctx), Some(submenu));
+        let tree = tree_after(&mut app, &ctx, None);
+        let menu = node(&tree, submenu.accesskit_id()).expect("the submenu is in the tree");
+        let size = assert_menu_node(&tree, &menu, "Notification sound", 0);
+        let focused = node(&tree, tree.focus).unwrap();
+        assert_eq!(focused.role(), Role::MenuItem);
+        assert_eq!(focused.position_in_set(), Some(0));
+        assert_eq!(focused.size_of_set(), Some(size));
     }
 
     /// A menu asked for in one chat and not yet drawn when the reader moves
@@ -15117,9 +16456,16 @@ mod tests {
                 "the menu has no {status}row"
             );
         }
-        assert_eq!(find("Message info").1, Role::Button);
+        // The time and ticks of our own messages are a "Message info" button
+        // of their own; the menu's row is a menu item.
+        assert!(
+            nodes
+                .iter()
+                .any(|(label, role, _)| label == "Message info" && *role == Role::MenuItem),
+            "no Message info menu item"
+        );
         let (_, role, copy) = find("Copy message ID");
-        assert_eq!(role, Role::Button);
+        assert_eq!(role, Role::MenuItem);
 
         let click = |app: &mut App, pos: egui::Pos2| {
             let press = |pressed| egui::Event::PointerButton {
@@ -15133,6 +16479,264 @@ mod tests {
         };
         click(&mut app, copy);
         assert!(app.toasts.iter().any(|toast| toast.message == "Copied"));
+    }
+
+    /// A chat row reads the marks it draws: the "@" of an unread mention as
+    /// "mentioned you", and the disappearing timer only while one is set; a
+    /// timer of 0 is off, and drawn as off (#424).
+    #[test]
+    fn a_chat_row_reads_its_mention_and_its_timer_as_drawn() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = app();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let chat = SAMPLES[1].id.to_owned();
+        let title = app.chat_title(app.chat(&chat).unwrap());
+        let row = |app: &mut App, unread: u32, timer: Option<u32>| {
+            let known = app.chats.iter_mut().find(|known| known.id == chat).unwrap();
+            known.unread = unread;
+            known.unread_mention = Some("mention".into());
+            known.ephemeral_expiration = timer;
+            render(app, &ctx);
+            accessible_nodes(app, &ctx, Vec::new())
+                .into_iter()
+                .map(|(text, _, _)| text)
+                .find(|text| text.starts_with(&title) && text.contains(" unread"))
+                .unwrap_or_default()
+        };
+        let label = row(&mut app, 2, Some(0));
+        assert!(label.contains("2 unread, mentioned you, "), "{label}");
+        assert!(!label.contains("disappearing"), "{label}");
+        let label = row(&mut app, 2, Some(86_400));
+        assert!(label.contains(", disappearing messages on"), "{label}");
+    }
+
+    /// A chat left with only a staged picture reads it as its draft, as its
+    /// row shows it (#340).
+    #[test]
+    fn a_chat_left_with_a_staged_picture_reads_it_as_its_draft() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = app();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let left = app.open_chat.clone().unwrap();
+        app.composer.clear();
+        app.stage(crate::app::Pending::Picture {
+            width: 1,
+            height: 1,
+            rgba: std::sync::Arc::new(vec![0; 4]),
+            texture: None,
+        });
+        app.actions
+            .push(crate::model::Action::OpenChat(SAMPLES[1].id.into()));
+        render(&mut app, &ctx);
+        assert_ne!(app.open_chat.as_deref(), Some(left.as_str()));
+        let title = app.chat_title(app.chat(&left).unwrap());
+        let nodes = accessible_nodes(&mut app, &ctx, Vec::new());
+        assert!(
+            nodes
+                .iter()
+                .any(|(text, _, _)| text.starts_with(&title) && text.contains(", Draft: Image, ")),
+            "the row reads the staged picture as its draft: {:?}",
+            nodes
+                .iter()
+                .filter(|(text, _, _)| text.starts_with(&title))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// A chat row says the delivery status of our own last message after its
+    /// time, as its ticks show it: in a one-to-one chat and in a group, a read
+    /// receipt hidden while ours are off as delivered (#458), and nothing for
+    /// someone else's message, a draft or typing, which draw no ticks.
+    #[test]
+    fn a_chat_row_reads_the_ticks_of_our_last_message_as_drawn() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = app();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        // Sets the chat's last message and returns its row's label, found by
+        // how it starts, and the time the row shows.
+        fn row(
+            app: &mut App,
+            ctx: &egui::Context,
+            chat: &str,
+            from_me: bool,
+            status: Delivery,
+            start: &str,
+        ) -> (String, String) {
+            let locale = app.locale;
+            let known = app.chats.iter_mut().find(|known| known.id == chat).unwrap();
+            let last = known.last.as_mut().unwrap();
+            last.from_me = from_me;
+            last.status = status;
+            let stamp = crate::util::chat_stamp(locale, known.last_activity);
+            let label = accessible_nodes(app, ctx, Vec::new())
+                .into_iter()
+                .map(|(text, _, _)| text)
+                .find(|text| text.starts_with(start) && text.contains(&format!(", {stamp}")))
+                .unwrap_or_else(|| panic!("no row starts with {start:?}"));
+            (label, stamp)
+        }
+        let ada = SAMPLES[0].id;
+        let family = SAMPLES[4].id;
+        for (status, word) in [
+            (Delivery::Read, "read"),
+            (Delivery::Delivered, "delivered"),
+            (Delivery::Sent, "sent"),
+        ] {
+            for (chat, start) in [(ada, "Ada Lovelace, You: "), (family, "Family, You: ")] {
+                let (label, stamp) = row(&mut app, &ctx, chat, true, status, start);
+                assert!(label.contains(&format!(", {stamp}, {word}")), "{label}");
+            }
+        }
+        // Read receipts off: a one-to-one chat draws delivered, a group read.
+        app.account_receipts_off = true;
+        let (label, stamp) = row(
+            &mut app,
+            &ctx,
+            ada,
+            true,
+            Delivery::Read,
+            "Ada Lovelace, You: ",
+        );
+        assert!(label.contains(&format!(", {stamp}, delivered")), "{label}");
+        assert!(!label.contains(", read"), "{label}");
+        let (label, stamp) = row(
+            &mut app,
+            &ctx,
+            family,
+            true,
+            Delivery::Read,
+            "Family, You: ",
+        );
+        assert!(label.contains(&format!(", {stamp}, read")), "{label}");
+        app.account_receipts_off = false;
+        // Someone else's message: no ticks drawn, none read.
+        let grace = SAMPLES[2].id;
+        let (label, stamp) = row(
+            &mut app,
+            &ctx,
+            grace,
+            false,
+            Delivery::Read,
+            "Grace Hopper, ",
+        );
+        assert!(!label.contains(&format!(", {stamp}, read")), "{label}");
+        let known = app
+            .chats
+            .iter_mut()
+            .find(|known| known.id == family)
+            .unwrap();
+        let last = known.last.as_mut().unwrap();
+        last.sender = "999999999999@s.whatsapp.net".to_owned();
+        last.sender_name = Some("Sara Quinn".to_owned());
+        let (label, stamp) = row(
+            &mut app,
+            &ctx,
+            family,
+            false,
+            Delivery::Read,
+            "Family, Sara Quinn: ",
+        );
+        assert!(!label.contains(&format!(", {stamp}, read")), "{label}");
+        // A draft or typing takes the last line's place, and its ticks.
+        let katherine = SAMPLES[3].id;
+        app.drafts
+            .insert(katherine.into(), "Bring the spare HDMI adapter".into());
+        let (label, stamp) = row(
+            &mut app,
+            &ctx,
+            katherine,
+            true,
+            Delivery::Read,
+            "Katherine Johnson, Draft: Bring the spare HDMI adapter",
+        );
+        assert!(!label.contains(&format!(", {stamp}, read")), "{label}");
+        let (label, stamp) = row(
+            &mut app,
+            &ctx,
+            SAMPLES[1].id,
+            true,
+            Delivery::Read,
+            "Rust Berlin, 14 unread, mentioned you, Mira is typing…",
+        );
+        assert!(!label.contains(&format!(", {stamp}, read")), "{label}");
+    }
+
+    /// The chat list reads each row whole: name, unread count, last message,
+    /// time and states, with no sender prefix in one-to-one chats.
+    #[test]
+    fn chat_rows_are_read_whole() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = app();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let nodes = accessible_nodes(&mut app, &ctx, Vec::new());
+        // The time follows the clock and time zone, so labels match around it.
+        let has = |start: &str, end: &str| {
+            nodes
+                .iter()
+                .any(|(text, _, _)| text.starts_with(start) && text.ends_with(end))
+        };
+        assert!(
+            has(
+                "Ada Lovelace, You: btw I made my own Spotify app from scratch! https://spotifast.rocks/, ",
+                ", pinned, favorite, open"
+            ),
+            "your last message in a one-to-one chat starts with You:"
+        );
+        assert!(
+            has(
+                "Rust Berlin, 14 unread, mentioned you, Mira is typing…, ",
+                ", muted"
+            ),
+            "a group row names who is typing, after the mention it draws"
+        );
+        assert!(
+            nodes
+                .iter()
+                .all(|(text, _, _)| !text.contains("unread messages")),
+            "the old count wording is gone"
+        );
+        // The open chat's row; no other chat says open. Beside the list the
+        // rail shows no avatars: they fill it only while the list is hidden.
+        let open: Vec<_> = nodes
+            .iter()
+            .filter(|(text, _, _)| text.ends_with(", open"))
+            .collect();
+        assert_eq!(open.len(), 1, "the open chat's row: {open:?}");
+        assert!(
+            open.iter()
+                .all(|(text, _, _)| text.starts_with("Ada Lovelace, ")),
+            "only the open chat says open: {open:?}"
+        );
+        // A group row reads its sender in full, though the row paints the
+        // first word of the name.
+        let family = SAMPLES[4].id;
+        let last = app
+            .chats
+            .iter_mut()
+            .find(|chat| chat.id == family)
+            .and_then(|chat| chat.last.as_mut())
+            .expect("the Family chat has a last message");
+        last.from_me = false;
+        last.sender = "999999999999@s.whatsapp.net".to_owned();
+        last.sender_name = Some("The Annoying Person".to_owned());
+        let nodes = accessible_nodes(&mut app, &ctx, Vec::new());
+        assert!(
+            nodes.iter().any(|(text, _, _)| text
+                .starts_with("Family, The Annoying Person: Bring the good bread")),
+            "the sender is read in full: {:?}",
+            nodes
+                .iter()
+                .filter(|(text, _, _)| text.starts_with("Family"))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -15168,6 +16772,18 @@ mod tests {
         assert!(app.conversations[app.open_chat.as_ref().unwrap()].fetching_phone);
     }
 
+    /// The names of the open menu's rows, top to bottom. The bubble's own
+    /// controls are buttons, not menu items.
+    fn menu_labels(app: &mut App, ctx: &egui::Context) -> Vec<String> {
+        let mut rows: Vec<(String, egui::Pos2)> = accessible_nodes(app, ctx, Vec::new())
+            .into_iter()
+            .filter(|(_, role, _)| *role == egui::accesskit::Role::MenuItem)
+            .map(|(label, _, pos)| (label, pos))
+            .collect();
+        rows.sort_by(|a, b| a.1.y.total_cmp(&b.1.y));
+        rows.into_iter().map(|(label, _)| label).collect()
+    }
+
     /// Links and poll options are the item cursor's now: the message menu
     /// no longer lists them.
     #[test]
@@ -15182,24 +16798,8 @@ mod tests {
                 apply_flags(&mut app, Some(page));
             }
             app.attach(&ctx);
-            let popup = open_menu_by_keys(&mut app, &ctx);
-            // The menu's rows, not the bubble's own buttons: what the menu's
-            // layer drew.
-            let tree = tree_after(&mut app, &ctx, None);
-            let drawn: Vec<egui::Id> = ctx.viewport(|viewport| {
-                viewport
-                    .prev_pass
-                    .widgets
-                    .layers()
-                    .filter(|(layer, _)| layer.id == popup)
-                    .flat_map(|(_, widgets)| widgets.iter().map(|widget| widget.id))
-                    .collect()
-            });
-            let labels: Vec<String> = drawn
-                .into_iter()
-                .filter_map(|id| node(&tree, id.accesskit_id()))
-                .filter_map(|node| node.label().map(str::to_owned))
-                .collect();
+            open_menu_by_keys(&mut app, &ctx);
+            let labels = menu_labels(&mut app, &ctx);
             // Reply, as a poll cannot be selected or forwarded.
             assert!(labels.iter().any(|label| label == "Reply"), "{labels:?}");
             assert!(
@@ -15235,6 +16835,145 @@ mod tests {
         walk_menu_to(app, ctx, label);
         press_key(app, ctx, egui::Key::Enter, egui::Modifiers::NONE);
         render(app, ctx);
+    }
+
+    /// The rows of `message`'s menu in the open chat, opened by a right-click
+    /// on its bubble, then by the keys; each menu is closed again after.
+    fn menu_rows_by_pointer_and_keys(
+        app: &mut App,
+        ctx: &egui::Context,
+        message: &str,
+    ) -> (Vec<String>, Vec<String>) {
+        let chat = app.open_chat.clone().unwrap();
+        render(app, ctx);
+        let bubble = crate::ui::conversation::bubble_id(&chat, message);
+        let rect = ctx
+            .data(|data| data.get_temp::<egui::Rect>(bubble.with("rect")))
+            .expect("the bubble is drawn");
+        let at = rect.center();
+        let press = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame_with(
+            app,
+            ctx,
+            vec![egui::Event::PointerMoved(at), press(true), press(false)],
+        );
+        render(app, ctx);
+        assert!(
+            egui::Popup::is_id_open(ctx, bubble.with("popup")),
+            "right-click"
+        );
+        let pointer = menu_labels(app, ctx);
+        egui::Popup::close_id(ctx, bubble.with("popup"));
+        render(app, ctx);
+        app.message_cursor.insert(chat.clone(), message.to_owned());
+        focus_messages(app, ctx);
+        press_key(app, ctx, egui::Key::F10, egui::Modifiers::SHIFT);
+        assert!(
+            egui::Popup::is_id_open(ctx, bubble.with("popup")),
+            "Shift+F10"
+        );
+        let keys = menu_labels(app, ctx);
+        press_key(app, ctx, egui::Key::Escape, egui::Modifiers::NONE);
+        // A right-click after the keys' menu closed is a pointer menu again:
+        // the keys' rows do not linger.
+        frame_with(
+            app,
+            ctx,
+            vec![egui::Event::PointerMoved(at), press(true), press(false)],
+        );
+        render(app, ctx);
+        assert!(
+            egui::Popup::is_id_open(ctx, bubble.with("popup")),
+            "right-click again"
+        );
+        assert_eq!(
+            menu_labels(app, ctx),
+            pointer,
+            "the right-click after the keys"
+        );
+        egui::Popup::close_id(ctx, bubble.with("popup"));
+        render(app, ctx);
+        (pointer, keys)
+    }
+
+    /// A right-click menu has upstream's rows only, in upstream's order and
+    /// width; the keys' menu adds a card's buttons, the quote and the rest.
+    #[test]
+    fn a_right_click_menu_keeps_its_rows_and_the_keys_menu_adds_the_rest() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        // A card with buttons.
+        let mut app = app();
+        apply_flags(&mut app, Some("interactive-actions"));
+        app.attach(&ctx);
+        let (pointer, keys) = menu_rows_by_pointer_and_keys(&mut app, &ctx, "interactive-card");
+        let extra = [
+            "Tell me more",
+            "Choose a session",
+            "Copy invitation code",
+            "Open registration form, unavailable: Open this option in WhatsApp Web or on your phone",
+        ];
+        for label in extra {
+            assert!(
+                !pointer.iter().any(|row| row == label),
+                "{label}: {pointer:?}"
+            );
+            assert!(keys.iter().any(|row| row == label), "{label}: {keys:?}");
+        }
+        let without: Vec<&String> = keys
+            .iter()
+            .filter(|row| !extra.contains(&row.as_str()))
+            .collect();
+        assert_eq!(
+            without,
+            pointer.iter().collect::<Vec<_>>(),
+            "same rows, same order"
+        );
+        // A reply with a link, and a poll: the right-click rows are upstream's.
+        let (mut on, _) = on_a_reply();
+        on.ctx.enable_accesskit();
+        if let Some(message) = on
+            .app
+            .conversations
+            .get_mut(&on.chat)
+            .unwrap()
+            .message_mut("key-fixture")
+        {
+            message.content = Content::text("Agreed, see https://example.com/a");
+        }
+        let (pointer, keys) = menu_rows_by_pointer_and_keys(&mut on.app, &on.ctx, "key-fixture");
+        assert_eq!(
+            pointer,
+            [
+                "Reply",
+                "Star",
+                "Pin message",
+                "Forward",
+                "Select",
+                "Copy text",
+                "Delete for me",
+                "Reload earlier messages",
+                "Copy message ID"
+            ],
+            "upstream's rows for a received text"
+        );
+        let mut expected: Vec<&str> = pointer.iter().map(String::as_str).collect();
+        expected.insert(5, "Go to replied message");
+        assert_eq!(keys, expected);
+        let mut polls = super::tests::app();
+        poll_sample(&mut polls, true, false);
+        polls.attach(&ctx);
+        let (pointer, keys) = menu_rows_by_pointer_and_keys(&mut polls, &ctx, "poll-demo");
+        assert_eq!(pointer, keys, "a poll's options are the item cursor's");
+        assert!(
+            !pointer.iter().any(|row| row.starts_with("Vote")),
+            "{pointer:?}"
+        );
     }
 
     /// "Go to replied message" goes where clicking the quote goes, and
@@ -15553,6 +17292,19 @@ mod tests {
         );
     }
 
+    /// Opens the interactive card's menu from the keys, where its buttons
+    /// are entries.
+    fn open_card_menu_by_keys(app: &mut App, ctx: &egui::Context) {
+        let chat = app.open_chat.clone().unwrap();
+        render(app, ctx);
+        app.message_cursor
+            .insert(chat.clone(), "interactive-card".to_owned());
+        focus_messages(app, ctx);
+        press_key(app, ctx, egui::Key::F10, egui::Modifiers::SHIFT);
+        let popup = crate::ui::conversation::bubble_id(&chat, "interactive-card").with("popup");
+        assert!(egui::Popup::is_id_open(ctx, popup));
+    }
+
     /// Every button of an interactive card is an entry of the menu the keys
     /// open: usable ones act as a click does, unavailable ones do nothing.
     /// The menu opened otherwise, as with the pointer, is as it was.
@@ -15575,6 +17327,8 @@ mod tests {
         };
         let (mut app, ctx) = start();
         let before = accessible_nodes(&mut app, &ctx, Vec::new());
+        // Opened with no keyboard navigation before it, as with the pointer.
+        ctx.data_mut(|data| data.insert_temp(crate::theme::keyboard_focus_id(), false));
         app.open_message_menu = message_menu(&app, "interactive-card");
         render(&mut app, &ctx);
         let after = accessible_nodes(&mut app, &ctx, Vec::new());
@@ -15587,9 +17341,7 @@ mod tests {
         }
         let (mut app, ctx) = start();
         let before = accessible_nodes(&mut app, &ctx, Vec::new());
-        ctx.data_mut(|data| data.insert_temp(crate::theme::keyboard_focus_id(), true));
-        app.open_message_menu = message_menu(&app, "interactive-card");
-        render(&mut app, &ctx);
+        open_card_menu_by_keys(&mut app, &ctx);
         let after = accessible_nodes(&mut app, &ctx, Vec::new());
         // The card's own rows carry the same names, so each name appears once
         // more with the menu open.
@@ -15623,9 +17375,12 @@ mod tests {
             .nodes
             .iter()
             .filter(|(_, node)| {
-                node.role() == egui::accesskit::Role::Button
-                    && (node.label() == Some(unavailable)
-                        || node.label() == Some("Open registration form"))
+                // The card's row is a button, the menu's entry a menu item.
+                matches!(
+                    node.role(),
+                    egui::accesskit::Role::Button | egui::accesskit::Role::MenuItem
+                ) && (node.label() == Some(unavailable)
+                    || node.label() == Some("Open registration form"))
             })
             .map(|(_, node)| (node.is_disabled(), node.label() == Some(unavailable)))
             .collect();
@@ -20994,6 +22749,7 @@ mod tests {
                 Stop::Favorites,
                 Stop::Groups,
                 Stop::Channels,
+                Stop::ChatList,
             ];
             assert_eq!(
                 crate::ui::focus::stops(&ctx)
@@ -21035,22 +22791,14 @@ mod tests {
                     );
                 }
             }
-            // Pointer/accessibility focus on a chat row must not trap Tab
-            // within the list. Both directions rejoin the primary cycle.
+            // Chat rows take no focus at all: the list is the one stop, and
+            // its arrows walk the rows.
             let row = ctx
                 .data(|data| {
                     data.get_temp::<egui::Id>(crate::ui::chats::chat_row_id(&direct).with("widget"))
                 })
                 .unwrap();
-            assert!(ctx.read_response(row).unwrap().sense.is_focusable());
-            for (modifiers, expected_stop) in [
-                (egui::Modifiers::NONE, Stop::Composer),
-                (egui::Modifiers::SHIFT, Stop::Channels),
-            ] {
-                ctx.memory_mut(|memory| memory.request_focus(row));
-                frame_sized(&mut app, &ctx, 780.0, vec![key(egui::Key::Tab, modifiers)]);
-                assert_eq!(focused_stop(&ctx), Some(expected_stop));
-            }
+            assert!(!ctx.read_response(row).unwrap().sense.is_focusable());
         }
     }
 
@@ -21102,7 +22850,8 @@ mod tests {
                         Stop::Locked,
                         Stop::Settings,
                         Stop::Profile,
-                        Stop::Sidebar
+                        Stop::Sidebar,
+                        Stop::ChatList
                     ]
                 );
             }
@@ -21322,59 +23071,74 @@ mod tests {
         assert_eq!(ctx.memory(|memory| memory.focused()), id);
     }
 
-    /// egui does not scroll to focus by itself; Tab must not lead the focus
-    /// out of sight in a long page.
+    /// egui does not scroll to focus by itself, and the chat list lays out
+    /// only the rows it shows: Tab reaches the list, and its arrows bring a
+    /// chat that was out of view into view, fully, with the ring around it.
     #[test]
-    fn tab_scrolls_the_focused_control_into_view() {
-        let mut app = app();
-        apply_flags(&mut app, Some("settings"));
-        let ctx = egui::Context::default();
-        app.attach(&ctx);
-        let height = 420.0;
-        for _ in 0..3 {
-            frame_sized(&mut app, &ctx, height, Vec::new());
-        }
-        // The chat list only lays out rows it shows.
-        let row = |ctx: &egui::Context, id: &str| {
-            ctx.data(|data| data.get_temp::<egui::Rect>(crate::ui::chats::chat_row_id(id)))
-        };
-        let ids: Vec<String> = app.chats.iter().map(|chat| chat.id.clone()).collect();
-        let hidden: Vec<&String> = ids
-            .iter()
-            .filter(|id| row(&ctx, id).is_none_or(|rect| rect.top() >= height))
-            .collect();
-        assert!(
-            !hidden.is_empty(),
-            "the window is short enough to hide rows"
-        );
-        let mut reached_hidden = false;
-        for _ in 0..30 {
-            frame_sized(&mut app, &ctx, height, tab());
-            // egui moves focus at the end of the Tab frame; the next frame
-            // scrolls, and egui asks for the frames that show the result.
+    fn the_keyboard_reaches_chats_out_of_view() {
+        for (flags, height, cell) in [("settings", 420.0, false), ("settings,rail", 300.0, true)] {
+            let mut app = app();
+            apply_flags(&mut app, Some(flags));
+            let ctx = egui::Context::default();
+            app.attach(&ctx);
             for _ in 0..3 {
                 frame_sized(&mut app, &ctx, height, Vec::new());
             }
-            let Some(focused) = ctx
-                .memory(|memory| memory.focused())
-                .and_then(|id| ctx.read_response(id))
-            else {
-                continue;
+            // The chat list only lays out rows it shows.
+            let row = |ctx: &egui::Context, id: &str| {
+                ctx.data(|data| {
+                    data.get_temp::<egui::Rect>(if cell {
+                        crate::ui::chats::compact_chat_id(id)
+                    } else {
+                        crate::ui::chats::chat_row_id(id)
+                    })
+                })
             };
-            assert_eq!(
-                focused.interact_rect, focused.rect,
-                "the focused control is fully visible"
+            let ids: Vec<String> = app
+                .visible_chats()
+                .into_iter()
+                .map(|chat| chat.id.clone())
+                .collect();
+            let last = ids.last().unwrap().clone();
+            assert!(
+                row(&ctx, &last).is_none_or(|rect| rect.bottom() > height),
+                "{flags}: the window is short enough to hide the last chat"
             );
-            reached_hidden |= hidden
-                .iter()
-                .any(|id| row(&ctx, id).is_some_and(|rect| rect == focused.rect));
+            let list = crate::ui::chats::chats_list_id();
+            let mut reached = false;
+            for _ in 0..60 {
+                frame_sized(&mut app, &ctx, height, tab());
+                frame_sized(&mut app, &ctx, height, Vec::new());
+                if ctx.memory(|memory| memory.focused()) == Some(list) {
+                    reached = true;
+                    break;
+                }
+            }
+            assert!(reached, "{flags}: Tab reaches the chat list");
+            frame_sized(
+                &mut app,
+                &ctx,
+                height,
+                vec![key(egui::Key::End, egui::Modifiers::NONE)],
+            );
+            for _ in 0..3 {
+                frame_sized(&mut app, &ctx, height, Vec::new());
+            }
+            assert_eq!(app.chat_cursor.as_ref(), Some(&last), "{flags}");
+            let rect = row(&ctx, &last).expect("the last chat is laid out");
+            assert!(
+                rect.bottom() <= height + 0.5,
+                "{flags}: the last chat is in view: {rect:?}"
+            );
+            assert_eq!(ring(&ctx), Some(rect), "{flags}: and ringed");
         }
-        assert!(reached_hidden, "Tab reached chats that were out of view");
     }
 
     /// The same with the list hidden, at the window's least height: the
     /// chats' avatars scroll between the rail's groups, and the macOS layout,
     /// which starts the rail under the traffic lights, leaves them least.
+    /// Tab reaches the avatars' list, and End brings its last chat fully into
+    /// view inside the window, with the ring around it.
     #[test]
     fn tab_scrolls_a_focused_collapsed_avatar_into_view() {
         for macos in [false, true] {
@@ -21393,51 +23157,45 @@ mod tests {
             let avatar = |ctx: &egui::Context, id: &str| {
                 ctx.data(|data| data.get_temp::<egui::Rect>(crate::ui::chats::compact_chat_id(id)))
             };
-            let ids: Vec<String> = app.chats.iter().map(|chat| chat.id.clone()).collect();
-            let hidden: Vec<&String> = ids
-                .iter()
-                .filter(|id| avatar(&ctx, id).is_none_or(|rect| rect.top() >= height))
+            let ids: Vec<String> = app
+                .visible_chats()
+                .into_iter()
+                .map(|chat| chat.id.clone())
                 .collect();
+            let last = ids.last().unwrap().clone();
             assert!(
-                !hidden.is_empty(),
+                avatar(&ctx, &last).is_none_or(|rect| rect.top() >= height),
                 "{macos}: the window is short enough to hide avatars"
             );
-            let mut reached_hidden = false;
-            for _ in 0..40 {
+            let list = crate::ui::chats::chats_list_id();
+            let mut reached = false;
+            for _ in 0..60 {
                 frame_sized(&mut app, &ctx, height, tab());
                 for _ in 0..3 {
                     frame_sized(&mut app, &ctx, height, Vec::new());
                 }
-                let Some(focused) = ctx
-                    .memory(|memory| memory.focused())
-                    .and_then(|id| ctx.read_response(id))
-                else {
-                    continue;
-                };
-                // Settings has its own scrolling; only the rail is under test.
-                if !ids
-                    .iter()
-                    .any(|id| avatar(&ctx, id).is_some_and(|rect| rect == focused.rect))
-                {
-                    continue;
+                if ctx.memory(|memory| memory.focused()) == Some(list) {
+                    reached = true;
+                    break;
                 }
-                assert_eq!(
-                    focused.interact_rect, focused.rect,
-                    "{macos}: the focused avatar is fully visible"
-                );
-                assert!(
-                    focused.rect.bottom() <= height,
-                    "{macos}: inside the window: {:?}",
-                    focused.rect
-                );
-                reached_hidden |= hidden
-                    .iter()
-                    .any(|id| avatar(&ctx, id).is_some_and(|rect| rect == focused.rect));
             }
-            assert!(
-                reached_hidden,
-                "{macos}: Tab reached avatars that were out of view"
+            assert!(reached, "{macos}: Tab reaches the avatars' list");
+            frame_sized(
+                &mut app,
+                &ctx,
+                height,
+                vec![key(egui::Key::End, egui::Modifiers::NONE)],
             );
+            for _ in 0..3 {
+                frame_sized(&mut app, &ctx, height, Vec::new());
+            }
+            assert_eq!(app.chat_cursor.as_ref(), Some(&last), "{macos}");
+            let rect = avatar(&ctx, &last).expect("the last chat is laid out");
+            assert!(
+                rect.top() >= 0.0 && rect.bottom() <= height + 0.5,
+                "{macos}: the last avatar is inside the window: {rect:?}"
+            );
+            assert_eq!(ring(&ctx), Some(rect), "{macos}: and ringed");
         }
     }
 

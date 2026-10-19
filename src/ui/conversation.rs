@@ -3382,7 +3382,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat, under: f32) {
                         // Built only while a screen reader is attached; the
                         // probe returns None when AccessKit is off, so idle
                         // frames pay nothing for the label.
-                        if ui.ctx().accesskit_node_builder(row.inner, |_| ()).is_some() {
+                        if crate::a11y::screen_reader_active(ui.ctx(), row.inner) {
                             let sender = if message.from_me {
                                 crate::i18n::gettext(view.locale, "You").into_owned()
                             } else {
@@ -3514,7 +3514,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat, under: f32) {
                                 row_of(&starts, index),
                                 total,
                                 row.response.rect,
-                                None,
+                                false,
                             );
                         }
                         // Laid out this pass, so its node is in this pass's
@@ -4737,6 +4737,7 @@ fn speed_menu_row(
         |ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             ui.add_space(6.0);
+            let mut pills = Vec::new();
             for option in crate::audio::SPEEDS {
                 let selected = option == speed;
                 let response = speed_pill(
@@ -4747,6 +4748,7 @@ fn speed_menu_row(
                     selected,
                     preparing && selected,
                 );
+                pills.push(response.id);
                 ui.ctx().data_mut(|data| {
                     data.insert_temp(
                         speed_button_id(&view.chat.id, &message.id, option),
@@ -4758,6 +4760,12 @@ fn speed_menu_row(
                     ui.close();
                 }
             }
+            // One stop in the menu's Up and Down, as the reactions are.
+            super::list_nav::menu_row(
+                ui,
+                &crate::i18n::gettext(view.locale, "Playback speed"),
+                &pills,
+            );
         },
     );
 }
@@ -5075,7 +5083,15 @@ fn bubble_frame(
     let keyboard_clicked =
         bubble.clicked() && bubble.has_focus() && !ui.input(|input| input.pointer.any_click());
     let popup_id = bubble_id.with("popup");
-    let was_open = egui::Popup::is_id_open(ui.ctx(), popup_id);
+    if force_menu {
+        // Opened once: from here on the menu closes as any menu does.
+        actions.push(Action::MessageMenuOpened);
+    }
+    // Opened by the message list's keys: focus goes into the menu, stays in
+    // it, and returns to the list when it closes.
+    let key_menu = super::list_nav::KeyMenu::begin(ui.ctx(), popup_id, force_menu, reacting)
+        .menu(crate::i18n::gettext(view.locale, "Message"));
+    let was_open = key_menu.was_open();
     // A menu opened without the pointer stays beside its message for as
     // long as it is open, not only in the frame that opened it: the
     // pointer-anchored placement has no position to go to.
@@ -5088,17 +5104,10 @@ fn bubble_frame(
                 .ctx()
                 .data(|data| data.get_temp::<bool>(at_message_id))
                 .unwrap_or(false));
-    // Opened by the message list's keys: focus goes into the menu, stays in
-    // it, and returns to the list when it closes.
-    if force_menu {
-        // Opened once: from here on the menu closes as any menu does.
-        actions.push(Action::MessageMenuOpened);
-    }
-    let key_menu = KeyMenu::begin(ui.ctx(), popup_id, force_menu, reacting);
     // Opened from the keys, the menu also lists what only a click reaches
     // in the bubble (`inner_entries`), and is wide enough for it. A menu
     // opened with the pointer is as it was.
-    let keys_menu = key_menu.state.is_some();
+    let keys_menu = key_menu.from_keys();
     ui.ctx()
         .data_mut(|data| data.insert_temp(keys_menu_id(popup_id), keys_menu));
     let width = if keys_menu {
@@ -6214,10 +6223,12 @@ fn context_menu(
         Layout::left_to_right(Align::Center),
         |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
+            let mut buttons = Vec::new();
             for emoji in quick_reactions(message, view.reaction_emoji) {
                 let chosen = mine == Some(emoji);
                 let line = widgets::line(ui, emoji, theme::regular(20.0), palette.text, 40.0, 1);
                 let (rect, response) = ui.allocate_exact_size(Vec2::splat(34.0), Sense::click());
+                buttons.push(response.id);
                 // Screen readers speak the emoji's name.
                 response.widget_info(|| {
                     egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), emoji)
@@ -6253,6 +6264,14 @@ fn context_menu(
                 }
             }
             let (rect, response) = ui.allocate_exact_size(Vec2::splat(34.0), Sense::click());
+            buttons.push(response.id);
+            // One stop in the menu's Up and Down, walked with Left and Right,
+            // that a screen reader names before the emoji.
+            super::list_nav::menu_row(
+                ui,
+                &crate::i18n::gettext(view.locale, "Reactions"),
+                &buttons,
+            );
             // The tooltip doubles as the screen reader's label.
             let more = crate::i18n::gettext(view.locale, "React with any emoji").into_owned();
             response.widget_info(|| {
@@ -6715,127 +6734,6 @@ pub(crate) fn menu_card_id(chat: &str, message: &str) -> egui::Id {
 /// Where the message menu records its first item for this pass.
 fn menu_first_item_id(chat: &str, message: &str) -> egui::Id {
     bubble_id(chat, message).with("menu-first-item")
-}
-
-/// A popup menu the message list's keys can open: the message menu, or a
-/// phone number's menu. Opened from the keys, focus goes to its first item,
-/// Tab, Up and Down stay among its items, focus leaving closes it, and
-/// Escape or a chosen item returns focus to the list. A menu opened with the
-/// pointer is left as it was.
-///
-/// [`KeyMenu::begin`] runs before the popup is shown, [`KeyMenu::finish`]
-/// after it.
-struct KeyMenu {
-    popup: egui::Id,
-    pending: egui::Id,
-    /// Some(true) while the first item is still to be focused, Some(false)
-    /// once it was; None for a menu the keys did not open.
-    state: Option<bool>,
-    was_open: bool,
-}
-
-impl KeyMenu {
-    /// `requested` is true in the pass the list asks for the menu: it then
-    /// opens once, and from there on closes as any menu does. `hold` keeps
-    /// focus on a layer beside the menu, such as the reaction picker.
-    fn begin(ctx: &egui::Context, popup: egui::Id, requested: bool, hold: bool) -> Self {
-        let pending = popup.with("from-keys");
-        let was_open = egui::Popup::is_id_open(ctx, popup);
-        // Only after keyboard navigation: a demo page that opens the menu
-        // moves no focus.
-        let keyboard = ctx.data(|data| {
-            data.get_temp::<bool>(theme::keyboard_focus_id())
-                .unwrap_or(false)
-        });
-        if requested && keyboard {
-            ctx.data_mut(|data| data.insert_temp(pending, true));
-        }
-        let state = ctx.data(|data| data.get_temp::<bool>(pending));
-        if state == Some(false) && was_open && !hold && Self::focus_in(ctx, popup) == Some(true) {
-            // Up and Down walk the items in order and wrap, as Tab does, as
-            // in any desktop menu. egui's own arrow moves go to the nearest
-            // widget on screen, which can be one under the menu.
-            let step = ctx.input_mut(|input| {
-                if super::keys::take_plain(input, egui::Key::ArrowDown) {
-                    Some(egui::FocusDirection::Next)
-                } else if super::keys::take_plain(input, egui::Key::ArrowUp) {
-                    Some(egui::FocusDirection::Previous)
-                } else {
-                    None
-                }
-            });
-            if let Some(step) = step {
-                ctx.memory_mut(|memory| memory.move_focus(step));
-            }
-        }
-        Self {
-            popup,
-            pending,
-            state,
-            was_open,
-        }
-    }
-
-    /// Whether keyboard focus is on one of the popup's items (true), on a
-    /// widget elsewhere (false), or on nothing drawn (None, as between two
-    /// items while Tab moves on).
-    fn focus_in(ctx: &egui::Context, popup: egui::Id) -> Option<bool> {
-        ctx.memory(|memory| memory.focused())
-            .and_then(|id| ctx.read_response(id))
-            .map(|response| response.layer_id.id == popup)
-    }
-
-    /// After the popup was shown on `layer` (None when it was not drawn),
-    /// with `first` its first item drawn in this pass. Focus returns to
-    /// `list` when the menu closes. Returns whether the menu is open now.
-    fn finish(
-        self,
-        ctx: &egui::Context,
-        layer: Option<egui::LayerId>,
-        hold: bool,
-        first: Option<egui::Id>,
-        list: egui::Id,
-    ) -> bool {
-        let open = egui::Popup::is_id_open(ctx, self.popup);
-        let Some(focus_pending) = self.state else {
-            return open;
-        };
-        if open && !focus_pending && !hold && Self::focus_in(ctx, self.popup) == Some(false) {
-            // A shortcut (Ctrl+L, Ctrl+K, Alt+2) took focus out of the menu:
-            // it closes, as a desktop menu does when focus leaves, rather
-            // than staying open unseen and holding on to the arrows, Tab and
-            // the next Escape. Focus stays where the shortcut put it.
-            egui::Popup::close_id(ctx, self.popup);
-            ctx.data_mut(|data| data.remove::<bool>(self.pending));
-            return false;
-        }
-        if !open {
-            ctx.data_mut(|data| data.remove::<bool>(self.pending));
-            // Closed in this pass by Escape or a chosen item: back to the
-            // message list, drawn earlier in this pass. A click elsewhere
-            // keeps the focus it gave. A menu that went away unseen, its
-            // message not drawn (another chat, Settings), returns nothing:
-            // focus has moved on since.
-            if self.was_open
-                && !ctx.input(|input| input.pointer.any_pressed() || input.pointer.any_click())
-            {
-                let item = ctx.memory(|memory| memory.focused());
-                super::overlay::hand_back(ctx, list, item);
-            }
-        } else if let Some(layer) = layer
-            && !hold
-        {
-            // Tab stays among the menu's items. Not beside the reaction
-            // picker, whose own layer must keep its focus.
-            ctx.memory_mut(|memory| memory.set_modal_layer(layer));
-            // The first item, drawn in this pass, takes focus once.
-            if focus_pending && let Some(first) = first {
-                ctx.memory_mut(|memory| memory.request_focus(first));
-                ctx.data_mut(|data| data.insert_temp(self.pending, false));
-            }
-        }
-        open
-    }
 }
 
 /// Whether the message menu offers Reply. A call in the chat is a record,
@@ -9480,7 +9378,9 @@ fn rich_body(
                 // Opened once: from here on the menu closes as any menu does.
                 actions.push(Action::PhoneMenuOpened);
             }
-            let key_menu = KeyMenu::begin(ui.ctx(), popup_id, requested, false);
+            // A menu named by the number, as the text writes it.
+            let key_menu = super::list_nav::KeyMenu::begin(ui.ctx(), popup_id, requested, false)
+                .menu(copy_text.clone());
             let popup = egui::Popup::menu(&link);
             let popup = if requested {
                 popup.open_memory(egui::SetOpenCommand::Bool(true))
