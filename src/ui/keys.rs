@@ -204,6 +204,8 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
         && app.reaction_target.is_none()
         && app.recording.is_none()
         && !menu_open
+        // The call screen covers the chats.
+        && (app.call.is_none() || app.call_surface_hidden)
         && let Some((chat, id)) = focused_message(app, ctx)
     {
         let taken = message_keys(app, ctx, &chat, &id);
@@ -470,6 +472,22 @@ pub fn focused_message(app: &App, ctx: &egui::Context) -> Option<(ChatId, String
 /// offers, opens it on Space or Enter too.
 fn message_keys(app: &App, ctx: &egui::Context, chat: &str, id: &str) -> Vec<Action> {
     use crate::ui::conversation as view;
+    // Every key below is a press: a frame without one has nothing to take.
+    if !ctx.input(|input| {
+        input
+            .events
+            .iter()
+            .any(|event| matches!(event, egui::Event::Key { pressed: true, .. }))
+    }) {
+        return Vec::new();
+    }
+    // While this chat selects messages, a key acting on one message would
+    // act behind the selection's back, and the bubbles draw no menu then: one
+    // asked for would open only once the selection ends. The keys that move
+    // the list still move it.
+    if app.selecting_in(chat) {
+        return Vec::new();
+    }
     let Some(message) = app
         .conversations
         .get(chat)
@@ -510,7 +528,10 @@ fn message_keys(app: &App, ctx: &egui::Context, chat: &str, id: &str) -> Vec<Act
             if crate::app::can_select(&message.content) {
                 actions.push(view::forward_action(chat, id));
             }
-        } else if take_plain(input, Key::Delete) {
+        } else if take_plain(input, Key::Delete)
+            || (cfg!(target_os = "macos") && take_plain(input, Key::Backspace))
+        {
+            // A Mac's Delete key is Backspace; Fn with it is Delete.
             // Never a deletion: the confirmation that "Delete for me" opens.
             // "Delete for everyone" stays in the menu.
             actions.push(view::delete_for_me_action(chat, id));
@@ -998,6 +1019,14 @@ const MESSAGES_KEYS: &str = if cfg!(target_os = "macos") {
     "Alt+2"
 };
 
+/// Deletes the current message for me. A Mac's Delete key is Backspace, and
+/// Fn+Delete is Delete.
+const DELETE_KEYS: &str = if cfg!(target_os = "macos") {
+    "Delete / Fn+Delete"
+} else {
+    "Delete"
+};
+
 /// Shortcuts shown in the help dialog.
 pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+K / Ctrl+Shift+F", "Search chats"),
@@ -1041,7 +1070,10 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("E", "React to the message (in the message list)"),
     ("C", "Copy the message (in the message list)"),
     ("F", "Forward the message (in the message list)"),
-    ("Delete", "Delete the message for me (in the message list)"),
+    (
+        DELETE_KEYS,
+        "Delete the message for me (in the message list)",
+    ),
     ("G", "Go to the replied message (in the message list)"),
     ("PgUp / PgDn", "Scroll the open chat by a page"),
     (
@@ -1152,6 +1184,125 @@ mod tests {
         assert!(matches!(find_action(&app), Action::FocusSettingsSearch));
         app.page = Page::Wallpaper;
         assert!(matches!(find_action(&app), Action::FocusSearch));
+    }
+
+    /// An app with three texts in its open chat, the message list focused.
+    fn focused_list() -> (tempfile::TempDir, App, String, egui::Context) {
+        let (root, mut app, chat) = app_with(vec![
+            ("one", crate::model::Content::text("One")),
+            (
+                "two",
+                crate::model::Content::text("Two https://a.org https://b.org"),
+            ),
+            ("three", crate::model::Content::text("Three")),
+        ]);
+        app.page = Page::Chats;
+        app.message_cursor.insert(chat.clone(), "two".into());
+        (root, app, chat, egui::Context::default())
+    }
+
+    /// `press` with the message list of `chat` focused, and the actions it
+    /// queued.
+    fn press_in_list(app: &mut App, ctx: &egui::Context, chat: &str, key: Key) -> Vec<Action> {
+        app.actions.clear();
+        let list = crate::ui::conversation::messages_list_id(chat);
+        ctx.memory_mut(|memory| memory.request_focus(list));
+        press(app, ctx, key, Modifiers::NONE);
+        std::mem::take(&mut app.actions)
+    }
+
+    /// The keys that act on one message (R, E, C, F, Delete) wait while the
+    /// chat selects messages: the bubbles draw no menu then, and the keys
+    /// would act behind the selection's back. Up and Down still move the
+    /// list.
+    #[test]
+    fn a_selection_holds_the_keys_that_act_on_a_message() {
+        let (_root, mut app, chat, ctx) = focused_list();
+        let keys = [Key::R, Key::E, Key::C, Key::F, Key::Delete];
+        for key in keys {
+            assert!(
+                !press_in_list(&mut app, &ctx, &chat, key).is_empty(),
+                "{key:?} acts without a selection"
+            );
+        }
+        app.selection = Some((chat.clone(), Vec::new()));
+        for key in keys {
+            let actions = press_in_list(&mut app, &ctx, &chat, key);
+            assert!(actions.is_empty(), "{key:?} while selecting: {actions:?}");
+        }
+        assert_eq!(
+            press_in_list(&mut app, &ctx, &chat, Key::ArrowUp),
+            [Action::MessageCursor(crate::ui::list_nav::Step::Previous)]
+        );
+    }
+
+    /// The call screen covers the chats: the message keys leave the list
+    /// behind it alone, and come back once the screen is put aside.
+    #[test]
+    fn the_call_screen_holds_the_message_keys() {
+        let (_root, mut app, chat, ctx) = focused_list();
+        app.call = Some(crate::calls::CallUpdate {
+            generation: 1,
+            chat: chat.clone(),
+            direction: crate::model::CallDirection::Outgoing,
+            video: false,
+            phase: crate::calls::CallPhase::Active,
+            started: Some(std::time::Instant::now()),
+            muted: false,
+            camera_on: false,
+            remote_video: false,
+            video_requested: false,
+            outcome: None,
+            peer_audio: None,
+            lost_devices: Vec::new(),
+            microphone: None,
+            speaker: None,
+            camera: None,
+            group: None,
+        });
+        assert_eq!(press_in_list(&mut app, &ctx, &chat, Key::R), []);
+        app.call_surface_hidden = true;
+        assert_eq!(
+            press_in_list(&mut app, &ctx, &chat, Key::R),
+            [Action::Reply("two".into()), Action::FocusComposer]
+        );
+    }
+
+    /// A Mac's Delete key is Backspace: there it asks to delete the message
+    /// for me, as Delete does; elsewhere Backspace is left alone.
+    #[test]
+    fn backspace_deletes_for_me_on_macos_only() {
+        let (_root, app, chat) = app_with(vec![("text", crate::model::Content::text("Hello"))]);
+        let key = |key: Key, modifiers: Modifiers| {
+            let ctx = egui::Context::default();
+            let mut actions = Vec::new();
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events: vec![egui::Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers,
+                    }],
+                    ..Default::default()
+                },
+                |ui| actions = message_keys(&app, ui.ctx(), &chat, "text"),
+            );
+            output.textures_delta.clear();
+            actions
+        };
+        let actions = key(Key::Backspace, Modifiers::NONE);
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                actions,
+                [crate::ui::conversation::delete_for_me_action(&chat, "text")]
+            );
+        } else {
+            assert!(actions.is_empty(), "{actions:?}");
+        }
+        let actions = key(Key::Backspace, Modifiers::COMMAND);
+        assert!(actions.is_empty(), "only plain: {actions:?}");
     }
 
     #[test]
