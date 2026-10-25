@@ -1520,6 +1520,12 @@ impl Archive {
         rows.collect()
     }
 
+    /// Runs `sql` on the archive, for tests that need a row it cannot read.
+    #[cfg(test)]
+    pub(crate) fn execute_for_tests(&self, sql: &str) {
+        self.connection.execute_batch(sql).unwrap();
+    }
+
     /// Returns messages from `from` through `before`, ascending and limited.
     pub fn messages_range(
         &self,

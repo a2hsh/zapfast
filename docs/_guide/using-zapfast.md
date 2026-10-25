@@ -902,9 +902,10 @@ Shift+F10 opens the current message's menu with focus on its first item; Tab,
 Shift+Tab, Up and Down move through the menu, and Escape closes it and returns
 to the list. The Applications key does not work yet: egui does not report it.
 In the list, R replies to the current message and moves to the message input, E
-reacts to it, C copies its text (or a downloaded picture), F forwards it, and
-Delete asks to delete it for you; Delete for everyone stays in the menu. A call
-in the chat has only a menu to call back, which Space and Enter open too.
+reacts to it, C copies its text (or a downloaded picture), F forwards it, G
+goes to the message it replies to, and Delete asks to delete it for you; Delete
+for everyone stays in the menu. A call in the chat has only a menu to call
+back, which Space and Enter open too.
 
 In the chat view, Tab moves through the message input and its buttons, phone
 numbers in messages, chat search, the chat info panel, the message list, the

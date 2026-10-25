@@ -9918,15 +9918,10 @@ impl Worker {
             return;
         }
         let Ok(Some(target)) = self.archive.message(&chat, &id) else {
-            self.emit(Event::Messages {
+            self.emit(Event::HistoryUnavailable {
                 chat: chat.clone(),
-                messages: Vec::new(),
-                older: true,
-                complete: false,
+                error: "This message is not stored on this computer".to_owned(),
             });
-            self.emit(Event::Error(
-                "This message is not stored on this computer".to_owned(),
-            ));
             return;
         };
         match self
@@ -9944,7 +9939,13 @@ impl Worker {
                     complete: false,
                 });
             }
-            Err(error) => self.emit(Event::Error(format!("Could not read the chat: {error}"))),
+            // As for a message not stored: the chat stops waiting for older
+            // history, and the replied-message jump (G) waiting on this
+            // request hears why.
+            Err(error) => self.emit(Event::HistoryUnavailable {
+                chat,
+                error: format!("Could not read the chat: {error}"),
+            }),
         }
     }
 
@@ -15299,6 +15300,46 @@ mod tests {
             .collect();
         assert_eq!(answered, [7], "asked twice, answered once");
         assert!(worker.withheld_pages.is_empty());
+    }
+
+    /// History toward a replied message that cannot be read answers with
+    /// one event that carries the error: the chat stops waiting for older
+    /// history, and the jump that asked hears that error and nothing else,
+    /// however the window's frames split the events.
+    #[test]
+    fn a_failed_read_toward_a_message_answers_with_its_error_in_one_event() {
+        let (mut worker, events, _, _) = receipt_tests::worker();
+        const GROUP: &str = "120363000000000001@g.us";
+        worker.archive.ensure_chat(GROUP, "Fixture group").unwrap();
+        for (id, timestamp) in [("first", 100), ("second", 200), ("third", 300)] {
+            let row = Message {
+                chat: GROUP.into(),
+                ..receipt_tests::own_message(id, timestamp)
+            };
+            worker.archive.insert_message(&row, None).unwrap();
+        }
+        // The target reads; a message between it and the page does not.
+        worker
+            .archive
+            .execute_for_tests("UPDATE messages SET content = x'00' WHERE id = 'second'");
+        let _: Vec<_> = events.try_iter().collect();
+        for (id, unread) in [
+            ("first", "Could not read the chat"),
+            ("gone", "This message is not stored on this computer"),
+        ] {
+            worker.load_until(GROUP.into(), id.into(), (300, "third".into()));
+            let answer: Vec<String> = events
+                .try_iter()
+                .filter_map(|event| match event {
+                    Event::Messages { chat, .. } if chat == GROUP => Some("page".to_owned()),
+                    Event::HistoryUnavailable { chat, error } if chat == GROUP => Some(error),
+                    Event::Error(error) => Some(format!("separate error: {error}")),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(answer.len(), 1, "{id}: {answer:?}");
+            assert!(answer[0].starts_with(unread), "{id}: {answer:?}");
+        }
     }
 
     #[test]
