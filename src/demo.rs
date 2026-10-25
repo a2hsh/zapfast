@@ -4275,6 +4275,62 @@ mod tests {
         render(app, ctx);
     }
 
+    /// One frame in which `key` is let go of.
+    pub(super) fn release_key(app: &mut App, ctx: &egui::Context, key: egui::Key) {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 780.0),
+                )),
+                events: vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: false,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| {
+                let ctx = ui.ctx().clone();
+                app.background_frame(&ctx);
+                app.frame_ui(ui);
+            },
+        );
+        output.textures_delta.clear();
+    }
+
+    /// One frame with `key` still held down, as a keyboard repeats it: the
+    /// repeated press and the text it types.
+    pub(super) fn hold_key(app: &mut App, ctx: &egui::Context, key: egui::Key, text: &str) {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 780.0),
+                )),
+                events: vec![
+                    egui::Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::Text(text.to_owned()),
+                ],
+                ..Default::default()
+            },
+            |ui| {
+                let ctx = ui.ctx().clone();
+                app.background_frame(&ctx);
+                app.frame_ui(ui);
+            },
+        );
+        output.textures_delta.clear();
+    }
+
     /// Two contacts typing in the open group keep the window drawing every
     /// refresh, but only about ten times a second while a screen reader is
     /// attached: at the display's rate its thread could not answer the
@@ -6499,6 +6555,16 @@ mod tests {
         assert!(lists_seen > 0, "the list was in the tree");
     }
 
+    fn node(
+        tree: &egui::accesskit::TreeUpdate,
+        id: egui::accesskit::NodeId,
+    ) -> Option<egui::accesskit::Node> {
+        tree.nodes
+            .iter()
+            .find(|(found, _)| *found == id)
+            .map(|(_, node)| node.clone())
+    }
+
     #[test]
     fn cursor_far_from_view_never_names_a_missing_active_descendant() {
         let mut app = app();
@@ -7232,6 +7298,7 @@ mod tests {
             egui::Key::F,
             egui::Key::S,
             egui::Key::M,
+            egui::Key::G,
         ] {
             app.actions.clear();
             press_key(&mut app, &ctx, key, egui::Modifiers::NONE);
@@ -7254,6 +7321,500 @@ mod tests {
         press_key(&mut app, &ctx, egui::Key::R, egui::Modifiers::NONE);
         assert_eq!(app.reply_to.as_deref(), Some(newest.as_str()));
         assert!(ctx.memory(|memory| memory.has_focus(egui::Id::new("composer-text"))));
+    }
+
+    fn spoke(app: &App, text: &str) -> bool {
+        app.announcer.spoken().contains(&text)
+    }
+
+    /// A demo app that records its commands and downloads nothing by itself,
+    /// with the list focused on a fixture message holding `content`, and the
+    /// sender of the backend's events, such as a download's result.
+    struct OnAttachment {
+        app: App,
+        ctx: egui::Context,
+        chat: String,
+        events: std::sync::mpsc::Sender<crate::backend::Event>,
+    }
+
+    fn app_on_attachment(content: Content) -> OnAttachment {
+        let root = tempfile::Builder::new()
+            .prefix("zapfast-demo-")
+            .tempdir()
+            .unwrap();
+        let (mut app, events) = App::headless(AppDirs::under(root.path()), Settings::default());
+        ROOTS.with(|roots| roots.borrow_mut().push(root));
+        populate(&mut app);
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        app.backend.record_demo_commands();
+        app.settings.auto_download = false;
+        render(&mut app, &ctx);
+        let chat = focus_fixture_message(&mut app, &ctx, content);
+        app.backend.take_demo_commands();
+        OnAttachment {
+            app,
+            ctx,
+            chat,
+            events,
+        }
+    }
+
+    impl OnAttachment {
+        /// A primary click on the bubble's part stored as `part`, in its
+        /// middle.
+        fn click(&mut self, part: Part) {
+            let bubble = crate::ui::conversation::bubble_id(&self.chat, "key-fixture");
+            let Part::Named(name) = part;
+            let id = bubble.with(name);
+            let rect = self
+                .ctx
+                .data(|data| data.get_temp::<egui::Rect>(id))
+                .unwrap_or_else(|| panic!("no {part:?} drawn"));
+            let at = rect.center();
+            let pointer = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            frame_with(
+                &mut self.app,
+                &self.ctx,
+                vec![egui::Event::PointerMoved(at), pointer(true), pointer(false)],
+            );
+            render(&mut self.app, &self.ctx);
+        }
+    }
+
+    /// Where a test clicks in the fixture's bubble.
+    #[derive(Clone, Copy, Debug)]
+    enum Part {
+        /// The part the bubble stores under this name.
+        Named(&'static str),
+    }
+
+    /// The fixture replying to the open chat's oldest loaded message, with
+    /// the list focused on the fixture. Returns the replied message's id.
+    fn on_a_reply() -> (OnAttachment, String) {
+        let mut on = app_on_attachment(Content::text("Agreed"));
+        let target = on.app.conversations[&on.chat].messages[0].clone();
+        let conversation = on.app.conversations.get_mut(&on.chat).unwrap();
+        conversation.message_mut("key-fixture").unwrap().quoted = Some(crate::model::Quoted {
+            labelled: None,
+            chat: None,
+            id: target.id.clone(),
+            sender: target.sender.clone(),
+            sender_name: None,
+            summary: target.summary(),
+            mentions: Vec::new(),
+        });
+        render(&mut on.app, &on.ctx);
+        (on, target.id)
+    }
+
+    /// The fixture replying to a message that is not loaded, with the list
+    /// focused on the fixture. Returns the replied message.
+    fn on_a_reply_not_loaded() -> (OnAttachment, Message) {
+        let mut on = app_on_attachment(Content::text("Agreed"));
+        let oldest = on.app.conversations[&on.chat].messages[0].timestamp;
+        let target = message(
+            &on.chat,
+            "not-loaded",
+            false,
+            oldest - 60,
+            Content::text("Long ago"),
+        );
+        let conversation = on.app.conversations.get_mut(&on.chat).unwrap();
+        conversation.message_mut("key-fixture").unwrap().quoted = Some(crate::model::Quoted {
+            labelled: None,
+            chat: None,
+            id: target.id.clone(),
+            sender: target.sender.clone(),
+            sender_name: None,
+            summary: target.summary(),
+            mentions: Vec::new(),
+        });
+        render(&mut on.app, &on.ctx);
+        (on, target)
+    }
+
+    /// G on a reply whose quoted message is not loaded keeps the list on the
+    /// reply, says it is loading, and moves there once history brings it.
+    #[test]
+    fn g_waits_for_a_replied_message_that_is_not_loaded() {
+        let (mut on, target) = on_a_reply_not_loaded();
+        press_key(&mut on.app, &on.ctx, egui::Key::G, egui::Modifiers::NONE);
+        assert_eq!(
+            current_message(&on),
+            "key-fixture",
+            "the list keeps its place"
+        );
+        assert!(
+            spoke(&on.app, "Loading the replied message"),
+            "{:?}",
+            on.app.announcer.spoken()
+        );
+        assert!(
+            on.app
+                .backend
+                .take_demo_commands()
+                .iter()
+                .any(|command| matches!(
+                    command,
+                    crate::backend::Command::LoadUntil { id, .. } if id == "not-loaded"
+                )),
+            "older history is asked for"
+        );
+        on.events
+            .send(crate::backend::Event::Messages {
+                chat: on.chat.clone(),
+                messages: vec![target],
+                older: true,
+                complete: true,
+            })
+            .unwrap();
+        render(&mut on.app, &on.ctx);
+        assert_eq!(
+            on.app.message_cursor.get(&on.chat).map(String::as_str),
+            Some("not-loaded")
+        );
+    }
+
+    /// G held down asks once and keeps waiting: its repeats, and the text
+    /// they type, are not a key after it, so the replied message still moves
+    /// the list once it arrives, and "Loading" is not said again.
+    #[test]
+    fn holding_g_keeps_waiting_for_the_replied_message() {
+        let (mut on, target) = on_a_reply_not_loaded();
+        press_key(&mut on.app, &on.ctx, egui::Key::G, egui::Modifiers::NONE);
+        assert!(spoke(&on.app, "Loading the replied message"));
+        on.app.announcer = Default::default();
+        for _ in 0..3 {
+            hold_key(&mut on.app, &on.ctx, egui::Key::G, "g");
+        }
+        render(&mut on.app, &on.ctx);
+        assert!(
+            !spoke(&on.app, "Loading the replied message"),
+            "{:?}",
+            on.app.announcer.spoken()
+        );
+        assert_eq!(current_message(&on), "key-fixture", "still waiting");
+        deliver(&mut on, vec![target]);
+        assert_eq!(current_message(&on), "not-loaded");
+    }
+
+    /// History that comes without the replied message says it is not there,
+    /// and the list stays where it was.
+    #[test]
+    fn g_says_when_the_replied_message_is_not_found() {
+        let (mut on, _) = on_a_reply_not_loaded();
+        press_key(&mut on.app, &on.ctx, egui::Key::G, egui::Modifiers::NONE);
+        on.app.announcer = Default::default();
+        on.events
+            .send(crate::backend::Event::Messages {
+                chat: on.chat.clone(),
+                messages: Vec::new(),
+                older: true,
+                complete: false,
+            })
+            .unwrap();
+        render(&mut on.app, &on.ctx);
+        assert!(
+            spoke(&on.app, "Replied message not found"),
+            "{:?}",
+            on.app.announcer.spoken()
+        );
+        assert_eq!(current_message(&on), "key-fixture");
+    }
+
+    /// A page that completes the chat's history without the replied message
+    /// ends the wait at once: no older history can bring it, so nothing more
+    /// is asked for, it is said not to be found, and the list stays.
+    #[test]
+    fn the_end_of_history_without_the_replied_message_says_it_is_not_found() {
+        let (mut on, target) = on_a_reply_not_loaded();
+        // A page already on its way: G waits for it before asking its own.
+        on.app
+            .conversations
+            .get_mut(&on.chat)
+            .unwrap()
+            .loading_older = true;
+        press_key(&mut on.app, &on.ctx, egui::Key::G, egui::Modifiers::NONE);
+        on.app.backend.take_demo_commands();
+        on.app.announcer = Default::default();
+        let other = message(
+            &on.chat,
+            "older-page",
+            false,
+            target.timestamp + 1,
+            Content::text("Older"),
+        );
+        on.events
+            .send(crate::backend::Event::Messages {
+                chat: on.chat.clone(),
+                messages: vec![other],
+                older: true,
+                complete: true,
+            })
+            .unwrap();
+        render(&mut on.app, &on.ctx);
+        assert!(
+            spoke(&on.app, "Replied message not found"),
+            "{:?}",
+            on.app.announcer.spoken()
+        );
+        assert!(
+            !on.app
+                .backend
+                .take_demo_commands()
+                .iter()
+                .any(|command| matches!(command, crate::backend::Command::LoadUntil { .. })),
+            "nothing more to ask for"
+        );
+        assert_eq!(current_message(&on), "key-fixture");
+        deliver(&mut on, vec![target]);
+        assert_eq!(current_message(&on), "key-fixture", "the wait is over");
+    }
+
+    /// The list's current message: its cursor, or the newest without one.
+    fn current_message(on: &OnAttachment) -> String {
+        on.app
+            .message_cursor
+            .get(&on.chat)
+            .cloned()
+            .unwrap_or_else(|| {
+                on.app.conversations[&on.chat]
+                    .messages
+                    .last()
+                    .unwrap()
+                    .id
+                    .clone()
+            })
+    }
+
+    /// The page that brings the replied message `target`.
+    fn deliver(on: &mut OnAttachment, messages: Vec<Message>) {
+        on.events
+            .send(crate::backend::Event::Messages {
+                chat: on.chat.clone(),
+                messages,
+                older: true,
+                complete: false,
+            })
+            .unwrap();
+        render(&mut on.app, &on.ctx);
+    }
+
+    /// Points the fixture's quote at the open chat's oldest loaded message
+    /// and returns that message's id.
+    fn quote_the_oldest(on: &mut OnAttachment) -> String {
+        let target = on.app.conversations[&on.chat].messages[0].clone();
+        let conversation = on.app.conversations.get_mut(&on.chat).unwrap();
+        conversation.message_mut("key-fixture").unwrap().quoted = Some(crate::model::Quoted {
+            labelled: None,
+            chat: None,
+            id: target.id.clone(),
+            sender: target.sender.clone(),
+            sender_name: None,
+            summary: target.summary(),
+            mentions: Vec::new(),
+        });
+        render(&mut on.app, &on.ctx);
+        target.id
+    }
+
+    /// Once the reader moves on, a replied message still loading never takes
+    /// the list back, and nothing more is said about it: after an arrow,
+    /// after G on a reply whose quote is loaded, after a click on a quote,
+    /// and after a search result.
+    #[test]
+    fn a_reply_still_loading_ends_when_the_reader_moves_on() {
+        for way in ["arrow", "g", "click", "search"] {
+            let (mut on, target) = on_a_reply_not_loaded();
+            press_key(&mut on.app, &on.ctx, egui::Key::G, egui::Modifiers::NONE);
+            assert!(spoke(&on.app, "Loading the replied message"), "{way}");
+            match way {
+                "arrow" => press_key(
+                    &mut on.app,
+                    &on.ctx,
+                    egui::Key::ArrowUp,
+                    egui::Modifiers::NONE,
+                ),
+                "g" => {
+                    quote_the_oldest(&mut on);
+                    // Let go of the first G, or egui takes the second for
+                    // the key held down, which jumps only once.
+                    release_key(&mut on.app, &on.ctx, egui::Key::G);
+                    press_key(&mut on.app, &on.ctx, egui::Key::G, egui::Modifiers::NONE);
+                }
+                "click" => {
+                    quote_the_oldest(&mut on);
+                    on.click(Part::Named("quote"));
+                }
+                _ => {
+                    let oldest = on.app.conversations[&on.chat].messages[0].id.clone();
+                    on.app.actions.push(crate::model::Action::OpenMessage {
+                        chat: on.chat.clone(),
+                        message: oldest,
+                    });
+                    render(&mut on.app, &on.ctx);
+                }
+            }
+            let place = current_message(&on);
+            assert_ne!(place, "key-fixture", "{way}: the reader moved");
+            on.app.announcer = Default::default();
+            deliver(&mut on, vec![target.clone()]);
+            assert_eq!(current_message(&on), place, "{way}: the list stays");
+            assert!(
+                on.app
+                    .announcer
+                    .spoken()
+                    .iter()
+                    .all(|spoken| spoken.is_empty()),
+                "{way}: {:?}",
+                on.app.announcer.spoken()
+            );
+        }
+    }
+
+    /// With an older page already on its way, G asks for its own once that
+    /// page is in, and says nothing about a page that was not its answer.
+    #[test]
+    fn a_reply_still_loading_asks_for_its_own_history() {
+        let (mut on, target) = on_a_reply_not_loaded();
+        on.app
+            .conversations
+            .get_mut(&on.chat)
+            .unwrap()
+            .loading_older = true;
+        press_key(&mut on.app, &on.ctx, egui::Key::G, egui::Modifiers::NONE);
+        let asked = |on: &OnAttachment| {
+            on.app.backend.take_demo_commands().iter().any(|command| {
+                matches!(
+                    command,
+                    crate::backend::Command::LoadUntil { id, .. } if id == "not-loaded"
+                )
+            })
+        };
+        assert!(!asked(&on), "a page is already on its way");
+        on.app.announcer = Default::default();
+        let other = message(
+            &on.chat,
+            "older-page",
+            false,
+            target.timestamp + 1,
+            Content::text("Older"),
+        );
+        deliver(&mut on, vec![other]);
+        assert!(asked(&on), "its own request once that page is in");
+        assert!(
+            !on.app
+                .announcer
+                .spoken()
+                .iter()
+                .any(|spoken| spoken.contains("not found")),
+            "{:?}",
+            on.app.announcer.spoken()
+        );
+        deliver(&mut on, vec![target]);
+        assert_eq!(current_message(&on), "not-loaded");
+    }
+
+    /// When the archive says the replied message is not stored, that error
+    /// is the one thing said.
+    /// The same for an archive that cannot be read: the worker answers with
+    /// the error, the error alone is said, in the frame that drains it and
+    /// in every frame after it, and the wait is over, so a later page does
+    /// not move the list.
+    #[test]
+    fn the_archives_error_replaces_replied_message_not_found() {
+        for error in [
+            "This message is not stored on this computer",
+            "Could not read the chat: fixture",
+        ] {
+            let (mut on, target) = on_a_reply_not_loaded();
+            press_key(&mut on.app, &on.ctx, egui::Key::G, egui::Modifiers::NONE);
+            on.app.announcer = Default::default();
+            on.events
+                .send(crate::backend::Event::HistoryUnavailable {
+                    chat: on.chat.clone(),
+                    error: error.into(),
+                })
+                .unwrap();
+            // Frame by frame: "not found" would come in a frame after the
+            // error's, from a wait the error did not end.
+            let mut spoken = String::new();
+            for _ in 0..3 {
+                render(&mut on.app, &on.ctx);
+                spoken.push_str(&on.app.announcer.spoken().concat());
+            }
+            assert!(spoken.contains(error), "{spoken}");
+            assert!(!spoken.contains("Replied message not found"), "{spoken}");
+            assert_eq!(current_message(&on), "key-fixture");
+            deliver(&mut on, vec![target]);
+            assert_eq!(
+                current_message(&on),
+                "key-fixture",
+                "{error}: the wait ended"
+            );
+        }
+    }
+
+    /// An error that is not the answer to G's own request, such as a failed
+    /// send, leaves the wait alone: the page that brings the replied message
+    /// still moves the list there.
+    #[test]
+    fn an_unrelated_error_leaves_the_replied_message_wait() {
+        let (mut on, target) = on_a_reply_not_loaded();
+        press_key(&mut on.app, &on.ctx, egui::Key::G, egui::Modifiers::NONE);
+        on.events
+            .send(crate::backend::Event::Error("Not connected".into()))
+            .unwrap();
+        render(&mut on.app, &on.ctx);
+        assert_eq!(current_message(&on), "key-fixture", "still waiting");
+        deliver(&mut on, vec![target]);
+        assert_eq!(current_message(&on), "not-loaded");
+    }
+
+    /// The quote's own click is as it was: the list's cursor goes to the
+    /// replied message at once, loaded or not.
+    #[test]
+    fn the_quote_click_still_jumps_at_once() {
+        let (mut on, _) = on_a_reply_not_loaded();
+        on.click(Part::Named("quote"));
+        assert_eq!(
+            on.app.message_cursor.get(&on.chat).map(String::as_str),
+            Some("not-loaded")
+        );
+    }
+
+    /// The label of the message list's current message, as a screen reader
+    /// reads it, if the list has focus.
+    fn current_message_label(on: &mut OnAttachment) -> Option<String> {
+        let tree = tree_after(&mut on.app, &on.ctx, None);
+        let list = crate::ui::conversation::messages_list_id(&on.chat).accesskit_id();
+        if tree.focus != list {
+            return None;
+        }
+        let active = node(&tree, list)?.active_descendant()?;
+        node(&tree, active).and_then(|node| node.label().map(str::to_owned))
+    }
+
+    /// G goes where clicking the quote goes: the list moves to the replied
+    /// message, keeps focus, and reads that message.
+    #[test]
+    fn g_goes_to_the_replied_message_as_its_quote_click_does() {
+        let (mut on, target) = on_a_reply();
+        press_key(&mut on.app, &on.ctx, egui::Key::G, egui::Modifiers::NONE);
+        assert_eq!(on.app.message_cursor.get(&on.chat), Some(&target));
+        let label = current_message_label(&mut on).expect("the list keeps focus");
+        let body = on.app.conversations[&on.chat].messages[0].summary();
+        assert!(label.contains(body.trim()), "{label} / {body}");
+        // The click on the quote lands on the same message.
+        let (mut clicked, target) = on_a_reply();
+        clicked.click(Part::Named("quote"));
+        assert_eq!(clicked.app.message_cursor.get(&clicked.chat), Some(&target));
     }
 
     /// Shift, Ctrl and Alt with a message key are left alone.

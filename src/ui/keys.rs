@@ -495,6 +495,12 @@ fn message_keys(app: &App, ctx: &egui::Context, chat: &str, id: &str) -> Vec<Act
                 actions.push(Action::Reply(id.to_owned()));
                 actions.push(Action::FocusComposer);
             }
+        } else if let Some(quoted) = &message.quoted
+            && take_plain_once(input, Key::G)
+        {
+            // The quote's jump: the list moves to the replied message, once
+            // for a key held down.
+            actions.push(view::quote_key_action(quoted));
         } else if take_plain(input, Key::E) {
             actions.push(view::open_reaction_picker_action(chat, id, true));
         } else if take_plain(input, Key::C) {
@@ -580,6 +586,33 @@ fn take_destination(input: &mut egui::InputState) -> Option<u8> {
 /// those combinations, such as Shift+Home for text selection, alone.
 pub(crate) fn take_plain(input: &mut egui::InputState, key: Key) -> bool {
     take_exact(input, Modifiers::NONE, key)
+}
+
+/// [`take_plain`] for a key that acts once however long it is held: its
+/// first press counts, and a repeat is taken without acting, so nothing
+/// else acts on it either.
+fn take_plain_once(input: &mut egui::InputState, key: Key) -> bool {
+    let mut taken = None;
+    input.events.retain(|event| {
+        if taken.is_some() {
+            return true;
+        }
+        if let egui::Event::Key {
+            key: found,
+            pressed: true,
+            repeat,
+            modifiers,
+            ..
+        } = event
+            && *found == key
+            && *modifiers == Modifiers::NONE
+        {
+            taken = Some(!repeat);
+            return false;
+        }
+        true
+    });
+    taken.unwrap_or(false)
 }
 
 /// Removes this frame's first press of `key` with exactly `modifiers`, if
@@ -1009,6 +1042,7 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("C", "Copy the message (in the message list)"),
     ("F", "Forward the message (in the message list)"),
     ("Delete", "Delete the message for me (in the message list)"),
+    ("G", "Go to the replied message (in the message list)"),
     ("PgUp / PgDn", "Scroll the open chat by a page"),
     (
         "Home / End",
@@ -1039,6 +1073,68 @@ pub fn label(keys: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An app whose open chat holds `messages`, by id and content, in order,
+    /// with the folder it keeps its files in, which goes when dropped.
+    fn app_with(messages: Vec<(&str, crate::model::Content)>) -> (tempfile::TempDir, App, String) {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = App::headless(
+            crate::paths::AppDirs::under(root.path()),
+            crate::settings::Settings::default(),
+        )
+        .0;
+        let chat = "1@s.whatsapp.net".to_owned();
+        let conversation = app.conversations.entry(chat.clone()).or_default();
+        for (index, (id, content)) in messages.into_iter().enumerate() {
+            conversation.messages.push(crate::model::Message {
+                id: id.into(),
+                chat: chat.clone(),
+                sender: chat.clone(),
+                sender_name: None,
+                from_me: false,
+                timestamp: 1 + index as i64,
+                history_order: None,
+                content,
+                status: crate::model::Delivery::None,
+                delivered_at: None,
+                read_at: None,
+                quoted: None,
+                reactions: Vec::new(),
+                edited: false,
+                mentions: Vec::new(),
+                forwarded: false,
+                thumbnail: None,
+            });
+        }
+        app.open_chat = Some(chat.clone());
+        (root, app, chat)
+    }
+
+    /// G takes no key from a message that replies to nothing.
+    #[test]
+    fn g_is_left_alone_without_a_quote() {
+        let (_root, app, chat) = app_with(vec![("text", crate::model::Content::text("Hello"))]);
+        let ctx = egui::Context::default();
+        let mut left = 0;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: Key::G,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| {
+                assert!(message_keys(&app, ui.ctx(), &chat, "text").is_empty());
+                left = ui.input(|input| input.events.len());
+            },
+        );
+        output.textures_delta.clear();
+        assert_eq!(left, 1, "G is still there for others");
+    }
 
     #[test]
     fn ctrl_f_searches_the_open_chat_the_list_or_the_settings() {

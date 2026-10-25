@@ -5506,14 +5506,7 @@ fn quote_block(
         )
         .on_hover_cursor(egui::CursorIcon::PointingHand);
     if response.clicked() {
-        if let Some(chat) = &quoted.chat {
-            actions.push(Action::OpenMessage {
-                chat: chat.clone(),
-                message: quoted.id.clone(),
-            });
-        } else {
-            actions.push(Action::ScrollTo(quoted.id.clone()));
-        }
+        actions.push(quote_jump_action(quoted));
     }
 }
 
@@ -6867,6 +6860,28 @@ pub(crate) fn copy_key_action(
     match &message.content {
         Content::Image { media, .. } => media.path.clone().map(Action::CopyImage),
         _ => None,
+    }
+}
+
+/// What clicking a quote does: the list moves to the replied message, which
+/// it brings into view, loading older history when needed. A private reply
+/// quotes a message of another chat, which opens at it.
+pub(crate) fn quote_jump_action(quoted: &crate::model::Quoted) -> Action {
+    match &quoted.chat {
+        Some(chat) => Action::OpenMessage {
+            chat: chat.clone(),
+            message: quoted.id.clone(),
+        },
+        None => Action::ScrollTo(quoted.id.clone()),
+    }
+}
+
+/// The quote's jump from the keys: the same, except that in the same chat
+/// the list keeps its place until the replied message is there to move to.
+pub(crate) fn quote_key_action(quoted: &crate::model::Quoted) -> Action {
+    match &quoted.chat {
+        Some(_) => quote_jump_action(quoted),
+        None => Action::GoToReplied(quoted.id.clone()),
     }
 }
 

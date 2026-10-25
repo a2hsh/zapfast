@@ -378,6 +378,25 @@ pub struct UnreadDivider {
     pub placed: bool,
 }
 
+/// A replied message the keys asked to go to while it was not loaded. It
+/// ends quietly as soon as the reader moves on, as Alt+3's jump does.
+#[derive(Clone)]
+struct PendingFollow {
+    chat: ChatId,
+    message: String,
+    /// The widget focused when it was asked: focus moved elsewhere ends it.
+    focus: Option<egui::Id>,
+    /// The frame it was asked in. A key or text in a later one ends it.
+    frame: u64,
+    /// Whether its own request for history toward the message is on its
+    /// way. Only that request's answer can say the message is not there.
+    asked: bool,
+    /// That answer came empty: "Replied message not found" follows. A
+    /// request that failed answers with its error instead
+    /// (`Event::HistoryUnavailable`), and ends the wait.
+    answered: bool,
+}
+
 pub struct App {
     pub dirs: AppDirs,
     pub settings: Settings,
@@ -568,6 +587,9 @@ pub struct App {
     video_chat: Option<ChatId>,
     /// Video to play once its download finishes.
     video_wanted: Option<(ChatId, String)>,
+    /// The replied message the keys asked to go to while it was not loaded:
+    /// the list moves to it once history brings it, and stays put until then.
+    pending_follow: Option<PendingFollow>,
     /// Chat whose voice messages carry on into the next unheard one when a
     /// clip ends. Leaving the chat, or playing a video, ends the run.
     voice_chat: Option<ChatId>,
@@ -1458,6 +1480,7 @@ impl App {
             video: crate::video::Player::new(waker.clone()),
             video_chat: None,
             video_wanted: None,
+            pending_follow: None,
             voice_chat: None,
             voice_clip_chat: None,
             voice_wanted: None,
@@ -1812,6 +1835,8 @@ impl App {
         // A reaction picker the message list opened belongs to the chat
         // left behind.
         self.reaction_from_list = false;
+        // So does a replied message still loading, as on a chat change.
+        self.pending_follow = None;
     }
 
     fn add_account(&mut self) {
@@ -3454,6 +3479,7 @@ impl App {
                 }
                 let conversation = self.conversations.entry(chat.clone()).or_default();
                 let was_empty = conversation.messages.is_empty();
+                let messages_empty = messages.is_empty();
                 if older && !messages.is_empty() {
                     conversation.phone_delivered = true;
                 }
@@ -3469,6 +3495,11 @@ impl App {
                 // A message that arrives while the viewer is open joins its album.
                 if !older {
                     self.refresh_viewer_album(&chat);
+                }
+                // A replied message the keys wait for is in the chat on
+                // screen; another account's chat of the same id is not it.
+                if live && older {
+                    self.settle_pending_follow(&chat, messages_empty, complete);
                 }
                 if live && self.open_chat.as_deref() == Some(chat.as_str()) {
                     if !older && (self.at_bottom || was_empty) {
@@ -4309,6 +4340,30 @@ impl App {
                     _ => message,
                 };
                 self.toast_error(shown);
+            }
+            Event::HistoryUnavailable { chat, error } => {
+                // The replied message's own request, asked before this
+                // answer came, failed: its wait ends, and the error alone is
+                // said. Another request's answer leaves the wait as an empty
+                // page does.
+                let answer = live
+                    && self
+                        .pending_follow
+                        .as_ref()
+                        .is_some_and(|pending| pending.chat == chat && pending.asked);
+                self.apply_backend_event(
+                    Event::Messages {
+                        chat,
+                        messages: Vec::new(),
+                        older: true,
+                        complete: false,
+                    },
+                    live,
+                );
+                if answer {
+                    self.pending_follow = None;
+                }
+                self.apply_backend_event(Event::Error(error), live);
             }
             Event::AccountRemoved => {}
         }
@@ -5557,6 +5612,8 @@ impl App {
             // A run of voice messages belongs to the chat it started in.
             self.voice_chat = None;
             self.voice_wanted = None;
+            // So does a replied message still loading.
+            self.pending_follow = None;
             // A page request belongs to the chat it was pressed in.
             self.scroll_page = None;
             if let Some(conversation) = self.conversations.get_mut(&id) {
@@ -8362,6 +8419,9 @@ impl App {
                 };
                 let id = messages[starts[row]].id.clone();
                 let newest = row + 1 == starts.len();
+                // The reader moved: a replied message still loading does not
+                // take the list back later.
+                self.pending_follow = None;
                 self.message_cursor.insert(chat.clone(), id);
                 self.reveal_cursor = true;
                 // Home on the oldest loaded message asks for older ones, as
@@ -8417,31 +8477,32 @@ impl App {
                 }
             }
             Action::ScrollTo(id) => {
-                self.scroll_to_bottom = false;
+                self.scroll_to_message(id, true);
+            }
+            Action::GoToReplied(id) => {
                 let Some(chat) = self.open_chat.clone() else {
                     return;
                 };
-                let load = {
-                    let conversation = self.conversations.entry(chat.clone()).or_default();
-                    if conversation.message(&id).is_none() && !conversation.loading_older {
-                        conversation.messages.first().map(|oldest| {
-                            conversation.loading_older = true;
-                            (oldest.timestamp, oldest.id.clone())
-                        })
-                    } else {
-                        None
-                    }
-                };
-                if let Some(before) = load {
-                    self.backend.send(Command::LoadUntil {
-                        chat: chat.clone(),
-                        id: id.clone(),
-                        before,
+                let loaded = self
+                    .conversations
+                    .get(&chat)
+                    .is_some_and(|conversation| conversation.message(&id).is_some());
+                // Not loaded yet: the list keeps its place, rather than fall
+                // back to the newest message, and moves once the replied
+                // message arrives.
+                let asked = self.scroll_to_message(id.clone(), loaded);
+                if !loaded {
+                    self.pending_follow = Some(PendingFollow {
+                        chat,
+                        message: id,
+                        focus: ctx.memory(|memory| memory.focused()),
+                        frame: ctx.cumulative_frame_nr(),
+                        asked,
+                        answered: false,
                     });
+                    let text = crate::i18n::gettext(self.locale, "Loading the replied message");
+                    self.announcer.say(crate::announcer::Category::Status, text);
                 }
-                self.follow_message(&chat, &id);
-                self.jump_highlight = Some(JumpHighlight::new(chat, id.clone()));
-                self.scroll_anchor = Some(id);
             }
             Action::Search(text) => {
                 self.search = text;
@@ -9326,6 +9387,8 @@ impl App {
         let wallpaper = self.account().settings.wallpaper_image.clone();
         self.wallpaper_image.sync(wallpaper.as_deref(), &self.waker);
         self.handle_notification_opens();
+        // Before this frame's pages: a reader who moved on ends the wait.
+        self.end_pending_follow(ctx);
         self.handle_events();
         for uri in std::mem::take(&mut self.stale_images) {
             crate::image_cache::forget(ctx, &uri);
@@ -9469,6 +9532,8 @@ impl App {
         self.voice_chat = None;
         self.voice_wanted = None;
         self.video_wanted = None;
+        // A replied message is never found over the lock screen.
+        self.pending_follow = None;
         self.dropping = false;
         self.notifications.clear_all();
         self.clear_chat_lock_entry();
@@ -9960,11 +10025,146 @@ impl App {
         }
     }
 
+    /// Scrolls the open chat to message `id`, loading older history toward it
+    /// when it is not loaded; `follow` also makes it the list's current one.
+    /// Returns whether it asked for that history.
+    fn scroll_to_message(&mut self, id: String, follow: bool) -> bool {
+        self.scroll_to_bottom = false;
+        let Some(chat) = self.open_chat.clone() else {
+            return false;
+        };
+        let asked = self.load_until(&chat, &id);
+        if follow {
+            self.follow_message(&chat, &id);
+        }
+        self.jump_highlight = Some(JumpHighlight::new(chat, id.clone()));
+        self.scroll_anchor = Some(id);
+        asked
+    }
+
+    /// Asks for older archive pages down to message `id` when it is not
+    /// loaded and no older page is already on its way. Returns whether it
+    /// asked.
+    fn load_until(&mut self, chat: &str, id: &str) -> bool {
+        // Load older archive pages toward the target.
+        let load = {
+            let conversation = self.conversations.entry(chat.to_owned()).or_default();
+            if conversation.message(id).is_none() && !conversation.loading_older {
+                conversation.messages.first().map(|oldest| {
+                    conversation.loading_older = true;
+                    (oldest.timestamp, oldest.id.clone())
+                })
+            } else {
+                None
+            }
+        };
+        let Some(before) = load else {
+            return false;
+        };
+        self.backend.send(Command::LoadUntil {
+            chat: chat.to_owned(),
+            id: id.to_owned(),
+            before,
+        });
+        true
+    }
+
+    /// An older page arrived in `chat`: the replied message the keys wait for
+    /// is followed once it is there. Another page (one already on its way when
+    /// G was pressed, or the phone's) only lets the wait ask for its own; the
+    /// answer to its own request is the one that can say the message is not
+    /// there, as can a `complete` page, after which there is no older history
+    /// to bring it.
+    fn settle_pending_follow(&mut self, chat: &str, empty: bool, complete: bool) {
+        let Some(mut pending) = self.pending_follow.clone() else {
+            return;
+        };
+        if pending.chat != chat {
+            return;
+        }
+        let found = self
+            .conversations
+            .get(chat)
+            .is_some_and(|conversation| conversation.message(&pending.message).is_some());
+        if found {
+            self.pending_follow = None;
+            self.follow_message(chat, &pending.message);
+        } else if complete {
+            // The chat's history is all here, and the message is not in it.
+            self.pending_follow = None;
+            let text = crate::i18n::gettext(self.locale, "Replied message not found");
+            self.announcer.say(crate::announcer::Category::Status, text);
+        } else if !pending.asked {
+            pending.asked = self.load_until(chat, &pending.message);
+            self.pending_follow = Some(pending);
+        } else if empty {
+            // Its own request found nothing more toward it: once this
+            // frame's events are in, `end_pending_follow` says the message
+            // is not found. A request that failed says why instead
+            // (`Event::HistoryUnavailable`). Nothing else may come to draw
+            // that frame before the next key, which would end the wait
+            // unsaid, so it is asked for.
+            pending.answered = true;
+            self.pending_follow = Some(pending);
+            self.waker.wake();
+        }
+    }
+
+    /// Ends the replied message's wait quietly once the reader moved on: to
+    /// another chat, to another widget, behind the lock, or with a key or
+    /// text after the one that asked. A key held down is not a new one: its
+    /// repeats, and the text they type, leave the wait alone. An answer that
+    /// came empty says the message is not there.
+    fn end_pending_follow(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_follow.as_ref() else {
+            return;
+        };
+        let typed = ctx.cumulative_frame_nr() > pending.frame
+            && ctx.input(|input| {
+                let events = &input.raw.events;
+                let held = events.iter().any(|event| {
+                    matches!(
+                        event,
+                        egui::Event::Key {
+                            pressed: true,
+                            repeat: true,
+                            ..
+                        }
+                    )
+                });
+                events.iter().any(|event| match event {
+                    egui::Event::Key {
+                        pressed: true,
+                        repeat,
+                        ..
+                    } => !repeat,
+                    egui::Event::Text(_) => !held,
+                    egui::Event::Paste(_) => true,
+                    _ => false,
+                })
+            });
+        let moved_on = self.open_chat.as_deref() != Some(pending.chat.as_str())
+            || ctx.memory(|memory| memory.focused()) != pending.focus
+            || self.app_lock.is_locked()
+            || typed;
+        let answered = pending.answered;
+        if moved_on {
+            self.pending_follow = None;
+        } else if answered {
+            self.pending_follow = None;
+            let text = crate::i18n::gettext(self.locale, "Replied message not found");
+            self.announcer.say(crate::announcer::Category::Status, text);
+        }
+    }
+
     /// Makes `message` the current one in `chat`'s message list, where the
     /// app just took the reader on its own (the next voice message, a quote,
     /// a search result), so the list and the view agree. A focused list also
     /// scrolls it into view.
     pub fn follow_message(&mut self, chat: &str, message: &str) {
+        // The reader went somewhere: a replied message still loading does
+        // not take the list back later.
+        self.pending_follow = None;
         self.message_cursor
             .insert(chat.to_owned(), message.to_owned());
         if self.messages_focused && self.open_chat.as_deref() == Some(chat) {
@@ -12654,6 +12854,71 @@ mod tests {
         app.open_message_menu = Some(("15550007777@s.whatsapp.net".into(), "m".into()));
         app.apply(Action::SwitchAccount(AccountId::parse("2").unwrap()), &ctx);
         assert!(app.open_message_menu.is_none());
+    }
+
+    /// A replied message still loading ends with its account, as with its
+    /// chat.
+    #[test]
+    fn switching_accounts_ends_the_wait_for_a_replied_message() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _commands) = two_accounts(directory.path());
+        let ctx = egui::Context::default();
+        app.pending_follow = Some(PendingFollow {
+            chat: "15550007777@s.whatsapp.net".into(),
+            message: "quoted".into(),
+            focus: None,
+            frame: 0,
+            asked: true,
+            answered: false,
+        });
+        app.apply(Action::SwitchAccount(AccountId::parse("2").unwrap()), &ctx);
+        assert!(app.pending_follow.is_none());
+    }
+
+    /// An empty answer to G's request is said on the next frame, so it asks
+    /// for that frame: nothing else may come to draw one before the next key,
+    /// which would end the wait unsaid.
+    #[test]
+    fn an_empty_answer_for_a_replied_message_asks_for_the_frame_that_says_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, events) =
+            App::headless(AppDirs::under(directory.path()), Settings::default());
+        let chat = "15550007777@s.whatsapp.net";
+        app.pending_follow = Some(PendingFollow {
+            chat: chat.into(),
+            message: "quoted".into(),
+            focus: None,
+            frame: 0,
+            asked: true,
+            answered: false,
+        });
+        let ctx = egui::Context::default();
+        app.waker.attach(&ctx);
+        // Quiet passes use up egui's own follow-up frames.
+        for _ in 0..10 {
+            if !ctx.has_requested_repaint() {
+                break;
+            }
+            ctx.run_ui(egui::RawInput::default(), |_| {})
+                .textures_delta
+                .clear();
+        }
+        assert!(!ctx.has_requested_repaint(), "the window is idle");
+        events
+            .send(Event::Messages {
+                chat: chat.into(),
+                messages: Vec::new(),
+                older: true,
+                complete: false,
+            })
+            .unwrap();
+        app.handle_events();
+        assert!(
+            app.pending_follow
+                .as_ref()
+                .is_some_and(|pending| pending.answered)
+        );
+        assert!(ctx.has_requested_repaint(), "the next frame says it");
     }
 
     #[test]
