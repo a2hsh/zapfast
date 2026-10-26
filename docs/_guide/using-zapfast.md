@@ -901,6 +901,8 @@ keyboard navigation it is outlined like any other focused control.
 Shift+F10 opens the current message's menu with focus on its first item; Tab,
 Shift+Tab, Up and Down move through the menu, and Escape closes it and returns
 to the list. The Applications key does not work yet: egui does not report it.
+In this menu, as in any other, typing a letter moves to the next item whose
+name starts with it without choosing it, and the same letter again moves on.
 Opened from the keyboard, the menu also lists a card's buttons, so none of them
 needs the pointer, and what is about the message rather than in it: going to
 the replied message and the sender's info in a group. The right-click menu is

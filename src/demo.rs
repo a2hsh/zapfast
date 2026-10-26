@@ -8033,6 +8033,69 @@ mod tests {
         }
     }
 
+    /// Typing a letter in the message menu moves focus to the next item that
+    /// starts with it, as in a desktop menu, and the screen reader is told
+    /// of the new item as it is for the arrows. The item is not chosen, and
+    /// the letter reaches neither the message list's keys (R, E) nor the
+    /// message field.
+    #[test]
+    fn a_letter_moves_through_the_message_menu_without_acting() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        let popup = open_menu_by_keys(&mut app, &ctx);
+        let typed = |app: &mut App, key: egui::Key, text: &str| {
+            frame_with(
+                app,
+                &ctx,
+                vec![
+                    egui::Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::Text(text.to_owned()),
+                ],
+            );
+            render(app, &ctx);
+            assert!(egui::Popup::is_id_open(&ctx, popup), "{text:?} closed it");
+            assert_eq!(
+                focused_layer(&ctx).map(|layer| layer.id),
+                Some(popup),
+                "{text:?} left the menu"
+            );
+            let tree = tree_after(app, &ctx, None);
+            node(&tree, tree.focus)
+                .and_then(|node| node.label().map(str::to_owned))
+                .expect("the focused item is named")
+        };
+        for (key, letter) in [
+            (egui::Key::C, 'c'),
+            (egui::Key::D, 'd'),
+            (egui::Key::R, 'r'),
+        ] {
+            let label = typed(&mut app, key, &letter.to_string());
+            assert!(
+                label.to_lowercase().starts_with(letter),
+                "{letter}: focus on {label:?}"
+            );
+        }
+        typed(&mut app, egui::Key::E, "e");
+        assert!(app.reply_to.is_none(), "R did not reply");
+        assert!(app.reaction_target.is_none(), "E did not react");
+        assert!(
+            app.dialog.is_none() && app.toasts.is_empty(),
+            "nothing chosen"
+        );
+        assert!(
+            app.composer.is_empty(),
+            "{:?} reached the field",
+            app.composer
+        );
+    }
+
     /// Tab and Shift+Tab in a menu the keys opened stop on named items only:
     /// the menu's background takes clicks but is no Tab stop of its own.
     #[test]

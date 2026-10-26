@@ -13,6 +13,8 @@ fn jump_keys_reach_chat(editing_text: bool, composer_focused: bool, composer_emp
 
 /// Routes keyboard commands to actions, respecting overlays and text focus.
 pub fn handle(app: &mut App, ctx: &egui::Context) {
+    // A focused menu takes what is typed before any shortcut sees it.
+    super::widgets::menu_letters(ctx);
     if app.picture_edit.is_some() {
         editor_keys(app, ctx);
         return;
