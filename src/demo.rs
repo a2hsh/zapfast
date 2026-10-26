@@ -8302,8 +8302,8 @@ mod tests {
         assert_eq!(app.dialog, None, "no message on screen to forward");
     }
 
-    /// Delete asks first, and for the reversible-looking choice only: the
-    /// menu still offers Delete for everyone.
+    /// Delete asks first, and only to delete the message for me: Shift+Delete
+    /// is the one for everyone.
     #[test]
     fn delete_asks_to_delete_the_focused_message_for_me() {
         let mut app = app();
@@ -8323,6 +8323,73 @@ mod tests {
         assert!(
             app.conversations[&chat].message("key-fixture").is_some(),
             "nothing is deleted before the confirmation"
+        );
+    }
+
+    /// Shift+Delete on our own message, sent within WhatsApp's time limit,
+    /// opens the dialog the menu's "Delete for everyone" opens, and deletes
+    /// nothing until it is confirmed. On another's message it opens nothing
+    /// and says why.
+    #[test]
+    fn shift_delete_asks_to_delete_the_focused_message_for_everyone() {
+        let mut ours = app();
+        let ctx = egui::Context::default();
+        ours.attach(&ctx);
+        ours.backend.record_demo_commands();
+        render(&mut ours, &ctx);
+        let chat = focus_fixture_message(&mut ours, &ctx, Content::text("Fixture revoke"));
+        let fixture = ours
+            .conversations
+            .get_mut(&chat)
+            .unwrap()
+            .messages
+            .iter_mut()
+            .find(|message| message.id == "key-fixture")
+            .unwrap();
+        fixture.from_me = true;
+        fixture.timestamp = crate::util::now();
+        press_key(&mut ours, &ctx, egui::Key::Delete, egui::Modifiers::SHIFT);
+        assert_eq!(
+            ours.dialog,
+            Some(crate::model::Dialog::ConfirmDeleteMessage {
+                chat: chat.clone(),
+                message: "key-fixture".into(),
+                for_everyone: true,
+            })
+        );
+        assert!(
+            !matches!(
+                ours.conversations[&chat]
+                    .message("key-fixture")
+                    .unwrap()
+                    .content,
+                Content::Revoked
+            ),
+            "nothing is deleted before the confirmation"
+        );
+        assert!(
+            !ours
+                .backend
+                .take_demo_commands()
+                .iter()
+                .any(|command| matches!(command, crate::backend::Command::Revoke { .. })),
+            "nothing is sent before the confirmation"
+        );
+
+        // Another's message: no dialog, and the reason.
+        let mut theirs = app();
+        let ctx = egui::Context::default();
+        theirs.attach(&ctx);
+        render(&mut theirs, &ctx);
+        focus_fixture_message(&mut theirs, &ctx, Content::text("Fixture revoke"));
+        theirs.announcer = Default::default();
+        press_key(&mut theirs, &ctx, egui::Key::Delete, egui::Modifiers::SHIFT);
+        assert_eq!(theirs.dialog, None);
+        assert!(
+            theirs.announcer.spoken().iter().any(|spoken| spoken
+                .contains("Delete for everyone, unavailable: Only messages you sent")),
+            "{:?}",
+            theirs.announcer.spoken()
         );
     }
 

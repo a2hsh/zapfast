@@ -6699,9 +6699,7 @@ fn context_menu(
     let can_edit = message.from_me
         && matches!(message.content, Content::Text { .. })
         && age <= crate::app::EDIT_WINDOW.as_secs() as i64;
-    let can_revoke = message.from_me
-        && !matches!(message.content, Content::Revoked)
-        && age <= crate::app::REVOKE_WINDOW.as_secs() as i64;
+    let can_revoke = revoke_blocker(message, view.now).is_none();
     if can_edit
         && widgets::menu_item(
             ui,
@@ -6726,11 +6724,7 @@ fn context_menu(
             &crate::i18n::gettext(view.locale, "Delete for everyone"),
         )
     {
-        actions.push(Action::ShowDialog(Dialog::ConfirmDeleteMessage {
-            chat: view.chat.id.clone(),
-            message: message.id.clone(),
-            for_everyone: true,
-        }));
+        actions.push(delete_for_everyone_action(chat, &message.id));
     }
     let delete_for_me = widgets::menu_item_response(
         ui,
@@ -7008,6 +7002,72 @@ pub(crate) fn delete_for_me_action(chat: &str, message: &str) -> Action {
         message: message.to_owned(),
         for_everyone: false,
     })
+}
+
+/// The message menu's "Delete for everyone": its confirmation, never the
+/// deletion.
+pub(crate) fn delete_for_everyone_action(chat: &str, message: &str) -> Action {
+    Action::ShowDialog(Dialog::ConfirmDeleteMessage {
+        chat: chat.to_owned(),
+        message: message.to_owned(),
+        for_everyone: true,
+    })
+}
+
+/// Why the message menu offers no "Delete for everyone" for a message.
+/// WhatsApp deletes only our own messages for everyone, once, and only
+/// within its time limit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RevokeBlocker {
+    NotOurs,
+    Deleted,
+    TooOld,
+}
+
+impl RevokeBlocker {
+    #[cfg(test)]
+    const ALL: [Self; 3] = [Self::NotOurs, Self::Deleted, Self::TooOld];
+
+    /// The reason, translated, as Shift+Delete says it.
+    fn said(self, locale: crate::i18n::Locale) -> String {
+        use crate::i18n::gettext;
+        match self {
+            Self::NotOurs => gettext(locale, "Only messages you sent"),
+            Self::Deleted => gettext(locale, "This message was deleted"),
+            Self::TooOld => gettext(locale, "The time limit has passed"),
+        }
+        .into_owned()
+    }
+}
+
+/// Why `message` cannot be deleted for everyone at `now`, or None when the
+/// message menu offers "Delete for everyone" for it.
+pub(crate) fn revoke_blocker(message: &Message, now: i64) -> Option<RevokeBlocker> {
+    if !message.from_me {
+        Some(RevokeBlocker::NotOurs)
+    } else if matches!(message.content, Content::Revoked) {
+        Some(RevokeBlocker::Deleted)
+    } else if now - message.timestamp > crate::app::REVOKE_WINDOW.as_secs() as i64 {
+        Some(RevokeBlocker::TooOld)
+    } else {
+        None
+    }
+}
+
+/// What Shift+Delete says on a message the menu offers no "Delete for
+/// everyone" for: the item's name and why, as the keyboard menu names an
+/// unavailable entry.
+pub(crate) fn revoke_refusal_said(locale: crate::i18n::Locale, blocker: RevokeBlocker) -> String {
+    crate::a11y::fill(
+        &crate::i18n::gettext(locale, "{option}, unavailable: {reason}"),
+        &[
+            (
+                "option",
+                &crate::i18n::gettext(locale, "Delete for everyone"),
+            ),
+            ("reason", &blocker.said(locale)),
+        ],
+    )
 }
 
 /// What the menu's "Copy text" copies, before mentions are resolved: the
@@ -10886,6 +10946,50 @@ mod tests {
             assert!(
                 SOURCE.contains(&format!("gettext(locale, \"{shown}\")")),
                 "{blocker:?}: {shown:?} is not a gettext literal"
+            );
+        }
+    }
+
+    /// "Delete for everyone" is for our own messages, not yet deleted, up to
+    /// WhatsApp's time limit, as the menu has always offered it; each other
+    /// case has its reason.
+    #[test]
+    fn delete_for_everyone_is_for_our_own_recent_messages() {
+        let window = crate::app::REVOKE_WINDOW.as_secs() as i64;
+        let ours = message(Content::text("Synthetic message"));
+        assert_eq!(revoke_blocker(&ours, window), None, "at the limit");
+        assert_eq!(
+            revoke_blocker(&ours, window + 1),
+            Some(RevokeBlocker::TooOld)
+        );
+        let theirs = Message {
+            from_me: false,
+            ..ours.clone()
+        };
+        assert_eq!(revoke_blocker(&theirs, 0), Some(RevokeBlocker::NotOurs));
+        let deleted = Message {
+            content: Content::Revoked,
+            ..ours
+        };
+        assert_eq!(revoke_blocker(&deleted, 0), Some(RevokeBlocker::Deleted));
+    }
+
+    /// Each reason Shift+Delete gives goes through gettext as its own
+    /// literal, so extraction finds it, and is said after the item's name as
+    /// the keyboard menu names an unavailable entry.
+    #[test]
+    fn revoke_reasons_are_spoken_through_gettext() {
+        const SOURCE: &str = include_str!("conversation.rs");
+        let locale = crate::i18n::Locale::English;
+        for blocker in RevokeBlocker::ALL {
+            let reason = blocker.said(locale);
+            assert!(
+                SOURCE.contains(&format!("gettext(locale, \"{reason}\")")),
+                "{blocker:?}: {reason:?} is not a gettext literal"
+            );
+            assert_eq!(
+                revoke_refusal_said(locale, blocker),
+                format!("Delete for everyone, unavailable: {reason}")
             );
         }
     }
