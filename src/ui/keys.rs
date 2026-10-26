@@ -469,15 +469,19 @@ pub fn focused_message(app: &App, ctx: &egui::Context) -> Option<(ChatId, String
 /// the same conditions, so the keys never offer what the menu does not.
 /// Shift+F10 opens the menu itself: egui never reports the Applications
 /// key. Enter opens no message's menu: only a call, whose menu is all it
-/// offers, opens it on Space or Enter too.
-fn message_keys(app: &App, ctx: &egui::Context, chat: &str, id: &str) -> Vec<Action> {
+/// offers, opens it on Space or Enter too. A key whose item the menu does
+/// not offer does nothing, except Shift+Delete, which says why.
+fn message_keys(app: &mut App, ctx: &egui::Context, chat: &str, id: &str) -> Vec<Action> {
     use crate::ui::conversation as view;
     // Every key below is a press: a frame without one has nothing to take.
+    // On Windows, Shift+Delete arrives as Cut alone.
     if !ctx.input(|input| {
-        input
-            .events
-            .iter()
-            .any(|event| matches!(event, egui::Event::Key { pressed: true, .. }))
+        input.events.iter().any(|event| {
+            matches!(
+                event,
+                egui::Event::Key { pressed: true, .. } | egui::Event::Cut
+            )
+        })
     }) {
         return Vec::new();
     }
@@ -500,6 +504,7 @@ fn message_keys(app: &App, ctx: &egui::Context, chat: &str, id: &str) -> Vec<Act
     // alone.
     let record = matches!(message.content, crate::model::Content::Call { .. });
     let mut actions = Vec::new();
+    let mut revoke_refused = None;
     ctx.input_mut(|input| {
         if take_exact(input, Modifiers::SHIFT, Key::F10) {
             actions.push(Action::OpenMessageMenu(id.to_owned()));
@@ -528,16 +533,46 @@ fn message_keys(app: &App, ctx: &egui::Context, chat: &str, id: &str) -> Vec<Act
             if crate::app::can_select(&message.content) {
                 actions.push(view::forward_action(chat, id));
             }
-        } else if take_plain(input, Key::Delete)
-            || (cfg!(target_os = "macos") && take_plain(input, Key::Backspace))
-        {
-            // A Mac's Delete key is Backspace; Fn with it is Delete.
+        } else if take_delete(input, Modifiers::SHIFT) {
+            // Never a deletion: the confirmation that "Delete for everyone"
+            // opens, where the menu offers it.
+            match view::revoke_blocker(message, crate::util::now()) {
+                None => actions.push(view::delete_for_everyone_action(chat, id)),
+                Some(blocker) => revoke_refused = Some(blocker),
+            }
+        } else if take_delete(input, Modifiers::NONE) {
             // Never a deletion: the confirmation that "Delete for me" opens.
-            // "Delete for everyone" stays in the menu.
             actions.push(view::delete_for_me_action(chat, id));
         }
     });
+    if let Some(blocker) = revoke_refused {
+        let text = view::revoke_refusal_said(app.locale, blocker);
+        app.announcer.say(crate::announcer::Category::Status, text);
+    }
     actions
+}
+
+/// Takes this frame's first press of the Delete key with exactly
+/// `modifiers`. A Mac's Delete key is Backspace, and Fn with it is Delete.
+/// On Windows egui reports Shift+Delete as Cut, with no key, so a Cut while
+/// Shift alone is held is that press; Ctrl+X, also Cut, is left alone.
+fn take_delete(input: &mut egui::InputState, modifiers: Modifiers) -> bool {
+    if take_exact(input, modifiers, Key::Delete)
+        || (cfg!(target_os = "macos") && take_exact(input, modifiers, Key::Backspace))
+    {
+        return true;
+    }
+    if !cfg!(target_os = "windows") || modifiers != Modifiers::SHIFT || input.modifiers != modifiers
+    {
+        return false;
+    }
+    let mut taken = false;
+    input.events.retain(|event| {
+        let cut = !taken && matches!(event, egui::Event::Cut);
+        taken |= cut;
+        !cut
+    });
+    taken
 }
 
 /// Takes an exact Command/Ctrl+1..9 press, leaving modified number keys alone.
@@ -1027,6 +1062,13 @@ const DELETE_KEYS: &str = if cfg!(target_os = "macos") {
     "Delete"
 };
 
+/// Deletes the current message for everyone, the same keys with Shift.
+const DELETE_FOR_EVERYONE_KEYS: &str = if cfg!(target_os = "macos") {
+    "Shift+Delete / Shift+Fn+Delete"
+} else {
+    "Shift+Delete"
+};
+
 /// Shortcuts shown in the help dialog.
 pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+K / Ctrl+Shift+F", "Search chats"),
@@ -1073,6 +1115,10 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     (
         DELETE_KEYS,
         "Delete the message for me (in the message list)",
+    ),
+    (
+        DELETE_FOR_EVERYONE_KEYS,
+        "Delete the message for everyone (in the message list)",
     ),
     ("G", "Go to the replied message (in the message list)"),
     ("PgUp / PgDn", "Scroll the open chat by a page"),
@@ -1145,7 +1191,7 @@ mod tests {
     /// G takes no key from a message that replies to nothing.
     #[test]
     fn g_is_left_alone_without_a_quote() {
-        let (_root, app, chat) = app_with(vec![("text", crate::model::Content::text("Hello"))]);
+        let (_root, mut app, chat) = app_with(vec![("text", crate::model::Content::text("Hello"))]);
         let ctx = egui::Context::default();
         let mut left = 0;
         let mut output = ctx.run_ui(
@@ -1160,7 +1206,7 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                assert!(message_keys(&app, ui.ctx(), &chat, "text").is_empty());
+                assert!(message_keys(&mut app, ui.ctx(), &chat, "text").is_empty());
                 left = ui.input(|input| input.events.len());
             },
         );
@@ -1268,12 +1314,214 @@ mod tests {
         );
     }
 
+    /// One frame with the message list of `chat` focused, `events` in it and
+    /// `modifiers` held: the actions it queued, and what it said.
+    fn in_list_with(
+        app: &mut App,
+        ctx: &egui::Context,
+        chat: &str,
+        modifiers: Modifiers,
+        events: Vec<egui::Event>,
+    ) -> (Vec<Action>, String) {
+        app.actions.clear();
+        app.announcer = Default::default();
+        let list = crate::ui::conversation::messages_list_id(chat);
+        ctx.memory_mut(|memory| memory.request_focus(list));
+        let held = std::iter::once(egui::Event::ModifiersChanged(modifiers));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events: held.chain(events).collect(),
+                ..Default::default()
+            },
+            |ui| {
+                handle(app, ui.ctx());
+                app.announcer.show(ui.ctx(), true);
+            },
+        );
+        output.textures_delta.clear();
+        let spoken = app.announcer.spoken().concat();
+        (std::mem::take(&mut app.actions), spoken)
+    }
+
+    /// Shift+Delete, as egui reports it outside Windows.
+    fn shift_delete() -> egui::Event {
+        egui::Event::Key {
+            key: Key::Delete,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::SHIFT,
+        }
+    }
+
+    /// The focused list's current message made ours, sent now.
+    fn own_recent(app: &mut App, chat: &str) {
+        let conversation = app.conversations.get_mut(chat).unwrap();
+        let message = conversation
+            .messages
+            .iter_mut()
+            .find(|message| message.id == "two")
+            .unwrap();
+        message.from_me = true;
+        message.timestamp = crate::util::now();
+    }
+
+    /// Shift+Delete on our own recent message opens the confirmation that
+    /// the menu's "Delete for everyone" opens, and deletes nothing itself.
+    /// On Windows egui reports the press as Cut alone, with Shift held;
+    /// Ctrl+X, also Cut, deletes nothing.
+    #[test]
+    fn shift_delete_asks_to_delete_the_message_for_everyone() {
+        let (_root, mut app, chat, ctx) = focused_list();
+        own_recent(&mut app, &chat);
+        let everyone = crate::ui::conversation::delete_for_everyone_action(&chat, "two");
+        let (actions, spoken) = in_list_with(
+            &mut app,
+            &ctx,
+            &chat,
+            Modifiers::SHIFT,
+            vec![shift_delete()],
+        );
+        assert_eq!(actions, std::slice::from_ref(&everyone));
+        assert_eq!(spoken, "");
+        assert!(
+            app.dialog.is_none(),
+            "the dialog opens from the action, not before"
+        );
+        let (actions, _) = in_list_with(
+            &mut app,
+            &ctx,
+            &chat,
+            Modifiers::SHIFT,
+            vec![egui::Event::Cut],
+        );
+        if cfg!(target_os = "windows") {
+            assert_eq!(actions, [everyone]);
+        } else {
+            assert_eq!(actions, []);
+        }
+        let (actions, _) = in_list_with(
+            &mut app,
+            &ctx,
+            &chat,
+            Modifiers::COMMAND,
+            vec![egui::Event::Cut],
+        );
+        assert_eq!(actions, [], "Ctrl+X");
+        assert!(
+            app.conversations[&chat]
+                .message("two")
+                .is_some_and(|message| !matches!(message.content, crate::model::Content::Revoked)),
+            "nothing deleted"
+        );
+    }
+
+    /// Where the menu offers no "Delete for everyone", Shift+Delete opens
+    /// nothing and says why, as the keyboard menu names an unavailable entry.
+    #[test]
+    fn shift_delete_says_why_a_message_cannot_be_deleted_for_everyone() {
+        let (_root, mut app, chat, ctx) = focused_list();
+        let said = |app: &mut App| {
+            let (actions, spoken) =
+                in_list_with(app, &ctx, &chat, Modifiers::SHIFT, vec![shift_delete()]);
+            assert_eq!(actions, []);
+            spoken
+        };
+        assert_eq!(
+            said(&mut app),
+            "Delete for everyone, unavailable: Only messages you sent"
+        );
+        own_recent(&mut app, &chat);
+        let two = app.conversations[&chat].message("two").unwrap().clone();
+        let mut old = two.clone();
+        old.timestamp = 1;
+        let mut deleted = two;
+        deleted.content = crate::model::Content::Revoked;
+        for (message, reason) in [
+            (old, "The time limit has passed"),
+            (deleted, "This message was deleted"),
+        ] {
+            let messages = &mut app.conversations.get_mut(&chat).unwrap().messages;
+            messages[1] = message;
+            assert_eq!(
+                said(&mut app),
+                format!("Delete for everyone, unavailable: {reason}")
+            );
+        }
+        assert!(app.dialog.is_none());
+    }
+
+    /// Shift+Delete waits during a selection and under the call screen, as
+    /// the other message keys do, and while the message field has focus it
+    /// is the field's.
+    #[test]
+    fn shift_delete_waits_as_the_other_message_keys_do() {
+        let (_root, mut app, chat, ctx) = focused_list();
+        own_recent(&mut app, &chat);
+        app.selection = Some((chat.clone(), Vec::new()));
+        let (actions, spoken) = in_list_with(
+            &mut app,
+            &ctx,
+            &chat,
+            Modifiers::SHIFT,
+            vec![shift_delete()],
+        );
+        assert_eq!((actions, spoken.as_str()), (Vec::new(), ""), "selecting");
+        app.selection = None;
+        app.call_surface_hidden = false;
+        app.call = Some(crate::calls::CallUpdate {
+            generation: 1,
+            chat: chat.clone(),
+            direction: crate::model::CallDirection::Outgoing,
+            video: false,
+            phase: crate::calls::CallPhase::Active,
+            started: Some(std::time::Instant::now()),
+            muted: false,
+            camera_on: false,
+            remote_video: false,
+            video_requested: false,
+            outcome: None,
+            peer_audio: None,
+            lost_devices: Vec::new(),
+            microphone: None,
+            speaker: None,
+            camera: None,
+            group: None,
+        });
+        let (actions, spoken) = in_list_with(
+            &mut app,
+            &ctx,
+            &chat,
+            Modifiers::SHIFT,
+            vec![shift_delete()],
+        );
+        assert_eq!((actions, spoken.as_str()), (Vec::new(), ""), "call screen");
+        app.call = None;
+        // Focus on the message field, not the list: no message is current.
+        app.actions.clear();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events: vec![
+                    egui::Event::ModifiersChanged(Modifiers::SHIFT),
+                    shift_delete(),
+                ],
+                ..Default::default()
+            },
+            |ui| {
+                ui.memory_mut(|memory| memory.request_focus(egui::Id::new("composer-text")));
+                handle(&mut app, ui.ctx());
+            },
+        );
+        output.textures_delta.clear();
+        assert_eq!(app.actions, [], "typing");
+    }
+
     /// A Mac's Delete key is Backspace: there it asks to delete the message
     /// for me, as Delete does; elsewhere Backspace is left alone.
     #[test]
     fn backspace_deletes_for_me_on_macos_only() {
-        let (_root, app, chat) = app_with(vec![("text", crate::model::Content::text("Hello"))]);
-        let key = |key: Key, modifiers: Modifiers| {
+        let (_root, mut app, chat) = app_with(vec![("text", crate::model::Content::text("Hello"))]);
+        let mut key = |key: Key, modifiers: Modifiers| {
             let ctx = egui::Context::default();
             let mut actions = Vec::new();
             let mut output = ctx.run_ui(
@@ -1287,7 +1535,7 @@ mod tests {
                     }],
                     ..Default::default()
                 },
-                |ui| actions = message_keys(&app, ui.ctx(), &chat, "text"),
+                |ui| actions = message_keys(&mut app, ui.ctx(), &chat, "text"),
             );
             output.textures_delta.clear();
             actions
